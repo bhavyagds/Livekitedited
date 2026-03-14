@@ -1,0 +1,40 @@
+# LiveKit Server Configuration
+# Production configuration with SIP support
+
+# API keys for authentication
+keys:
+  devkey: secret
+
+# Port configuration
+port: 7880
+rtc:
+  port_range_start: 50000
+  port_range_end: 60000
+  # Local Docker development: keep ICE candidates local.
+  use_external_ip: false
+
+# Room configuration - Include phone call codecs
+room:
+  enabled_codecs:
+    - mime: audio/opus
+    - mime: audio/red
+    - mime: audio/PCMU    # G.711 μ-law for phone calls
+    - mime: audio/PCMA    # G.711 A-law for phone calls
+  max_participants: 10
+  empty_timeout: 300
+  departure_timeout: 20
+
+# Logging
+logging:
+  level: info
+  pion_level: warn
+
+# Redis configuration (recommended for production)
+redis:
+  address: redis:6379
+
+# Webhook configuration for SIP events
+# webhook:
+#   urls:
+#     - http://api:8000/webhook/livekit
+#   api_key: devkey
