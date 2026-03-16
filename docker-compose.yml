@@ -1,0 +1,235 @@
+# Meallion Voice AI - Docker Compose
+# Local development environment with LiveKit
+
+services:
+  # Main FastAPI application
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: meallion-api
+    ports:
+      - "8000:8000"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+      - DEBUG=true
+      - LOG_LEVEL=INFO
+      - LIVEKIT_URL=ws://livekit:7880
+      - LIVEKIT_API_KEY=devkey
+      - LIVEKIT_API_SECRET=secret
+      # Force local browser clients to connect to the local LiveKit instance.
+      # If you need a remote URL later, set LIVEKIT_PUBLIC_URL_LOCAL explicitly.
+      - LIVEKIT_PUBLIC_URL=${LIVEKIT_PUBLIC_URL_LOCAL:-ws://localhost:7880}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID:-aTP4J5SJLQl74WTSRXKW}
+      - ELEVENLABS_MODEL=${ELEVENLABS_MODEL:-eleven_multilingual_v2}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - SHOPIFY_STORE_URL=${SHOPIFY_STORE_URL}
+      - SHOPIFY_ACCESS_TOKEN=${SHOPIFY_ACCESS_TOKEN}
+      - SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASS=${SMTP_PASS}
+      - SUPPORT_EMAIL=${SUPPORT_EMAIL:-support@meallion.com}
+      - DATABASE_URL=sqlite+aiosqlite:///./data/conversations.db
+      - POSTGRES_URL=${POSTGRES_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/meallion}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@vakmedia.co}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+      - ADMIN_JWT_SECRET=${ADMIN_JWT_SECRET:-change-me-admin-jwt-secret}
+    volumes:
+      - ./src:/app/src:ro
+      - ./livekit:/app/livekit
+      - ./data:/app/data
+    depends_on:
+      livekit:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - meallion-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Elena Voice Agent (LiveKit Worker)
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: meallion-agent
+    command: ["python", "-m", "src.agents.elena", "start"]
+    # Limit CPU to prevent crash loop from consuming all resources
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+    environment:
+      # Increase initialization timeout significantly for slow VPS
+      - LIVEKIT_AGENTS_INITIALIZE_TIMEOUT=120
+      - LIVEKIT_AGENTS_NUM_IDLE_PROCESSES=1
+      - LIVEKIT_AGENTS_LOAD_THRESHOLD=0.9
+      - LIVEKIT_URL=ws://livekit:7880
+      - LIVEKIT_PUBLIC_URL=${LIVEKIT_PUBLIC_URL_LOCAL:-ws://localhost:7880}
+      - LIVEKIT_API_KEY=devkey
+      - LIVEKIT_API_SECRET=secret
+      - AGENT_LANGUAGE=${AGENT_LANGUAGE:-}
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY:-}
+      - ELEVEN_API_KEY=${ELEVENLABS_API_KEY}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID:-aTP4J5SJLQl74WTSRXKW}
+      - ELEVENLABS_MODEL=${ELEVENLABS_MODEL:-eleven_multilingual_v2}
+      - ELEVENLABS_VOICE_STABILITY=${ELEVENLABS_VOICE_STABILITY:-0.45}
+      - ELEVENLABS_VOICE_SIMILARITY=${ELEVENLABS_VOICE_SIMILARITY:-0.80}
+      - ELEVENLABS_VOICE_SPEED=${ELEVENLABS_VOICE_SPEED:-0.60}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - SHOPIFY_STORE_URL=${SHOPIFY_STORE_URL}
+      - SHOPIFY_ACCESS_TOKEN=${SHOPIFY_ACCESS_TOKEN}
+      - CLICKUP_API_TOKEN=${CLICKUP_API_TOKEN}
+      - CLICKUP_LIST_ID=${CLICKUP_LIST_ID}
+      - POSTGRES_URL=${POSTGRES_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/meallion}
+    volumes:
+      - ./src:/app/src:ro
+    depends_on:
+      livekit:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - meallion-network
+    healthcheck:
+      test: ["CMD-SHELL", "grep -qa 'src.agents.elena' /proc/1/cmdline || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  # LiveKit Server
+  # Using 1.8.3 to avoid RED codec panic bug in 1.9.x
+  livekit:
+    image: livekit/livekit-server:v1.8.3
+    container_name: meallion-livekit
+    ports:
+      - "7880:7880"       # HTTP/WebSocket
+      - "7881:7881"       # RTC/TCP
+      - "7882:7882"       # TURN/TCP
+    command: --config /livekit.yaml --dev
+    volumes:
+      - ./livekit/livekit.yaml:/livekit.yaml:ro
+    networks:
+      - meallion-network
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:7880"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # LiveKit SIP Bridge - Connects phone calls to LiveKit
+  # Uses host networking for proper SIP/RTP NAT traversal
+  sip:
+    image: livekit/sip:latest
+    container_name: meallion-sip
+    network_mode: host
+    command: --config /sip-config.yaml
+    environment:
+      - LIVEKIT_URL=ws://127.0.0.1:7880
+      - LIVEKIT_API_KEY=devkey
+      - LIVEKIT_API_SECRET=secret
+      # Disable flood protection for debugging
+      - SIP_FLOOD_THRESHOLD=1000
+      - SIP_FLOOD_WINDOW=60
+    volumes:
+      - ./livekit/sip-config.yaml:/sip-config.yaml:ro
+    restart: unless-stopped
+
+  # Redis (for LiveKit and caching)
+  redis:
+    image: redis:7-alpine
+    container_name: meallion-redis
+    ports:
+      - "6380:6379"  # Changed host port to 6380 to avoid conflict with other Redis instance
+    volumes:
+      - redis-data:/data
+    networks:
+      - meallion-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # PostgreSQL (Admin dashboard + agent prompt/KB storage)
+  postgres:
+    image: postgres:16-alpine
+    container_name: meallion-postgres
+    environment:
+      - POSTGRES_DB=meallion
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - meallion-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d meallion"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # React Frontend
+  frontend:
+    image: node:20-alpine
+    container_name: meallion-frontend
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+    volumes:
+      - ./frontend:/app
+      - frontend-node-modules:/app/node_modules
+    depends_on:
+      - api
+    networks:
+      - meallion-network
+
+  # Admin Dashboard Frontend
+  admin:
+    image: node:20-alpine
+    container_name: meallion-admin
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=development
+    volumes:
+      - ./admin:/app
+      - admin-node-modules:/app/node_modules
+    depends_on:
+      - api
+    networks:
+      - meallion-network
+
+networks:
+  meallion-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+  postgres-data:
+  frontend-node-modules:
+  admin-node-modules:

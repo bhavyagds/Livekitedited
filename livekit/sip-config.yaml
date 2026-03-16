@@ -1,0 +1,33 @@
+# LiveKit SIP Configuration
+# Production setup with host networking
+
+# LiveKit Server Connection (localhost because host networking)
+api_key: devkey
+api_secret: secret
+ws_url: ws://127.0.0.1:7880
+
+# Redis Configuration (localhost because host networking)
+redis:
+  address: 127.0.0.1:6380  # Updated to match docker-compose port mapping
+
+# SIP Configuration
+sip_port: 5060
+sip_port_tls: 5061
+
+# Flood Protection - DISABLE to allow all inbound calls
+# The allowed_addresses on each SIP Trunk controls which IPs are accepted
+flood_protection:
+  enabled: false
+  invites_per_second: 1000
+  burst: 1000
+
+# Rate Limits - Set high to avoid rejections
+rate_limits:
+  invites_per_minute: 1000
+  invites_burst: 100
+
+# Logging (debug for troubleshooting, change to info for production)
+log_level: debug
+
+# Health check
+health_port: 8080
