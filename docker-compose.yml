@@ -95,8 +95,10 @@ services:
       - CLICKUP_API_TOKEN=${CLICKUP_API_TOKEN}
       - CLICKUP_LIST_ID=${CLICKUP_LIST_ID}
       - POSTGRES_URL=${POSTGRES_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/meallion}
+      - ROOM_LOG_DIR=/app/data/room-logs
     volumes:
       - ./src:/app/src:ro
+      - ./data:/app/data
     depends_on:
       livekit:
         condition: service_healthy

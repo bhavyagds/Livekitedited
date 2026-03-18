@@ -6,6 +6,10 @@ Main voice agent implementation using LiveKit Agents SDK (2026 version).
 import logging
 import asyncio
 import time
+import os
+import re
+import json
+from datetime import datetime
 from typing import Annotated, Optional
 
 from livekit.agents import (
@@ -206,6 +210,7 @@ class LatencyTracker:
         """Called when VAD detects user started speaking."""
         self._user_speech_start = time.perf_counter()
         logger.info("⏱️ [TIMING] User started speaking")
+        room_log("USER_SPEECH_START")
     
     def user_stopped_speaking(self):
         """Called when VAD detects user stopped speaking."""
@@ -213,15 +218,18 @@ class LatencyTracker:
         if self._user_speech_start:
             duration = (self._user_speech_end - self._user_speech_start) * 1000
             logger.info(f"⏱️ [TIMING] User speech duration: {duration:.0f}ms")
+            room_log("USER_SPEECH_END", duration_ms=round(duration))
     
     def stt_complete(self, transcript: str):
         """Called when STT returns the transcript."""
         self._stt_complete = time.perf_counter()
         self._transcript = transcript 
         print("", transcript)
+        stt_time = None
         if self._user_speech_end:
             stt_time = (self._stt_complete - self._user_speech_end) * 1000
             logger.info(f"⏱️ [TIMING] STT processing: {stt_time:.0f}ms | Transcript: '{transcript[:50]}...'")
+        room_log("STT_COMPLETE", transcript=_truncate(transcript), stt_ms=round(stt_time) if stt_time else None)
         self._llm_start = time.perf_counter()  # LLM starts right after STT
     
     def llm_first_token(self):
@@ -230,6 +238,7 @@ class LatencyTracker:
         if self._llm_start:
             ttft = (self._llm_first_token - self._llm_start) * 1000
             logger.info(f"⏱️ [TIMING] LLM time-to-first-token: {ttft:.0f}ms")
+            room_log("LLM_TTFT", ms=round(ttft))
     
     def llm_complete(self, response: str):
         """Called when LLM completes its response."""
@@ -237,6 +246,7 @@ class LatencyTracker:
         if self._llm_start:
             llm_time = (self._llm_complete - self._llm_start) * 1000
             logger.info(f"⏱️ [TIMING] LLM total time: {llm_time:.0f}ms | Response: '{response[:50]}...'")
+            room_log("LLM_COMPLETE", response=_truncate(response), ms=round(llm_time))
         self._tts_start = time.perf_counter()
     
     def tts_first_audio(self):
@@ -245,6 +255,7 @@ class LatencyTracker:
         if self._tts_start:
             tts_time = (self._tts_first_audio - self._tts_start) * 1000
             logger.info(f"⏱️ [TIMING] TTS time-to-first-audio: {tts_time:.0f}ms")
+            room_log("TTS_TTFB", ms=round(tts_time))
     
     def agent_started_speaking(self):
         """Called when agent actually starts speaking (audio plays)."""
@@ -275,6 +286,7 @@ class LatencyTracker:
             )
             
             # Warn if latency is too high
+            room_log("AGENT_SPEAKING_START", turn=self._turn_count, total_ms=round(total), breakdown=breakdown_str)
             if total > 3000:
                 logger.warning(f"⚠️ High latency detected: {total:.0f}ms")
         
@@ -285,12 +297,72 @@ class LatencyTracker:
 # Global latency tracker
 _latency_tracker = LatencyTracker()
 
-# Global reference to current session for termination
+# Global reference to current session for termination/logging
 _current_session: dict = {
     "agent": None,
     "room": None,
+    "room_name": None,
+    "job_id": None,
+    "call_id": None,
+    "room_logger": None,
     "should_end": False,
 }
+
+
+def _safe_slug(value: str) -> str:
+    """Normalize strings for filenames."""
+    if not value:
+        return "unknown"
+    slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", value).strip("_")
+    return slug or "unknown"
+
+
+def _truncate(text: str, max_len: int = 500) -> str:
+    """Keep log lines readable."""
+    if text is None:
+        return ""
+    cleaned = str(text).replace("\r", "").replace("\n", "\\n")
+    if len(cleaned) <= max_len:
+        return cleaned
+    return cleaned[:max_len] + "…"
+
+
+def _create_room_logger(room_name: str, job_id: Optional[str]) -> tuple[logging.Logger, str]:
+    """Create a per-room log file and logger."""
+    log_dir = os.getenv("ROOM_LOG_DIR", "/app/data/room-logs")
+    os.makedirs(log_dir, exist_ok=True)
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    safe_room = _safe_slug(room_name)
+    safe_job = _safe_slug(job_id or "job")
+    filename = f"room_{safe_room}_{safe_job}_{ts}.log"
+    path = os.path.join(log_dir, filename)
+
+    room_logger = logging.getLogger(f"room.{safe_room}.{safe_job}.{ts}")
+    room_logger.setLevel(logging.INFO)
+    room_logger.propagate = False
+    if not room_logger.handlers:
+        handler = logging.FileHandler(path, encoding="utf-8")
+        formatter = logging.Formatter("%(asctime)sZ | %(levelname)s | %(message)s")
+        formatter.converter = time.gmtime
+        handler.setFormatter(formatter)
+        room_logger.addHandler(handler)
+
+    return room_logger, path
+
+
+def room_log(event: str, **fields):
+    """Write a structured per-room log entry if enabled."""
+    room_logger = _current_session.get("room_logger")
+    if not room_logger:
+        return
+    payload = {
+        "event": event,
+        "room": _current_session.get("room_name"),
+        "job_id": _current_session.get("job_id"),
+        "call_id": _current_session.get("call_id"),
+    }
+    payload.update(fields)
+    room_logger.info(json.dumps(payload, ensure_ascii=False))
 
 
 def create_llm():
@@ -319,6 +391,7 @@ def create_llm():
                 # Read model from database settings, fallback to env, then default
                 groq_model = get_agent_setting("groq_model", os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"))
                 logger.info(f"⚡ Using Groq LLM: {groq_model} (ultra-fast)")
+                room_log("LLM_PROVIDER", provider="groq", model=groq_model)
                 return openai_plugin.LLM.with_groq(
                     model=groq_model,
                     temperature=0.3,  # Lower = faster, more focused responses
@@ -330,6 +403,7 @@ def create_llm():
     # Read model from database settings, fallback to config
     openai_model = get_agent_setting("openai_model", settings.openai_model)
     logger.info(f"🤖 Using OpenAI LLM: {openai_model}")
+    room_log("LLM_PROVIDER", provider="openai", model=openai_model)
     return openai.LLM(
         model=openai_model,
         temperature=0.3,  # Lower = faster, more deterministic
@@ -353,6 +427,7 @@ def create_tts():
             max_value=4.0,
         )
         logger.warning(f"Falling back to OpenAI TTS: model={model}, voice={voice}, speed={speed}")
+        room_log("TTS_PROVIDER", provider="openai", model=model, voice=voice, speed=speed)
         return openai.TTS(model=model, voice=voice, speed=speed)
 
     def elevenlabs_available() -> bool:
@@ -488,6 +563,15 @@ def create_tts():
         voice_stability,
         voice_similarity,
     )
+    room_log(
+        "TTS_PROVIDER",
+        provider="elevenlabs",
+        model=tts_model,
+        voice_id=voice_id,
+        speed=voice_speed,
+        stability=voice_stability,
+        similarity=voice_similarity,
+    )
 
     allow_advanced = _as_bool(
         get_agent_setting("elevenlabs_allow_advanced_settings", False),
@@ -532,6 +616,7 @@ def create_stt():
     # Use Deepgram if available (faster than Whisper) and explicitly selected
     if provider == "deepgram" and USE_DEEPGRAM:
         logger.info(f"Using Deepgram STT (fast) - language: {stt_lang}")
+        room_log("STT_PROVIDER", provider="deepgram", model="nova-3", language=stt_lang)
         return deepgram.STT(
             model="nova-3",
             language=stt_lang,
@@ -544,6 +629,7 @@ def create_stt():
     if provider == "deepgram" and not USE_DEEPGRAM:
         logger.warning("Deepgram requested but not available; falling back to OpenAI Whisper")
     logger.info(f"Using OpenAI Whisper STT - language: {stt_lang}")
+    room_log("STT_PROVIDER", provider="openai", model="whisper-1", language=stt_lang)
     return openai.STT(
         model="whisper-1",
         language=stt_lang,
@@ -569,6 +655,11 @@ def create_vad():
         min_speech_duration,
         min_silence_duration,
     )
+    room_log(
+        "VAD_CONFIG",
+        min_speech_duration=min_speech_duration,
+        min_silence_duration=min_silence_duration,
+    )
     return silero.VAD.load(
         min_speech_duration=min_speech_duration,
         min_silence_duration=min_silence_duration,
@@ -584,7 +675,10 @@ class ElenaFunctionContext(llm.FunctionContext):
         order_number: Annotated[str, llm.TypeInfo(description="The order number (4-5 digits)")],
     ) -> str:
         """Look up an order. Returns brief status first. Use get_order_details for more info."""
-        return await order_lookup.lookup_order(order_number)
+        room_log("TOOL_CALL", name="lookup_order", order_number=order_number)
+        result = await order_lookup.lookup_order(order_number)
+        room_log("TOOL_RESULT", name="lookup_order", result=_truncate(result))
+        return result
 
     @llm.ai_callable()
     async def get_order_details(
@@ -592,7 +686,10 @@ class ElenaFunctionContext(llm.FunctionContext):
         order_number: Annotated[str, llm.TypeInfo(description="Order number or 'last' for most recent")] = "last",
     ) -> str:
         """Get FULL order details (items, prices, address). Use after lookup_order when customer wants more info."""
-        return await order_lookup.get_order_details(order_number)
+        room_log("TOOL_CALL", name="get_order_details", order_number=order_number)
+        result = await order_lookup.get_order_details(order_number)
+        room_log("TOOL_RESULT", name="get_order_details", result=_truncate(result))
+        return result
 
     @llm.ai_callable()
     async def create_support_ticket(
@@ -603,7 +700,18 @@ class ElenaFunctionContext(llm.FunctionContext):
         issue_description: Annotated[str, llm.TypeInfo(description="Description of the issue")],
     ) -> str:
         """Create a support ticket. Collect ALL 4 fields one by one before calling this."""
-        return await support_ticket.create_support_ticket(customer_name, customer_phone, customer_email, issue_description)
+        room_log(
+            "TOOL_CALL",
+            name="create_support_ticket",
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+            customer_email=customer_email,
+        )
+        result = await support_ticket.create_support_ticket(
+            customer_name, customer_phone, customer_email, issue_description
+        )
+        room_log("TOOL_RESULT", name="create_support_ticket", result=_truncate(result))
+        return result
 
     @llm.ai_callable()
     async def validate_ticket_field(
@@ -612,7 +720,10 @@ class ElenaFunctionContext(llm.FunctionContext):
         value: Annotated[str, llm.TypeInfo(description="Value to validate")],
     ) -> str:
         """Validate a support ticket field value."""
-        return await support_ticket.validate_ticket_field(field_name, value)
+        room_log("TOOL_CALL", name="validate_ticket_field", field=field_name, value=value)
+        result = await support_ticket.validate_ticket_field(field_name, value)
+        room_log("TOOL_RESULT", name="validate_ticket_field", result=_truncate(result))
+        return result
 
     @llm.ai_callable()
     async def log_customer_query(
@@ -628,7 +739,18 @@ class ElenaFunctionContext(llm.FunctionContext):
         - The question requires human expertise
         - The issue is too complex to resolve
         """
-        return await support_ticket.log_customer_query(customer_question, customer_name, customer_phone)
+        room_log(
+            "TOOL_CALL",
+            name="log_customer_query",
+            customer_question=customer_question,
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+        )
+        result = await support_ticket.log_customer_query(
+            customer_question, customer_name, customer_phone
+        )
+        room_log("TOOL_RESULT", name="log_customer_query", result=_truncate(result))
+        return result
 
     @llm.ai_callable()
     async def search_knowledge_base(
@@ -636,12 +758,18 @@ class ElenaFunctionContext(llm.FunctionContext):
         query: Annotated[str, llm.TypeInfo(description="The question to search for")],
     ) -> str:
         """Search the knowledge base for answers to common questions."""
-        return await knowledge_base.search_knowledge_base(query)
+        room_log("TOOL_CALL", name="search_knowledge_base", query=query)
+        result = await knowledge_base.search_knowledge_base(query)
+        room_log("TOOL_RESULT", name="search_knowledge_base", result=_truncate(result))
+        return result
 
     @llm.ai_callable()
     async def get_brand_info(self) -> str:
         """Get information about the Meallion brand."""
-        return await knowledge_base.get_brand_info()
+        room_log("TOOL_CALL", name="get_brand_info")
+        result = await knowledge_base.get_brand_info()
+        room_log("TOOL_RESULT", name="get_brand_info", result=_truncate(result))
+        return result
 
     @llm.ai_callable()
     async def end_session(self) -> str:
@@ -659,6 +787,7 @@ class ElenaFunctionContext(llm.FunctionContext):
         """
         global _current_session
         logger.info("Session end requested - scheduling disconnect after goodbye")
+        room_log("SESSION_END_REQUESTED")
         
         # Schedule the disconnect with a delay to allow goodbye to be spoken
         async def delayed_end():
@@ -671,7 +800,9 @@ class ElenaFunctionContext(llm.FunctionContext):
         asyncio.create_task(delayed_end())
         
         # Return closing message based on language
-        return get_closing(get_agent_language())
+        goodbye = get_closing(get_agent_language())
+        room_log("SESSION_END_MESSAGE", text=_truncate(goodbye))
+        return goodbye
 
 
 async def create_initial_context(cache_task: asyncio.Task = None) -> llm.ChatContext:
@@ -721,6 +852,16 @@ async def entrypoint(ctx: JobContext):
         parts = ctx.room.name.split("-")
         if len(parts) >= 3:
             caller_number = parts[-1] if parts[-1].startswith("+") else None
+
+    # Create per-room log file (full lifecycle)
+    job_obj = getattr(ctx, "job", None)
+    job_id = getattr(job_obj, "id", None) or getattr(job_obj, "job_id", None)
+    room_logger, room_log_path = _create_room_logger(ctx.room.name, job_id)
+    _current_session["room_logger"] = room_logger
+    _current_session["room_name"] = ctx.room.name
+    _current_session["job_id"] = job_id
+    room_log("ROOM_START", call_type=call_type, caller_number=caller_number)
+    logger.info(f"Per-room log file: {room_log_path}")
     
     # Reset session state
     _current_session["should_end"] = False
@@ -752,10 +893,12 @@ async def entrypoint(ctx: JobContext):
     # 4. Connect to room (runs in parallel with cache fetch + context creation)
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
     logger.info(f"⏱️ Connected to room ({time.time() - startup_time:.1f}s)")
+    room_log("ROOM_CONNECTED", elapsed_s=round(time.time() - startup_time, 1))
     
     # 5. Wait for participant (user connects) - runs in parallel with cache fetch
     participant = await ctx.wait_for_participant()
     logger.info(f"⏱️ Participant connected: {participant.identity} ({time.time() - startup_time:.1f}s)")
+    room_log("PARTICIPANT_CONNECTED", identity=participant.identity, elapsed_s=round(time.time() - startup_time, 1))
     caller_identity = participant.identity
     
     # Try to get caller number from participant identity for SIP calls
@@ -781,6 +924,8 @@ async def entrypoint(ctx: JobContext):
             metadata={"source": "livekit_agent"},
         )
         logger.info(f"Call recorded in DB with ID: {db_call_id}")
+        _current_session["call_id"] = db_call_id
+        room_log("CALL_RECORDED", db_call_id=db_call_id)
     
     asyncio.create_task(record_call_async())
     
@@ -1044,7 +1189,7 @@ async def entrypoint(ctx: JobContext):
     def on_user_stopped_speaking():
         _latency_tracker.user_stopped_speaking()
         asyncio.create_task(send_state_update("thinking"))
-    
+
     async def send_user_transcript(text: str):
         """Helper to send user transcript to frontend."""
         try:
@@ -1058,10 +1203,11 @@ async def entrypoint(ctx: JobContext):
                 transcript_data.encode('utf-8'),
                 reliable=True
             )
-            logger.debug(f"📝 User transcript sent: {text[:50]}...")
+            logger.debug(f"?? User transcript sent: {text[:50]}...")
+            room_log("USER_TEXT", text=_truncate(text))
         except Exception as e:
             logger.error(f"Failed to send user transcript: {e}")
-    
+
     @agent.on("user_speech_committed")
     def on_user_speech_committed(message):
         """Send user transcript to frontend and check for abuse."""
@@ -1110,6 +1256,7 @@ async def entrypoint(ctx: JobContext):
                 asyncio.create_task(send_agent_info(text))
                 conversation_transcript.append(f"Agent: {text}")
                 logger.info(f"agent_speech_committed: {text[:50]}...")
+                room_log("AGENT_TEXT", text=_truncate(text))
         except Exception as e:
             logger.error(f"Error in agent_speech_committed: {e}")
     # Track detailed metrics from pipeline
@@ -1146,6 +1293,7 @@ async def entrypoint(ctx: JobContext):
             
             if parts:
                 logger.info(f"📊 [METRICS] {' | '.join(parts)}")
+                room_log("METRICS", details=" | ".join(parts))
             else:
                 # Log all available metrics for debugging
                 attrs = [a for a in dir(metrics) if not a.startswith('_')]
@@ -1169,6 +1317,7 @@ async def entrypoint(ctx: JobContext):
             )
             result = getattr(fn, 'result', None)
             logger.info(f"🔧 [TOOL] {name} executed" + (f" - result: {str(result)[:100]}" if result else ""))
+            room_log("TOOL_EXECUTED", name=name, result=_truncate(str(result)) if result else None)
     
     # Store references for session management
     _current_session["agent"] = agent
@@ -1192,6 +1341,8 @@ async def entrypoint(ctx: JobContext):
             full_transcript = "\n".join(conversation_transcript)
             
             logger.info(f"Handling call end: {reason}, duration={call_duration}s, transcript_lines={len(conversation_transcript)}")
+            room_log("CALL_END", reason=reason, duration_s=call_duration, transcript_lines=len(conversation_transcript))
+            room_log("FULL_TRANSCRIPT", transcript=full_transcript)
             
             # Log call completed event (for all calls)
             await log_call_event(
@@ -1223,7 +1374,6 @@ async def entrypoint(ctx: JobContext):
             
         except Exception as e:
             logger.error(f"Error handling call end: {e}")
-    
     # Handle participant disconnection
     @ctx.room.on("participant_disconnected")
     def on_participant_disconnected(participant_info):
@@ -1454,6 +1604,12 @@ def run_agent():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     run_agent()
+
+
+
+
+
+
 
 
 
