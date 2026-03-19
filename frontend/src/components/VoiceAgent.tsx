@@ -36,6 +36,7 @@ interface TimelineEntry {
   text?: string;
   items?: InfoItem[];
   timestamp: Date;
+  isInterim?: boolean;
 }
 
 const AGENT_AVATAR = '\u{1F469}\u200D\u{1F4BC}';
@@ -111,13 +112,33 @@ export function VoiceAgent({ onDisconnect }: VoiceAgentProps) {
         
         // Handle chat transcripts (user + agent)
         if (message.type === 'transcript' && (message.speaker === 'user' || message.speaker === 'agent')) {
-          const entry: TimelineEntry = {
-            id: `${message.speaker}-${Date.now()}-${Math.random()}`,
-            kind: message.speaker,
-            text: message.text,
-            timestamp: new Date(),
-          };
-          setTimeline(prev => [...prev.slice(-19), entry]);
+          const isInterim = Boolean(message.interim);
+          const now = new Date();
+          setTimeline(prev => {
+            const next = [...prev];
+            const lastIndex = next.length - 1;
+            const last = next[lastIndex];
+
+            if (message.speaker === 'user' && last && last.kind === 'user' && last.isInterim) {
+              next[lastIndex] = {
+                ...last,
+                text: message.text,
+                timestamp: now,
+                isInterim,
+              };
+              return next;
+            }
+
+            const entry: TimelineEntry = {
+              id: `${message.speaker}-${Date.now()}-${Math.random()}`,
+              kind: message.speaker,
+              text: message.text,
+              timestamp: now,
+              isInterim,
+            };
+
+            return [...next.slice(-19), entry];
+          });
         }
         
         // Handle agent info cards (key information only)

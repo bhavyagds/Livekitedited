@@ -31,6 +31,7 @@ except ImportError:
     USE_DEEPGRAM = False
 
 from src.config import settings
+from src.agents.energy_vad import EnergyVAD
 from src.agents.prompts import (
     get_system_prompt, get_system_prompt_async, get_greeting, get_closing, get_stt_language,
     get_agent_language, get_agent_setting
@@ -639,30 +640,91 @@ def create_stt():
 def create_vad():
     """Create Voice Activity Detection tuned for better transcript completeness."""
     min_speech_duration = _as_float(
-        get_agent_setting("vad_min_speech_duration", 0.2),
-        0.2,
+        get_agent_setting("vad_min_speech_duration", 0.15),
+        0.15,
         min_value=0.1,
         max_value=0.8,
     )
     min_silence_duration = _as_float(
-        get_agent_setting("vad_min_silence_duration", 0.55),
-        0.55,
+        get_agent_setting("vad_min_silence_duration", 0.45),
+        0.45,
         min_value=0.2,
         max_value=1.5,
     )
+
+    vad_backend = str(get_agent_setting("vad_backend", "silero") or "").strip().lower()
+    if vad_backend in {"energy", "rms", "simple"}:
+        energy_threshold = _as_float(
+            get_agent_setting("energy_vad_threshold", 0.012),
+            0.012,
+            min_value=0.001,
+            max_value=0.2,
+        )
+        prefix_padding = _as_float(
+            get_agent_setting("energy_vad_prefix_padding", 0.15),
+            0.15,
+            min_value=0.0,
+            max_value=0.8,
+        )
+        logger.info(
+            "VAD backend: energy threshold=%.4f min_speech_duration=%.2fs min_silence_duration=%.2fs prefix_padding=%.2fs",
+            energy_threshold,
+            min_speech_duration,
+            min_silence_duration,
+            prefix_padding,
+        )
+        room_log(
+            "VAD_CONFIG",
+            backend="energy",
+            threshold=energy_threshold,
+            min_speech_duration=min_speech_duration,
+            min_silence_duration=min_silence_duration,
+            prefix_padding=prefix_padding,
+        )
+        return EnergyVAD(
+            threshold=energy_threshold,
+            min_speech_duration=min_speech_duration,
+            min_silence_duration=min_silence_duration,
+            prefix_padding_duration=prefix_padding,
+        )
+
+    vad_sample_rate = _as_int(
+        get_agent_setting("vad_sample_rate", 8000),
+        8000,
+        min_value=8000,
+        max_value=16000,
+    )
+    vad_activation_threshold = _as_float(
+        get_agent_setting("vad_activation_threshold", 0.6),
+        0.6,
+        min_value=0.1,
+        max_value=0.9,
+    )
+    vad_force_cpu = _as_bool(
+        get_agent_setting("vad_force_cpu", True),
+        default=True,
+    )
     logger.info(
-        "VAD config: min_speech_duration=%.2fs min_silence_duration=%.2fs",
+        "VAD config: sample_rate=%sHz activation_threshold=%.2f min_speech_duration=%.2fs min_silence_duration=%.2fs",
+        vad_sample_rate,
+        vad_activation_threshold,
         min_speech_duration,
         min_silence_duration,
     )
     room_log(
         "VAD_CONFIG",
+        backend="silero",
+        sample_rate=vad_sample_rate,
+        activation_threshold=vad_activation_threshold,
         min_speech_duration=min_speech_duration,
         min_silence_duration=min_silence_duration,
     )
     return silero.VAD.load(
         min_speech_duration=min_speech_duration,
         min_silence_duration=min_silence_duration,
+        activation_threshold=vad_activation_threshold,
+        sample_rate=vad_sample_rate,
+        force_cpu=vad_force_cpu,
     )
 
 
@@ -888,7 +950,6 @@ async def entrypoint(ctx: JobContext):
         caller_number=caller_number,
         metadata={"source": "livekit_agent"},
     ))
-    asyncio.create_task(order_lookup.prefetch_orders())
     
     # 4. Connect to room (runs in parallel with cache fetch + context creation)
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
@@ -938,6 +999,9 @@ async def entrypoint(ctx: JobContext):
     # Track sent payloads to avoid duplicate UI updates.
     _sent_agent_transcripts = set()
     _sent_agent_info_payloads = set()
+    _last_user_interim = ""
+    _last_user_interim_sent_at = 0.0
+    _last_user_final = ""
     
     # Initialize abuse tracker for this session
     from src.utils.abuse_handler import AbuseTracker, check_and_respond_to_abuse
@@ -1123,14 +1187,14 @@ async def entrypoint(ctx: JobContext):
     
     # Create the voice pipeline agent - tuned to avoid clipping user speech.
     min_endpointing_delay = _as_float(
-        get_agent_setting("min_endpointing_delay", 0.45),
-        0.45,
+        get_agent_setting("min_endpointing_delay", 0.40),
+        0.40,
         min_value=0.2,
         max_value=1.5,
     )
     interrupt_min_words = _as_int(
-        get_agent_setting("interrupt_min_words", 4),
-        4,
+        get_agent_setting("interrupt_min_words", 3),
+        3,
         min_value=1,
         max_value=10,
     )
@@ -1176,9 +1240,31 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.error(f"Failed to send state update: {e}")
     
+    thinking_task: Optional[asyncio.Task] = None
+
+    def cancel_thinking_task():
+        nonlocal thinking_task
+        if thinking_task and not thinking_task.done():
+            thinking_task.cancel()
+        thinking_task = None
+
+    def schedule_thinking_state(delay_s: float = 0.35):
+        nonlocal thinking_task
+        cancel_thinking_task()
+
+        async def _set_thinking():
+            try:
+                await asyncio.sleep(delay_s)
+                await send_state_update("thinking")
+            except asyncio.CancelledError:
+                return
+
+        thinking_task = asyncio.create_task(_set_thinking())
+
     @agent.on("user_started_speaking")
     def on_user_started_speaking():
         _latency_tracker.user_started_speaking()
+        cancel_thinking_task()
         asyncio.create_task(send_state_update("listening"))
         # Immediately stop silence detection when user starts talking
         # This prevents "are you there?" from interrupting the user mid-speech
@@ -1188,23 +1274,45 @@ async def entrypoint(ctx: JobContext):
     @agent.on("user_stopped_speaking")
     def on_user_stopped_speaking():
         _latency_tracker.user_stopped_speaking()
-        asyncio.create_task(send_state_update("thinking"))
+        schedule_thinking_state()
 
-    async def send_user_transcript(text: str):
+    async def send_user_transcript(text: str, *, interim: bool = False):
         """Helper to send user transcript to frontend."""
         try:
+            cleaned = (text or "").strip()
+            if not cleaned:
+                return
+
+            nonlocal _last_user_interim, _last_user_interim_sent_at, _last_user_final
+            now = time.monotonic()
+
+            if interim:
+                # Throttle interim updates to avoid flooding the UI.
+                if cleaned == _last_user_interim and (now - _last_user_interim_sent_at) < 0.35:
+                    return
+                _last_user_interim = cleaned
+                _last_user_interim_sent_at = now
+            else:
+                # Avoid duplicate finals, but always override interim if present.
+                if cleaned == _last_user_final and cleaned != _last_user_interim:
+                    return
+                _last_user_final = cleaned
+                _last_user_interim = ""
+
             import json
             transcript_data = json.dumps({
                 "type": "transcript",
                 "speaker": "user",
-                "text": text
+                "text": cleaned,
+                "interim": interim,
             })
             await ctx.room.local_participant.publish_data(
                 transcript_data.encode('utf-8'),
                 reliable=True
             )
-            logger.debug(f"?? User transcript sent: {text[:50]}...")
-            room_log("USER_TEXT", text=_truncate(text))
+            logger.debug(f"?? User transcript sent: {cleaned[:50]}...")
+            if not interim:
+                room_log("USER_TEXT", text=_truncate(cleaned))
         except Exception as e:
             logger.error(f"Failed to send user transcript: {e}")
 
@@ -1237,6 +1345,7 @@ async def entrypoint(ctx: JobContext):
     @agent.on("agent_started_speaking")
     def on_agent_started_speaking():
         _latency_tracker.agent_started_speaking()
+        cancel_thinking_task()
         logger.info("audio_publish_start: agent_started_speaking")
         asyncio.create_task(send_state_update("speaking"))
     
@@ -1403,6 +1512,19 @@ async def entrypoint(ctx: JobContext):
     
     agent.start(ctx.room, participant)
     logger.info(f"⏱️ Agent started ({time.time() - startup_time:.1f}s)")
+
+    # Stream interim user transcripts to the UI for realtime feel.
+    human_input = getattr(agent, "_human_input", None)
+    if human_input:
+        @human_input.on("interim_transcript")
+        def on_interim_transcript(ev):
+            try:
+                text = ev.alternatives[0].text
+            except Exception:
+                text = None
+            if text:
+                cancel_thinking_task()
+                asyncio.create_task(send_user_transcript(text, interim=True))
     
     # Start background audio if enabled (runs completely independently)
     bg_audio_player = None
@@ -1420,10 +1542,6 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.debug(f"Background audio not available: {e}")
     
-    # Run background audio in a shielded task so it's not affected by other operations
-    bg_audio_task = asyncio.create_task(start_background_audio())
-    bg_audio_task.set_name("bg_audio_init")
-    
     # Get greeting based on configured language
     agent_lang = get_agent_language()
     greeting = get_greeting(agent_lang)
@@ -1435,6 +1553,13 @@ async def entrypoint(ctx: JobContext):
     
     # Reset silence timer after greeting
     mark_agent_speaking()
+
+    # Start background audio after the greeting to avoid delaying first response.
+    bg_audio_task = asyncio.create_task(start_background_audio())
+    bg_audio_task.set_name("bg_audio_init")
+
+    # Defer order prefetch until after greeting to reduce initial latency.
+    asyncio.create_task(order_lookup.prefetch_orders())
     
     # =========================================================================
     # SILENCE MONITORING - Prompt user if no response
