@@ -341,11 +341,19 @@ def get_background_audio_config() -> BackgroundAudioConfig:
     """Get background audio config from database settings."""
     try:
         from src.agents.prompts import get_agent_setting
-        
+
+        enabled = get_agent_setting("bg_audio_enabled")
+        url = get_agent_setting("bg_audio_url")
+        volume = get_agent_setting("bg_audio_volume")
+
+        if enabled is None or url is None or volume is None:
+            logger.warning("Background audio settings missing; background audio disabled")
+            return BackgroundAudioConfig()
+
         return BackgroundAudioConfig(
-            enabled=get_agent_setting("bg_audio_enabled", False),
-            url=get_agent_setting("bg_audio_url", ""),
-            volume=get_agent_setting("bg_audio_volume", 0.1),
+            enabled=bool(enabled),
+            url=str(url),
+            volume=float(volume),
         )
     except Exception as e:
         logger.warning(f"Could not load background audio config: {e}")

@@ -20,6 +20,7 @@ _cache = {
     "last_fetch": 0,
     "ttl": 10,  # Refresh frequently so admin changes apply quickly across containers
 }
+_defaults_initialized = False
 
 
 def _get_response_language_instruction(language: str) -> str:
@@ -64,6 +65,14 @@ async def _fetch_from_db(force: bool = False):
     try:
         from src.services.database import get_database_service
         db = get_database_service()  # Use singleton for connection pooling
+
+        global _defaults_initialized
+        if not _defaults_initialized:
+            try:
+                await db.init_default_settings()
+                _defaults_initialized = True
+            except Exception as e:
+                logger.warning(f"Default settings init failed: {e}")
         
         # Run ALL database queries in PARALLEL for faster startup
         kb_task = asyncio.create_task(db.get_all_kb_content())
@@ -205,7 +214,7 @@ async def get_prompts_content_async(language: str = "el") -> Optional[str]:
 
 
 def get_agent_language() -> str:
-    """Get the agent language from database settings, with env fallback."""
+    """Get the agent language from database settings."""
     _sync_fetch_from_db()
     
     # Try database first
@@ -213,12 +222,8 @@ def get_agent_language() -> str:
     if db_lang:
         logger.debug(f"Using agent_language from database: {db_lang}")
         return db_lang
-    
-    # Fallback to environment variable
-    import os
-    env_lang = os.getenv("AGENT_LANGUAGE", "en")
-    logger.info(f"Using AGENT_LANGUAGE from env: {env_lang}")
-    return env_lang
+
+    raise RuntimeError("Missing required setting: agent_language")
 
 
 def get_agent_setting(key: str, default: any = None) -> any:

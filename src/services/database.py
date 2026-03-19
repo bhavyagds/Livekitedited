@@ -933,11 +933,25 @@ class DatabaseService:
     async def init_default_settings(self) -> None:
         """Initialize default system settings if not present."""
         defaults = {
+            # Core agent behavior (Settings page)
             "agent_language": {"value": "el", "description": "Default agent language (el/en)"},
-            "agent_voice_id": {"value": "aTP4J5SJLQl74WTSRXKW", "description": "ElevenLabs voice ID"},
             "agent_voice_speed": {"value": 0.6, "description": "Voice speed multiplier"},
+            "agent_voice_stability": {"value": 0.45, "description": "Voice stability (0-1)"},
             "agent_greeting_enabled": {"value": True, "description": "Enable greeting on call start"},
             "abuse_detection_enabled": {"value": True, "description": "Enable abuse detection"},
+
+            # Background audio (Settings page)
+            "bg_audio_enabled": {"value": False, "description": "Enable background audio"},
+            "bg_audio_url": {"value": "", "description": "Background audio URL"},
+            "bg_audio_volume": {"value": 0.1, "description": "Background audio volume (0-1)"},
+
+            # LLM configuration (Settings page)
+            "llm_provider": {"value": "openai", "description": "LLM provider (openai/groq)"},
+            "openai_model": {"value": "gpt-4o-mini", "description": "OpenAI model"},
+            "groq_model": {"value": "llama-3.3-70b-versatile", "description": "Groq model"},
+
+            # Other core defaults used by the agent
+            "agent_voice_id": {"value": "aTP4J5SJLQl74WTSRXKW", "description": "ElevenLabs voice ID"},
         }
         
         for key, data in defaults.items():

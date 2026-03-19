@@ -92,6 +92,42 @@ def _as_int(
     return result
 
 
+def _require_setting(key: str, *, allow_empty: bool = False):
+    """Fetch a required setting from DB. Raises if missing or empty."""
+    value = get_agent_setting(key)
+    if value is None:
+        raise RuntimeError(f"Missing required setting: {key}")
+    if isinstance(value, str) and not value.strip() and not allow_empty:
+        raise RuntimeError(f"Missing required setting: {key}")
+    return value
+
+
+def _require_float_setting(
+    key: str,
+    *,
+    min_value: Optional[float] = None,
+    max_value: Optional[float] = None,
+) -> float:
+    """Fetch a required float setting from DB, with validation."""
+    raw = _require_setting(key)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise RuntimeError(f"Invalid numeric setting: {key}")
+
+    if min_value is not None:
+        value = max(min_value, value)
+    if max_value is not None:
+        value = min(max_value, value)
+    return value
+
+
+def _require_bool_setting(key: str) -> bool:
+    """Fetch a required boolean setting from DB, with coercion."""
+    raw = _require_setting(key)
+    return _as_bool(raw, default=False)
+
+
 # =============================================================================
 # CALL EVENT LOGGING
 # =============================================================================
@@ -378,8 +414,8 @@ def create_llm():
     """
     import os
     
-    # Read provider from database settings, fallback to env, then default to openai
-    provider = get_agent_setting("llm_provider", os.getenv("LLM_PROVIDER", "openai")).lower()
+    # Read provider from database settings only (admin-controlled)
+    provider = str(_require_setting("llm_provider")).strip().lower()
     
     if provider == "groq":
         # Groq is 10x faster than OpenAI - near instant responses
@@ -389,8 +425,8 @@ def create_llm():
         else:
             try:
                 from livekit.plugins import openai as openai_plugin
-                # Read model from database settings, fallback to env, then default
-                groq_model = get_agent_setting("groq_model", os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"))
+                # Read model from database settings (admin-controlled)
+                groq_model = str(_require_setting("groq_model")).strip()
                 logger.info(f"⚡ Using Groq LLM: {groq_model} (ultra-fast)")
                 room_log("LLM_PROVIDER", provider="groq", model=groq_model)
                 return openai_plugin.LLM.with_groq(
@@ -401,8 +437,8 @@ def create_llm():
                 logger.warning(f"Groq init failed, falling back to OpenAI: {e}")
     
     # Default: OpenAI
-    # Read model from database settings, fallback to config
-    openai_model = get_agent_setting("openai_model", settings.openai_model)
+    # Read model from database settings (admin-controlled)
+    openai_model = str(_require_setting("openai_model")).strip()
     logger.info(f"🤖 Using OpenAI LLM: {openai_model}")
     room_log("LLM_PROVIDER", provider="openai", model=openai_model)
     return openai.LLM(
@@ -538,15 +574,13 @@ def create_tts():
             logger.warning("No valid ElevenLabs voice_id available. Falling back to OpenAI TTS.")
             return create_openai_tts()
 
-    voice_speed = _as_float(
-        get_agent_setting("agent_voice_speed", settings.elevenlabs_voice_speed),
-        settings.elevenlabs_voice_speed,
+    voice_speed = _require_float_setting(
+        "agent_voice_speed",
         min_value=0.5,
         max_value=1.2,
     )
-    voice_stability = _as_float(
-        get_agent_setting("agent_voice_stability", settings.elevenlabs_voice_stability),
-        settings.elevenlabs_voice_stability,
+    voice_stability = _require_float_setting(
+        "agent_voice_stability",
         min_value=0.0,
         max_value=1.0,
     )
@@ -1003,9 +1037,17 @@ async def entrypoint(ctx: JobContext):
     _last_user_interim_sent_at = 0.0
     _last_user_final = ""
     
+    # Ensure settings cache is ready before requiring DB-backed settings.
+    if cache_task is not None:
+        try:
+            await cache_task
+        except Exception as e:
+            logger.warning(f"Cache task exception (settings): {e}")
+
     # Initialize abuse tracker for this session
     from src.utils.abuse_handler import AbuseTracker, check_and_respond_to_abuse
     _abuse_tracker = AbuseTracker()
+    abuse_detection_enabled = _require_bool_setting("abuse_detection_enabled")
     
     # =========================================================================
     # SILENCE DETECTION - Prompt user if no response (2 prompts then disconnect)
@@ -1327,20 +1369,20 @@ async def entrypoint(ctx: JobContext):
         
         # Add to transcript
         conversation_transcript.append(f"User: {user_text}")
-        
-        # Check for abusive language
-        abuse_detected, abuse_response = check_and_respond_to_abuse(
-            user_text, 
-            language=get_agent_language(),
-            tracker=_abuse_tracker,
-            use_ssml=True
-        )
-        
-        if abuse_detected:
-            logger.warning(f"⚠️ Abuse detected in: {user_text[:50]}...")
-            # The agent will continue normally, but we log the incident
-            # The abuse response will be handled by the LLM with special instructions
-            # For now, we just track it for escalation purposes
+        if abuse_detection_enabled:
+            # Check for abusive language
+            abuse_detected, abuse_response = check_and_respond_to_abuse(
+                user_text,
+                language=get_agent_language(),
+                tracker=_abuse_tracker,
+                use_ssml=True
+            )
+            
+            if abuse_detected:
+                logger.warning(f"?????? Abuse detected in: {user_text[:50]}...")
+                # The agent will continue normally, but we log the incident
+                # The abuse response will be handled by the LLM with special instructions
+                # For now, we just track it for escalation purposes
     
     @agent.on("agent_started_speaking")
     def on_agent_started_speaking():
@@ -1544,14 +1586,18 @@ async def entrypoint(ctx: JobContext):
     
     # Get greeting based on configured language
     agent_lang = get_agent_language()
-    greeting = get_greeting(agent_lang)
-    logger.info(f"⏱️ Saying greeting ({time.time() - startup_time:.1f}s): {greeting[:50]}...")
-    await agent.say(greeting, allow_interruptions=True)
+    greeting_enabled = _require_bool_setting("agent_greeting_enabled")
+    if greeting_enabled:
+        greeting = get_greeting(agent_lang)
+        logger.info(f"⏱️ Saying greeting ({time.time() - startup_time:.1f}s): {greeting[:50]}...")
+        await agent.say(greeting, allow_interruptions=True)
+    else:
+        logger.info("Greeting disabled by settings")
     
     total_startup = time.time() - startup_time
-    logger.info(f"✅ Elena ready! Total startup: {total_startup:.1f}s, language: {agent_lang}, greeting: {greeting[:50]}...")
+    logger.info(f"✅ Elena ready! Total startup: {total_startup:.1f}s, language: {agent_lang}")
     
-    # Reset silence timer after greeting
+    # Reset silence timer after greeting (or initial ready state if greeting disabled)
     mark_agent_speaking()
 
     # Start background audio after the greeting to avoid delaying first response.
