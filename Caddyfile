@@ -1,0 +1,58 @@
+﻿# Meallion Voice AI - Production Caddyfile
+# Domain: callcenter.vakmedia.co
+#
+# DNS A records needed (all -> 95.216.218.51):
+#   callcenter.vakmedia.co
+#   api.callcenter.vakmedia.co
+#   admin.callcenter.vakmedia.co
+#   agent.callcenter.vakmedia.co
+
+# API Backend
+api.callcenter.vakmedia.co {
+    reverse_proxy api:8000
+    encode gzip
+}
+
+# LiveKit WebSocket
+agent.callcenter.vakmedia.co {
+    reverse_proxy livekit:7880
+    encode gzip
+}
+
+# Admin Dashboard
+admin.vakmedia.co, admin.callcenter.vakmedia.co {
+    encode gzip
+    handle /api/* {
+        reverse_proxy api:8000
+    }
+    handle {
+        root * /srv/admin
+        try_files {path} /index.html
+        file_server
+    }
+}
+
+# Main Frontend
+callcenter.vakmedia.co {
+    encode gzip
+    handle /api/* {
+        reverse_proxy api:8000
+    }
+    handle {
+        root * /srv/frontend
+        try_files {path} /index.html
+        file_server
+    }
+}
+
+app.vakmedia.co {
+    encode gzip
+    handle /api/* {
+        reverse_proxy api:8000
+    }
+    handle {
+        root * /srv/frontend
+        try_files {path} /index.html
+        file_server
+    }
+}

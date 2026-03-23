@@ -1,0 +1,33 @@
+# LiveKit Server Configuration - Production
+# Used by docker-compose.prod.yml
+
+# Production API key — must match LIVEKIT_API_KEY / LIVEKIT_API_SECRET in .env
+keys:
+  meallion-livekit: a2791c552f996723181b1c5d756aea0697f2ef57b202170e80840bf6adabc1a6
+
+# Port configuration
+port: 7880
+rtc:
+  port_range_start: 50000
+  port_range_end: 50200
+  use_external_ip: true # IMPORTANT: set true on VPS so LiveKit auto-detects Hetzner public IP
+  tcp_port: 7881
+
+# Room configuration - include phone call codecs
+room:
+  enabled_codecs:
+    - mime: audio/opus
+    - mime: audio/PCMU # G.711 μ-law for phone calls
+    - mime: audio/PCMA # G.711 A-law for phone calls
+  max_participants: 10
+  empty_timeout: 300
+  departure_timeout: 20
+
+# Logging (use 'info' for production)
+logging:
+  level: info
+  pion_level: warn
+
+# Redis configuration
+redis:
+  address: redis:6379

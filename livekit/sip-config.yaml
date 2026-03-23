@@ -8,7 +8,7 @@ ws_url: ws://127.0.0.1:7880
 
 # Redis Configuration (localhost because host networking)
 redis:
-  address: 127.0.0.1:6380  # Updated to match docker-compose port mapping
+  address: 127.0.0.1:6379
 
 # SIP Configuration
 sip_port: 5060

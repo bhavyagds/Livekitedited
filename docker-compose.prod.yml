@@ -1,31 +1,50 @@
-# Meallion Voice AI - Docker Compose
-# Local development environment with LiveKit
+# Meallion Voice AI - Production Docker Compose
+# Deploy on Hetzner with Caddy for automatic SSL
 
 services:
+  # Caddy reverse proxy - handles SSL automatically (Let's Encrypt)
+  caddy:
+    image: caddy:2-alpine
+    container_name: meallion-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+      # Serve built frontend and admin static files
+      - frontend-build:/srv/frontend:ro
+      - admin-build:/srv/admin:ro
+    networks:
+      - meallion-network
+    restart: unless-stopped
+    depends_on:
+      - api
+
   # Main FastAPI application
   api:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: meallion-api
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     environment:
       - HOST=0.0.0.0
       - PORT=8000
-      - DEBUG=true
+      - DEBUG=false
       - LOG_LEVEL=INFO
       - LIVEKIT_URL=ws://livekit:7880
-      - LIVEKIT_API_KEY=devkey
-      - LIVEKIT_API_SECRET=secret
-      # Force local browser clients to connect to the local LiveKit instance.
-      # If you need a remote URL later, set LIVEKIT_PUBLIC_URL_LOCAL explicitly.
-      - LIVEKIT_PUBLIC_URL=${LIVEKIT_PUBLIC_URL_LOCAL:-ws://localhost:7880}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
+      - LIVEKIT_PUBLIC_URL=${LIVEKIT_PUBLIC_URL}
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
       - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID:-aTP4J5SJLQl74WTSRXKW}
       - ELEVENLABS_MODEL=${ELEVENLABS_MODEL:-eleven_multilingual_v2}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
       - SHOPIFY_STORE_URL=${SHOPIFY_STORE_URL}
       - SHOPIFY_ACCESS_TOKEN=${SHOPIFY_ACCESS_TOKEN}
       - SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
@@ -34,14 +53,14 @@ services:
       - SMTP_PASS=${SMTP_PASS}
       - SUPPORT_EMAIL=${SUPPORT_EMAIL:-support@meallion.com}
       - DATABASE_URL=sqlite+aiosqlite:///./data/conversations.db
-      - POSTGRES_URL=${POSTGRES_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/meallion}
-      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@vakmedia.co}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
-      - ADMIN_JWT_SECRET=${ADMIN_JWT_SECRET:-change-me-admin-jwt-secret}
+      - POSTGRES_URL=${POSTGRES_URL}
+      - ADMIN_EMAIL=${ADMIN_EMAIL}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - ADMIN_JWT_SECRET=${ADMIN_JWT_SECRET}
+      - SECRET_KEY=${SECRET_KEY}
     volumes:
-      - ./src:/app/src:ro
-      - ./livekit:/app/livekit
       - ./data:/app/data
+      - ./knowledge:/app/knowledge:ro
     depends_on:
       livekit:
         condition: service_healthy
@@ -49,12 +68,13 @@ services:
         condition: service_healthy
     networks:
       - meallion-network
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 30s
 
   # Elena Voice Agent (LiveKit Worker)
   agent:
@@ -63,21 +83,15 @@ services:
       dockerfile: Dockerfile
     container_name: meallion-agent
     command: ["python", "-m", "src.agents.elena", "start"]
-    # Limit CPU to prevent crash loop from consuming all resources
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 1G
     environment:
-      # Increase initialization timeout significantly for slow VPS
       - LIVEKIT_AGENTS_INITIALIZE_TIMEOUT=120
       - LIVEKIT_AGENTS_NUM_IDLE_PROCESSES=1
       - LIVEKIT_AGENTS_LOAD_THRESHOLD=0.9
+      - LIVEKIT_LOG_LEVEL=info
       - LIVEKIT_URL=ws://livekit:7880
-      - LIVEKIT_PUBLIC_URL=${LIVEKIT_PUBLIC_URL_LOCAL:-ws://localhost:7880}
-      - LIVEKIT_API_KEY=devkey
-      - LIVEKIT_API_SECRET=secret
+      - LIVEKIT_PUBLIC_URL=${LIVEKIT_PUBLIC_URL}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
       - AGENT_LANGUAGE=${AGENT_LANGUAGE:-}
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY:-}
       - ELEVEN_API_KEY=${ELEVENLABS_API_KEY}
@@ -90,56 +104,52 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
       - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - LLM_PROVIDER=${LLM_PROVIDER:-groq}
+      - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
       - SHOPIFY_STORE_URL=${SHOPIFY_STORE_URL}
       - SHOPIFY_ACCESS_TOKEN=${SHOPIFY_ACCESS_TOKEN}
       - CLICKUP_API_TOKEN=${CLICKUP_API_TOKEN}
       - CLICKUP_LIST_ID=${CLICKUP_LIST_ID}
-      - POSTGRES_URL=${POSTGRES_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/meallion}
-      - ROOM_LOG_DIR=/app/data/room-logs
+      - POSTGRES_URL=${POSTGRES_URL}
     volumes:
-      - ./src:/app/src:ro
-      - ./data:/app/data
+      - ./knowledge:/app/knowledge:ro
     depends_on:
       livekit:
         condition: service_healthy
-      postgres:
-        condition: service_healthy
     networks:
       - meallion-network
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "grep -qa 'src.agents.elena' /proc/1/cmdline || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 20s
-    restart: unless-stopped
-
-  # LiveKit Server
-  # Using 1.8.3 to avoid RED codec panic bug in 1.9.x
+  # LiveKit Server (v1.8.3 - avoids RED codec panic in 1.9.x)
   livekit:
     image: livekit/livekit-server:v1.8.3
     container_name: meallion-livekit
     ports:
-      - "7880:7880"       # HTTP/WebSocket
+      - "7880:7880"       # HTTP/WebSocket (internal + needed for SIP host-network)
       - "7881:7881"       # RTC/TCP
-      - "7882:7882"       # TURN/TCP
-    command: --config /livekit.yaml --dev
+      - "50000-50200:50000-50200/udp"  # RTC/UDP (subset for prod)
+    command: --config /livekit.yaml
     volumes:
-      - ./livekit/livekit.yaml:/livekit.yaml:ro
+      - ./livekit/livekit.prod.yaml:/livekit.yaml:ro
     networks:
       - meallion-network
     depends_on:
       redis:
         condition: service_healthy
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:7880"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 5s
+      start_period: 10s
 
-  # LiveKit SIP Bridge - Connects phone calls to LiveKit
-  # Uses host networking for proper SIP/RTP NAT traversal
+  # LiveKit SIP Bridge - host networking for proper SIP/RTP NAT traversal
   sip:
     image: livekit/sip:latest
     container_name: meallion-sip
@@ -147,11 +157,8 @@ services:
     command: --config /sip-config.yaml
     environment:
       - LIVEKIT_URL=ws://127.0.0.1:7880
-      - LIVEKIT_API_KEY=devkey
-      - LIVEKIT_API_SECRET=secret
-      # Disable flood protection for debugging
-      - SIP_FLOOD_THRESHOLD=1000
-      - SIP_FLOOD_WINDOW=60
+      - LIVEKIT_API_KEY=meallion-livekit
+      - LIVEKIT_API_SECRET=a2791c552f996723181b1c5d756aea0697f2ef57b202170e80840bf6adabc1a6
     volumes:
       - ./livekit/sip-config.yaml:/sip-config.yaml:ro
     restart: unless-stopped
@@ -161,70 +168,68 @@ services:
     image: redis:7-alpine
     container_name: meallion-redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"  # Expose only on localhost for SIP (host networking)
     volumes:
       - redis-data:/data
     networks:
       - meallion-network
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # PostgreSQL (Admin dashboard + agent prompt/KB storage)
+  # PostgreSQL Database
   postgres:
-    image: postgres:16-alpine
+    image: postgres:15-alpine
     container_name: meallion-postgres
+    expose:
+      - "5432"
     environment:
-      - POSTGRES_DB=meallion
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB:-meallion}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
       - meallion-network
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d meallion"]
-      interval: 10s
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-meallion}"]
+      interval: 5s
       timeout: 5s
       retries: 5
 
-  # React Frontend
-  frontend:
+  # Frontend builder (builds React app, then Caddy serves static files)
+  frontend-builder:
     image: node:20-alpine
-    container_name: meallion-frontend
+    container_name: meallion-frontend-builder
     working_dir: /app
-    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
-    ports:
-      - "3000:3000"
+    command: sh -c "npm ci --include=dev && npx vite build && cp -r dist/* /output/"
     environment:
-      - NODE_ENV=development
+      - NODE_ENV=production
+      - VITE_API_URL=${VITE_API_URL}
     volumes:
       - ./frontend:/app
-      - frontend-node-modules:/app/node_modules
-    depends_on:
-      - api
-    networks:
-      - meallion-network
+      - frontend-build:/output
+    profiles:
+      - build
 
-  # Admin Dashboard Frontend
-  admin:
+  # Admin builder
+  admin-builder:
     image: node:20-alpine
-    container_name: meallion-admin
+    container_name: meallion-admin-builder
     working_dir: /app
-    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
-    ports:
-      - "3001:3001"
+    command: sh -c "npm ci --include=dev && npx vite build && cp -r dist/* /output/"
     environment:
-      - NODE_ENV=development
+      - NODE_ENV=production
+      - VITE_API_URL=${VITE_API_URL}
     volumes:
       - ./admin:/app
-      - admin-node-modules:/app/node_modules
-    depends_on:
-      - api
-    networks:
-      - meallion-network
+      - admin-build:/output
+    profiles:
+      - build
 
 networks:
   meallion-network:
@@ -233,5 +238,7 @@ networks:
 volumes:
   redis-data:
   postgres-data:
-  frontend-node-modules:
-  admin-node-modules:
+  caddy-data:
+  caddy-config:
+  frontend-build:
+  admin-build:
