@@ -1,0 +1,140 @@
+{
+  "brand": {
+    "name": "Meallion",
+    "pronunciation": "Million",
+    "founder": "Chef Lambros Vakiaros",
+    "description": "Premium Greek ready-to-eat meal service with chef-designed recipes.",
+    "one_liner": {
+      "en": "High-quality Greek ready meals, designed by Chef Lambros Vakiaros, to help you eat well consistently.",
+      "el": "Έτοιμα γεύματα υψηλής ποιότητας από τον σεφ Λάμπρο Βακιάρο, για να τρως σωστά χωρίς κόπο."
+    },
+    "customer_one_liner": {
+      "en": "Real food, cooked properly, that makes it easy to eat well every day.",
+      "el": "Πραγματικό φαγητό, σωστά μαγειρεμένο, που σε βοηθά να τρως καλά κάθε μέρα."
+    }
+  },
+  "about": {
+    "what_is_meallion": {
+      "en": "Meallion is a premium Greek ready-meal service created by Chef Lambros Vakiaros. You choose your meals online and receive them ready to heat and enjoy at home.",
+      "el": "Το Meallion είναι υπηρεσία έτοιμων γευμάτων υψηλής ποιότητας από τον σεφ Λάμπρο Βακιάρο. Επιλέγεις τα γεύματά σου online και τα παραλαμβάνεις έτοιμα για ζέσταμα στο σπίτι."
+    },
+    "promise": {
+      "en": "Consistent, chef-level meals that fit into a busy schedule without compromising on taste or quality.",
+      "el": "Σταθερά, γευστικά γεύματα επιπέδου σεφ, που χωράνε στο καθημερινό σου πρόγραμμα χωρίς να θυσιάζεις ποιότητα."
+    },
+    "target_audience": {
+      "en": "Busy people who want to eat well every day without cooking, meal-prepping, or relying on random delivery.",
+      "el": "Άτομα με περιορισμένο χρόνο που θέλουν να τρώνε σωστά κάθε μέρα χωρίς μαγείρεμα, meal-prep ή τυχαίες παραγγελίες delivery."
+    },
+    "founders": {
+      "chef": {
+        "name": "Lambros Vakiaros",
+        "role": "Chef and MasterChef Greece winner"
+      },
+      "partner": {
+        "name": "Theodoros Papaloukas",
+        "role": "Business partner"
+      }
+    }
+  },
+  "meal_categories": {
+    "protein_boost": {
+      "name": "Protein Boost",
+      "description": {
+        "en": "High-protein meals designed to support training and active lifestyles.",
+        "el": "Γεύματα υψηλής πρωτεΐνης, ιδανικά για προπόνηση και πιο ενεργό τρόπο ζωής."
+      }
+    },
+    "full_taste_less_guilt": {
+      "name": "Full Taste, Less Guilt",
+      "description": {
+        "en": "Comfort-style dishes with better balance, so you enjoy the taste without feeling heavy.",
+        "el": "Comfort πιάτα με καλύτερη ισορροπία, για να απολαμβάνεις τη γεύση χωρίς να νιώθεις βαρύς."
+      }
+    },
+    "signature": {
+      "name": "Signature",
+      "description": {
+        "en": "Chef-style, more special recipes that feel closer to a restaurant dish.",
+        "el": "Πιο ιδιαίτερες, «σεφ» συνταγές που θυμίζουν πιάτα εστιατορίου."
+      }
+    },
+    "plant_based_veggie": {
+      "name": "Plant-Based & Veggie",
+      "description": {
+        "en": "Vegetarian and plant-based options for people who want less meat without losing taste.",
+        "el": "Χορτοφαγικές και plant-based επιλογές για όσους θέλουν λιγότερο κρέας χωρίς να χάνουν σε γεύση."
+      }
+    }
+  },
+  "product_info": {
+    "heating_instructions": {
+      "microwave": {
+        "en": "Remove or pierce the film and heat in the microwave at 700–800W for about 3–4 minutes. Always check the label on the meal for exact time.",
+        "el": "Αφαιρείς ή τρυπάς το κάλυμμα και ζεσταίνεις στο φούρνο μικροκυμάτων στα 700–800W για περίπου 3–4 λεπτά. Πάντα ελέγχεις την ετικέτα στο γεύμα για τον ακριβή χρόνο."
+      },
+      "oven": {
+        "en": "Transfer to an oven-safe dish and warm in a preheated oven at about 160–180°C for 15–20 minutes.",
+        "el": "Μεταφέρεις σε πυρίμαχο σκεύος και ζεσταίνεις σε προθερμασμένο φούρνο στους 160–180°C για 15–20 λεπτά."
+      }
+    },
+    "storage": {
+      "fridge": {
+        "en": "Keep meals in the fridge at 0–4°C. Typical shelf life is a few days; always follow the date on the packaging.",
+        "el": "Κράτα τα γεύματα στο ψυγείο στους 0–4°C. Η διάρκεια ζωής είναι συνήθως μερικές ημέρες· πάντα ακολουθείς την ημερομηνία στη συσκευασία."
+      },
+      "freezing": {
+        "en": "Freezing may be possible for some meals but can affect texture. Check the packaging or ask support if you are unsure.",
+        "el": "Η κατάψυξη μπορεί να είναι δυνατή για ορισμένα γεύματα αλλά μπορεί να επηρεάσει την υφή. Έλεγξε τη συσκευασία ή ρώτησε την υποστήριξη αν δεν είσαι σίγουρος."
+      }
+    }
+  },
+  "ordering": {
+    "how_it_works": {
+      "en": "You choose your meals on the website, select delivery date and time window, and receive them ready to heat at home.",
+      "el": "Επιλέγεις τα γεύματά σου στο site, διαλέγεις ημέρα και ζώνη παράδοσης και τα παραλαμβάνεις έτοιμα για ζέσταμα στο σπίτι."
+    },
+    "minimum_order": {
+      "en": "There is a minimum number of meals per order (for example 4–5 meals). The exact minimum and offers may change over time, so always check the website.",
+      "el": "Υπάρχει ελάχιστος αριθμός γευμάτων ανά παραγγελία (π.χ. 4–5 γεύματα). Το ακριβές όριο και οι προσφορές μπορεί να αλλάζουν, οπότε πάντα έλεγξε το site."
+    },
+    "delivery_areas": {
+      "en": "Meallion mainly serves the wider Athens area. Exact delivery zones and times are shown on the website at checkout.",
+      "el": "Το Meallion εξυπηρετεί κυρίως την ευρύτερη περιοχή της Αθήνας. Οι ακριβείς ζώνες και ώρες παράδοσης φαίνονται στο site στο checkout."
+    },
+    "delivery_fee": {
+      "5_meals_or_more": "Often reduced or free delivery for larger orders (check current offer on the website).",
+      "under_5_meals": "A delivery fee may apply for smaller orders (check current pricing on the website)."
+    }
+  },
+  "allergens": {
+    "listed_allergens": [
+      "gluten",
+      "dairy",
+      "eggs",
+      "nuts",
+      "sesame"
+    ],
+    "disclaimer": "Allergens are listed on the packaging and on the website per meal. If you have a serious allergy, always double-check the label and consult your doctor."
+  },
+  "contact": {
+    "phone": "+30 211 9555 451",
+    "email": "hello@meallion.gr",
+    "instagram": "@mealliongr",
+    "support": {
+      "en": "For questions about orders, menu, or delivery, you can contact Meallion via phone, email, or Instagram DM.",
+      "el": "Για απορίες σχετικά με παραγγελίες, μενού ή παράδοση, μπορείς να επικοινωνήσεις με το Meallion μέσω τηλεφώνου, email ή Instagram DM."
+    }
+  },
+  "call_scripts": {
+    "price_objection": {
+      "en": "Compared to ordering separate delivery every day, Meallion gives you chef-designed meals with stable quality and clear pricing per portion, often at a similar or better total monthly cost.",
+      "el": "Σε σχέση με καθημερινό delivery, το Meallion σου προσφέρει γεύματα επιπέδου σεφ με σταθερή ποιότητα και ξεκάθαρη τιμή ανά μερίδα, συχνά με παρόμοιο ή καλύτερο συνολικό μηνιαίο κόστος."
+    },
+    "healthy_or_diet": {
+      "en": "Meallion is not a strict diet plan. It is real food, properly cooked with balanced portions, so you can keep a more stable routine without extreme restrictions.",
+      "el": "Το Meallion δεν είναι αυστηρή δίαιτα. Είναι πραγματικό φαγητό, σωστά μαγειρεμένο, με ισορροπημένες μερίδες ώστε να έχεις πιο σταθερή ρουτίνα χωρίς ακραίους περιορισμούς."
+    }
+  }
+}
+
