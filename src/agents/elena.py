@@ -34,9 +34,10 @@ from src.config import settings
 from src.agents.energy_vad import EnergyVAD
 from src.agents.prompts import (
     get_system_prompt, get_system_prompt_async, get_greeting, get_closing, get_stt_language,
-    get_agent_language, get_agent_setting
+    get_agent_language, get_agent_setting, set_runtime_language
 )
 from src.agents.tools import order_lookup, support_ticket, knowledge_base
+from src.utils import detect_language
 
 logger = logging.getLogger(__name__)
 
@@ -547,22 +548,33 @@ def create_tts():
         return create_openai_tts()
 
     agent_lang = get_agent_language()
+    auto_language_switch = _as_bool(get_agent_setting("auto_language_switch", False), default=False)
     
     # CRITICAL: Select the correct model based on language
     # eleven_turbo_v2 is ENGLISH ONLY - Greek requires multilingual model
     configured_model = settings.elevenlabs_model
-    if agent_lang == "el" and configured_model == "eleven_turbo_v2":
+    if auto_language_switch:
+        if configured_model not in {"eleven_multilingual_v2", "eleven_turbo_v2_5"}:
+            tts_model = "eleven_multilingual_v2"
+            logger.warning(
+                "?????? TTS: Overriding %s ??? %s for auto language switching",
+                configured_model,
+                tts_model,
+            )
+        else:
+            tts_model = configured_model
+    elif agent_lang == "el" and configured_model == "eleven_turbo_v2":
         # Override to multilingual for Greek support
         tts_model = "eleven_multilingual_v2"
-        logger.warning(f"⚠️ TTS: Overriding {configured_model} → {tts_model} for Greek support")
+        logger.warning(f"?????? TTS: Overriding {configured_model} ??? {tts_model} for Greek support")
     elif agent_lang == "el" and "turbo" in configured_model.lower() and "v2_5" not in configured_model:
         # eleven_turbo_v2 doesn't support Greek, v2.5 does
         tts_model = "eleven_turbo_v2_5"
-        logger.warning(f"⚠️ TTS: Overriding {configured_model} → {tts_model} for Greek support")
+        logger.warning(f"?????? TTS: Overriding {configured_model} ??? {tts_model} for Greek support")
     else:
         tts_model = configured_model
     
-    logger.info(f"🔊 TTS Model: {tts_model} (language: {agent_lang})")
+    logger.info(f"???? TTS Model: {tts_model} (language: {agent_lang})")
     
     voice_id = str(get_agent_setting("agent_voice_id", settings.elevenlabs_voice_id) or settings.elevenlabs_voice_id)
     if not elevenlabs_voice_exists(voice_id):
@@ -643,10 +655,23 @@ def create_stt():
     """Create the Speech-to-Text instance optimized for speed."""
     agent_lang = get_agent_language()
     stt_lang = get_stt_language(agent_lang)
+    auto_language_switch = _as_bool(get_agent_setting("auto_language_switch", False), default=False)
     
     provider = str(get_agent_setting("stt_provider", "") or "").strip().lower()
     if not provider:
         provider = "deepgram" if USE_DEEPGRAM else "openai"
+
+    if auto_language_switch:
+        if provider == "deepgram" and USE_DEEPGRAM:
+            logger.warning("Auto language switch enabled; forcing OpenAI Whisper for auto language detection.")
+        try:
+            logger.info("Using OpenAI Whisper STT - language: auto")
+            room_log("STT_PROVIDER", provider="openai", model="whisper-1", language="auto")
+            return openai.STT(
+                model="whisper-1",
+            )
+        except TypeError as e:
+            logger.warning("OpenAI STT auto language failed (%s); falling back to %s", e, stt_lang)
     
     # Use Deepgram if available (faster than Whisper) and explicitly selected
     if provider == "deepgram" and USE_DEEPGRAM:
@@ -1044,6 +1069,13 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.warning(f"Cache task exception (settings): {e}")
 
+    # Initialize runtime language (per-call) from DB defaults.
+    set_runtime_language(None)
+    base_language = get_agent_language()
+    set_runtime_language(base_language)
+    session_language = {"value": base_language}
+    auto_language_switch = _as_bool(get_agent_setting("auto_language_switch", False), default=False)
+
     # Initialize abuse tracker for this session
     from src.utils.abuse_handler import AbuseTracker, check_and_respond_to_abuse
     _abuse_tracker = AbuseTracker()
@@ -1363,6 +1395,23 @@ async def entrypoint(ctx: JobContext):
         """Send user transcript to frontend and check for abuse."""
         user_text = message.content
         asyncio.create_task(send_user_transcript(user_text))
+
+        if auto_language_switch:
+            detected_lang = detect_language(user_text, default=session_language["value"])
+            if detected_lang != session_language["value"]:
+                session_language["value"] = detected_lang
+                set_runtime_language(detected_lang)
+                lang_name = "Greek" if detected_lang == "el" else "English"
+                agent.chat_ctx.append(
+                    role="system",
+                    text=(
+                        "LANGUAGE SWITCH:\n"
+                        f"- Respond in {lang_name} for this response and until the caller switches again."
+                    ),
+                )
+                room_log("LANGUAGE_SWITCH", language=detected_lang)
+            else:
+                set_runtime_language(detected_lang)
         
         # Reset silence timer - user is responding
         reset_silence_timer()
@@ -1525,6 +1574,8 @@ async def entrypoint(ctx: JobContext):
             
         except Exception as e:
             logger.error(f"Error handling call end: {e}")
+        finally:
+            set_runtime_language(None)
     # Handle participant disconnection
     @ctx.room.on("participant_disconnected")
     def on_participant_disconnected(participant_info):
@@ -1775,7 +1826,6 @@ def run_agent():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     run_agent()
-
 
 
 

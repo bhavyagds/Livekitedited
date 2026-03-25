@@ -47,6 +47,7 @@ export default function Settings() {
   const [voiceStability, setVoiceStability] = useState(0.45)
   const [greetingEnabled, setGreetingEnabled] = useState(true)
   const [abuseDetectionEnabled, setAbuseDetectionEnabled] = useState(true)
+  const [autoLanguageSwitch, setAutoLanguageSwitch] = useState(true)
   
   // Background audio settings
   const [bgAudioEnabled, setBgAudioEnabled] = useState(false)
@@ -87,6 +88,7 @@ export default function Settings() {
       if (s.agent_voice_stability !== undefined) setVoiceStability(s.agent_voice_stability)
       if (s.agent_greeting_enabled !== undefined) setGreetingEnabled(s.agent_greeting_enabled)
       if (s.abuse_detection_enabled !== undefined) setAbuseDetectionEnabled(s.abuse_detection_enabled)
+      if (s.auto_language_switch !== undefined) setAutoLanguageSwitch(s.auto_language_switch)
       // Background audio settings
       if (s.bg_audio_enabled !== undefined) setBgAudioEnabled(s.bg_audio_enabled)
       if (s.bg_audio_url !== undefined) setBgAudioUrl(s.bg_audio_url)
@@ -183,6 +185,7 @@ export default function Settings() {
         updateSettingMutation.mutateAsync({ key: 'agent_voice_stability', value: voiceStability }),
         updateSettingMutation.mutateAsync({ key: 'agent_greeting_enabled', value: greetingEnabled }),
         updateSettingMutation.mutateAsync({ key: 'abuse_detection_enabled', value: abuseDetectionEnabled }),
+        updateSettingMutation.mutateAsync({ key: 'auto_language_switch', value: autoLanguageSwitch }),
         // Background audio settings
         updateSettingMutation.mutateAsync({ key: 'bg_audio_enabled', value: bgAudioEnabled }),
         updateSettingMutation.mutateAsync({ key: 'bg_audio_url', value: bgAudioUrl }),
@@ -800,6 +803,24 @@ export default function Settings() {
                   <span
                     className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${
                       greetingEnabled ? 'translate-x-6' : ''
+                    }`}
+                  />
+                </button>
+              </div>
+              <div className="flex items-center justify-between p-4 border rounded-lg">
+                <div>
+                  <Label>Auto Language Switch</Label>
+                  <p className="text-sm text-slate-500">Match the caller's Greek or English mid-call</p>
+                </div>
+                <button
+                  onClick={() => handleSettingChange(setAutoLanguageSwitch, !autoLanguageSwitch)}
+                  className={`relative w-12 h-6 rounded-full transition-colors ${
+                    autoLanguageSwitch ? 'bg-blue-600' : 'bg-slate-300'
+                  }`}
+                >
+                  <span
+                    className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${
+                      autoLanguageSwitch ? 'translate-x-6' : ''
                     }`}
                   />
                 </button>

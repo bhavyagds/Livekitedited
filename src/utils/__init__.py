@@ -30,6 +30,7 @@ from .abuse_handler import (
     check_and_respond_to_abuse,
     format_abuse_response_ssml,
 )
+from .language import detect_language
 
 
 def apply_prosody(text: str, language: str = "el", use_ssml: bool = True) -> str:
@@ -70,4 +71,6 @@ __all__ = [
     "get_abuse_response",
     "check_and_respond_to_abuse",
     "format_abuse_response_ssml",
+    # Language detection
+    "detect_language",
 ]

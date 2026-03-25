@@ -939,6 +939,7 @@ class DatabaseService:
             "agent_voice_stability": {"value": 0.45, "description": "Voice stability (0-1)"},
             "agent_greeting_enabled": {"value": True, "description": "Enable greeting on call start"},
             "abuse_detection_enabled": {"value": True, "description": "Enable abuse detection"},
+            "auto_language_switch": {"value": True, "description": "Auto-switch response language based on caller"},
 
             # Background audio (Settings page)
             "bg_audio_enabled": {"value": False, "description": "Enable background audio"},

@@ -12,6 +12,34 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Runtime language override (set per active call/session).
+_runtime_language: Optional[str] = None
+
+
+def _as_bool(value: object, default: bool = False) -> bool:
+    """Safely coerce string/number/bool values to bool."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default
+
+
+def set_runtime_language(language: Optional[str]) -> None:
+    """Set the runtime language for the active call/session."""
+    global _runtime_language
+    if language:
+        _runtime_language = str(language).strip().lower()
+    else:
+        _runtime_language = None
+
+
+def get_runtime_language() -> Optional[str]:
+    """Get the runtime language override if set."""
+    return _runtime_language
+
 # Cache for database content with TTL
 _cache = {
     "kb_content": {},  # language -> content
@@ -25,11 +53,20 @@ _defaults_initialized = False
 
 def _get_response_language_instruction(language: str) -> str:
     """Hard guardrail so the agent responds in the selected language."""
+    auto_switch = _as_bool(get_agent_setting("auto_language_switch", False), default=False)
     lang = (language or "").strip().lower()
+    if auto_switch:
+        fallback = "Greek" if lang == "el" else "English"
+        return (
+            "RESPONSE LANGUAGE REQUIREMENT:\n"
+            "- Always reply in the same language as the caller's most recent message.\n"
+            "- If the caller switches language, switch with them immediately.\n"
+            f"- If the caller's language is unclear, default to {fallback}."
+        )
     if lang == "el":
         return (
             "RESPONSE LANGUAGE REQUIREMENT:\n"
-            "- You must reply in Greek (Ελληνικά) for all normal responses.\n"
+            "- You must reply in Greek (??????????????) for all normal responses.\n"
             "- Use English only if the caller explicitly asks for English."
         )
     return (
@@ -215,6 +252,9 @@ async def get_prompts_content_async(language: str = "el") -> Optional[str]:
 
 def get_agent_language() -> str:
     """Get the agent language from database settings."""
+    runtime_lang = get_runtime_language()
+    if runtime_lang:
+        return runtime_lang
     _sync_fetch_from_db()
     
     # Try database first
