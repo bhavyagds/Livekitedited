@@ -7,11 +7,13 @@ Includes order caching for faster responses.
 import re
 import logging
 import asyncio
-from typing import Optional, Dict
+import json
+from typing import Optional, Dict, List, Tuple
 from datetime import datetime
 from dataclasses import dataclass
 
 import httpx
+from openai import AsyncOpenAI
 
 from src.config import settings
 from src.utils.greek_numbers import number_to_greek, format_price_greek, format_order_number_greek
@@ -96,6 +98,10 @@ class ShopifyService:
         self.api_version = "2024-01"
         self._client: Optional[httpx.AsyncClient] = None
         self.cache = order_cache
+        self._translator: Optional[AsyncOpenAI] = None
+        self._translation_cache: Dict[Tuple[str, str], str] = {}
+        self._greek_re = re.compile(r"[\u0370-\u03FF\u1F00-\u1FFF]")
+        self._latin_re = re.compile(r"[A-Za-z]")
 
     @property
     def base_url(self) -> str:
@@ -124,6 +130,159 @@ class ShopifyService:
         """Close the HTTP client."""
         if self._client and not self._client.is_closed:
             await self._client.aclose()
+
+    def _get_translator(self) -> Optional[AsyncOpenAI]:
+        if self._translator is not None:
+            return self._translator
+        if not settings.openai_api_key:
+            logger.warning("OpenAI API key missing; skipping translation.")
+            return None
+        self._translator = AsyncOpenAI(api_key=settings.openai_api_key)
+        return self._translator
+
+    def _contains_greek(self, text: str) -> bool:
+        return bool(self._greek_re.search(text))
+
+    def _contains_latin(self, text: str) -> bool:
+        return bool(self._latin_re.search(text))
+
+    def _needs_translation(self, text: str, target_lang: str) -> bool:
+        if not text:
+            return False
+        if target_lang == "en":
+            return self._contains_greek(text)
+        if target_lang == "el":
+            return self._contains_latin(text)
+        return False
+
+    @staticmethod
+    def _strip_json_fence(content: str) -> str:
+        if content.startswith("```"):
+            content = re.sub(r"^```[a-zA-Z0-9_-]*\n?", "", content).strip()
+            content = re.sub(r"\n?```$", "", content).strip()
+        return content
+
+    async def _translate_texts(self, texts: List[str], target_lang: str) -> List[str]:
+        """Translate a list of strings into target_lang using OpenAI."""
+        if not texts:
+            return []
+
+        client = self._get_translator()
+        if client is None:
+            return texts
+
+        target_name = "English" if target_lang == "en" else "Greek"
+        system_prompt = (
+            "You are a translation engine for customer support order data. "
+            f"Translate every string into {target_name}. "
+            "Preserve numbers, order IDs, emails, phone numbers, and currency amounts exactly. "
+            "For names/addresses, translate or transliterate into the target script. "
+            "Keep brand names (e.g., Meallion) unchanged. "
+            "Return ONLY a JSON array of strings, same length and order as input."
+        )
+        user_payload = json.dumps(texts, ensure_ascii=False)
+
+        try:
+            response = await client.chat.completions.create(
+                model=settings.openai_model or "gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_payload},
+                ],
+                temperature=0,
+            )
+            content = response.choices[0].message.content.strip()
+            content = self._strip_json_fence(content)
+            translated = json.loads(content)
+            if not isinstance(translated, list) or len(translated) != len(texts):
+                logger.warning("Translation returned unexpected format; using original texts.")
+                return texts
+            return [str(item) for item in translated]
+        except Exception as e:
+            logger.warning(f"Translation failed; using original texts. Error: {e}")
+            return texts
+
+    def _get_localized(self, order: OrderInfo, lang: str, key: str, default: str):
+        localized = order.raw_data.get("_localized", {})
+        return localized.get(lang, {}).get(key) or default
+
+    async def localize_order(self, order: OrderInfo, language: str) -> OrderInfo:
+        """Translate order fields to the target language and cache results on the order."""
+        target_lang = language or settings.agent_language
+        if target_lang not in {"en", "el"}:
+            return order
+
+        localized_bucket = order.raw_data.setdefault("_localized", {})
+        if target_lang in localized_bucket:
+            return order
+
+        raw = order.raw_data
+
+        customer_name = order.customer_name or ""
+        shipping = raw.get("shipping_address", {})
+        shipping_address = ""
+        if shipping:
+            address_parts = [
+                shipping.get("address1", ""),
+                shipping.get("city", ""),
+                shipping.get("zip", ""),
+            ]
+            shipping_address = ", ".join(part for part in address_parts if part)
+
+        delivery_date = ""
+        delivery_time = ""
+        for attr in raw.get("note_attributes", []):
+            if attr.get("name") == "Delivery-Date":
+                delivery_date = attr.get("value", "")
+            if attr.get("name") == "Delivery-Time":
+                delivery_time = attr.get("value", "")
+
+        line_items = raw.get("line_items", [])
+        item_titles = [item.get("title", "") for item in line_items]
+
+        subscription_name = order.subscription_name or ""
+        subscription_frequency = order.subscription_frequency or ""
+
+        fields = [
+            customer_name,
+            shipping_address,
+            delivery_date,
+            delivery_time,
+            subscription_name,
+            subscription_frequency,
+            *item_titles,
+        ]
+
+        results: List[str] = list(fields)
+        to_translate: List[str] = []
+        translate_indices: List[int] = []
+
+        for idx, text in enumerate(fields):
+            key = (target_lang, text)
+            if text and key in self._translation_cache:
+                results[idx] = self._translation_cache[key]
+                continue
+            if self._needs_translation(text, target_lang):
+                to_translate.append(text)
+                translate_indices.append(idx)
+
+        if to_translate:
+            translated = await self._translate_texts(to_translate, target_lang)
+            for idx, translated_text in zip(translate_indices, translated):
+                original_text = fields[idx]
+                self._translation_cache[(target_lang, original_text)] = translated_text
+                results[idx] = translated_text
+
+        localized_bucket[target_lang] = {
+            "customer_name": results[0],
+            "shipping_address": results[1],
+            "delivery_date": results[2],
+            "delivery_time": results[3],
+            "subscription_name": results[4],
+            "subscription_frequency": results[5],
+            "item_titles": results[6:],
+        }
+        return order
 
     async def prefetch_recent_orders(self) -> int:
         """
@@ -508,6 +667,12 @@ class ShopifyService:
             shipping_address = ", ".join(part for part in address_parts if part)
         else:
             shipping_address = "Δεν δόθηκε" if is_greek else "Not provided"
+
+        # Apply localized fields when available
+        customer_name = self._get_localized(order, lang, "customer_name", customer_name)
+        shipping_address = self._get_localized(order, lang, "shipping_address", shipping_address)
+        if delivery_date:
+            delivery_date = self._get_localized(order, lang, "delivery_date", delivery_date)
         
         # Format order number and price for Greek pronunciation
         if is_greek:
@@ -525,9 +690,11 @@ class ShopifyService:
             if order.has_subscription:
                 response += f" Αυτή είναι παραγγελία ΣΥΝΔΡΟΜΗΣ"
                 if order.subscription_name:
-                    response += f" ({order.subscription_name})"
+                    subscription_name = self._get_localized(order, lang, "subscription_name", order.subscription_name)
+                    response += f" ({subscription_name})"
                 if order.subscription_frequency:
-                    response += f" - {order.subscription_frequency}"
+                    subscription_frequency = self._get_localized(order, lang, "subscription_frequency", order.subscription_frequency)
+                    response += f" - {subscription_frequency}"
                 response += "."
             
             response += " Θέλετε περισσότερες λεπτομέρειες για αυτή την παραγγελία;"
@@ -543,9 +710,11 @@ class ShopifyService:
             if order.has_subscription:
                 response += f" This is a SUBSCRIPTION order"
                 if order.subscription_name:
-                    response += f" ({order.subscription_name})"
+                    subscription_name = self._get_localized(order, lang, "subscription_name", order.subscription_name)
+                    response += f" ({subscription_name})"
                 if order.subscription_frequency:
-                    response += f" - {order.subscription_frequency}"
+                    subscription_frequency = self._get_localized(order, lang, "subscription_frequency", order.subscription_frequency)
+                    response += f" - {subscription_frequency}"
                 response += "."
             
             response += " Would you like more details about this order?"
@@ -564,8 +733,13 @@ class ShopifyService:
         # Extract all items with details - formatted naturally for voice
         items_list = []
         line_items = raw.get("line_items", [])
-        for item in line_items:
-            item_name = item.get("title", "Unknown item")
+        localized_titles = self._get_localized(order, lang, "item_titles", None)
+        for idx, item in enumerate(line_items):
+            fallback_title = item.get("title", "Unknown item")
+            if isinstance(localized_titles, list) and idx < len(localized_titles):
+                item_name = localized_titles[idx] or fallback_title
+            else:
+                item_name = fallback_title
             quantity = item.get("quantity", 1)
             price = item.get("price", "0")
             # Format naturally for voice
@@ -609,6 +783,13 @@ class ShopifyService:
                 delivery_date = attr.get("value", "Not scheduled")
             if attr.get("name") == "Delivery-Time":
                 delivery_time = attr.get("value", "")
+
+        # Apply localized fields when available
+        customer_name = self._get_localized(order, lang, "customer_name", customer_name)
+        shipping_address = self._get_localized(order, lang, "shipping_address", shipping_address)
+        delivery_date = self._get_localized(order, lang, "delivery_date", delivery_date)
+        if delivery_time:
+            delivery_time = self._get_localized(order, lang, "delivery_time", delivery_time)
         
         # Status
         status_text = {
@@ -625,9 +806,11 @@ class ShopifyService:
         if order.has_subscription:
             subscription_info = "YES - This is a SUBSCRIPTION order"
             if order.subscription_name:
-                subscription_info += f"\n  - Plan: {order.subscription_name}"
+                subscription_name = self._get_localized(order, lang, "subscription_name", order.subscription_name)
+                subscription_info += f"\n  - Plan: {subscription_name}"
             if order.subscription_frequency:
-                subscription_info += f"\n  - Frequency: {order.subscription_frequency}"
+                subscription_frequency = self._get_localized(order, lang, "subscription_frequency", order.subscription_frequency)
+                subscription_info += f"\n  - Frequency: {subscription_frequency}"
             if order.subscription_bundle_id:
                 subscription_info += f"\n  - Bundle ID: {order.subscription_bundle_id}"
         

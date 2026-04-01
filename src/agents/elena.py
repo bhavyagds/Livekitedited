@@ -9,6 +9,7 @@ import time
 import os
 import re
 import json
+import threading
 from datetime import datetime
 from typing import Annotated, Optional
 
@@ -1769,6 +1770,66 @@ def prewarm(proc: JobProcess):
     The database fetch happens quickly during call startup with parallel queries.
     """
     logger.info("Prewarm: ready (lightweight)")
+
+    def _warm_tts():
+        # Best-effort TTS warm-up to reduce first greeting latency.
+        try:
+            import urllib.request
+            import urllib.error
+
+            # Warm ElevenLabs if configured.
+            if settings.elevenlabs_api_key:
+                voice_id = settings.elevenlabs_voice_id
+                model_id = settings.elevenlabs_model or "eleven_multilingual_v2"
+                payload = {
+                    "text": "Hi",
+                    "model_id": model_id,
+                }
+                data = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(
+                    f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+                    data=data,
+                    headers={
+                        "xi-api-key": settings.elevenlabs_api_key,
+                        "Content-Type": "application/json",
+                        "accept": "audio/mpeg",
+                    },
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=4) as resp:
+                        resp.read(1)
+                    logger.info("TTS prewarm: ElevenLabs warmed")
+                except Exception as e:
+                    logger.debug(f"TTS prewarm: ElevenLabs skipped ({e})")
+
+            # Warm OpenAI TTS if configured.
+            if settings.openai_api_key:
+                payload = {
+                    "model": "tts-1",
+                    "voice": "alloy",
+                    "input": "Hi",
+                }
+                data = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(
+                    "https://api.openai.com/v1/audio/speech",
+                    data=data,
+                    headers={
+                        "Authorization": f"Bearer {settings.openai_api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=4) as resp:
+                        resp.read(1)
+                    logger.info("TTS prewarm: OpenAI warmed")
+                except Exception as e:
+                    logger.debug(f"TTS prewarm: OpenAI skipped ({e})")
+        except Exception as e:
+            logger.debug(f"TTS prewarm error: {e}")
+
+    threading.Thread(target=_warm_tts, daemon=True).start()
 
 
 def run_agent():

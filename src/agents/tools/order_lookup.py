@@ -91,6 +91,9 @@ async def lookup_order(
     # Get language from database settings (not env)
     agent_lang = get_agent_language()
     logger.info(f"Order lookup using language: {agent_lang}")
+
+    # Localize order fields to match the user's language
+    await shopify.localize_order(order, agent_lang)
     
     # Return BRIEF response in the configured language
     response = shopify.format_order_brief(order, language=agent_lang)
@@ -131,6 +134,9 @@ async def get_order_details(
     # Get language from database settings (not env)
     agent_lang = get_agent_language()
     logger.info(f"Order details using language: {agent_lang}")
+
+    # Localize order fields to match the user's language
+    await shopify.localize_order(order, agent_lang)
     
     # Return FULL details in the configured language
     response = shopify.format_order_for_voice(order, include_details=True, language=agent_lang)
