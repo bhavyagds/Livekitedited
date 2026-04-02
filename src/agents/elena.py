@@ -1246,10 +1246,11 @@ async def entrypoint(ctx: JobContext):
                 asyncio.create_task(send_agent_transcript(text))
                 logger.info(f"before_tts_cb processing: {text[:50]}...")
 
-                from src.utils import apply_prosody
+                from src.utils import apply_prosody, normalize_time_colons
                 agent_lang = get_agent_language()
                 use_ssml = _as_bool(get_agent_setting("tts_use_ssml", False), default=False)
-                processed_text = apply_prosody(text, language=agent_lang, use_ssml=use_ssml)
+                tts_text = normalize_time_colons(text)
+                processed_text = apply_prosody(tts_text, language=agent_lang, use_ssml=use_ssml)
                 return processed_text
             else:
                 logger.debug("before_tts_cb got LLMStream (will use committed fallback)")

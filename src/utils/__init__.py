@@ -31,6 +31,7 @@ from .abuse_handler import (
     format_abuse_response_ssml,
 )
 from .language import detect_language
+from .tts_normalize import normalize_time_colons
 
 
 def apply_prosody(text: str, language: str = "el", use_ssml: bool = True) -> str:
@@ -73,4 +74,5 @@ __all__ = [
     "format_abuse_response_ssml",
     # Language detection
     "detect_language",
+    "normalize_time_colons",
 ]
