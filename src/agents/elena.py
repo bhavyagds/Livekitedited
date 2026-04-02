@@ -1280,6 +1280,11 @@ async def entrypoint(ctx: JobContext):
         min_endpointing_delay,
         interrupt_min_words,
     )
+    preemptive_synthesis = _as_bool(
+        get_agent_setting("preemptive_synthesis", True),
+        default=True,
+    )
+    logger.info("TTS preemptive_synthesis=%s", preemptive_synthesis)
     logger.info(f"⏱️ Creating agent ({time.time() - startup_time:.1f}s)")
     agent = VoicePipelineAgent(
         vad=create_vad(),
@@ -1291,7 +1296,7 @@ async def entrypoint(ctx: JobContext):
         max_nested_fnc_calls=3,
         # Turn segmentation settings.
         min_endpointing_delay=min_endpointing_delay,
-        preemptive_synthesis=True,      # Start TTS immediately as LLM streams
+        preemptive_synthesis=preemptive_synthesis,  # Allow toggling to avoid punctuation leaks
         allow_interruptions=True,       # Allow user to interrupt
         interrupt_min_words=interrupt_min_words,
         before_tts_cb=before_tts_callback,  # Capture text when possible
