@@ -249,7 +249,7 @@ def detect_prosody_type(text: str) -> ProsodyType:
     return ProsodyType.DECL
 
 
-def add_pauses(text: str) -> str:
+def add_pauses(text: str, use_ssml: bool = True) -> str:
     """
     Add SSML break tags at natural pause points.
     
@@ -258,19 +258,23 @@ def add_pauses(text: str) -> str:
     - period: medium pause (400ms)
     - and, but, or, so, however: small pause (150ms)
     """
-    # Add pause after comma
-    text = re.sub(r',\s*', ', <break time="200ms"/> ', text)
-    
-    # Add pause after period (but not at end)
-    text = re.sub(r'\.\s+(?=[A-Za-z])', '. <break time="400ms"/> ', text)
-    
+    if not use_ssml:
+        # No SSML tags when SSML parsing is disabled.
+        return text
+
+    # Add pause after comma (remove the comma itself)
+    text = re.sub(r',\s*', '<break time="200ms"/> ', text)
+
+    # Add pause after period (but not at end) - remove the period
+    text = re.sub(r'\.\s+(?=[A-Za-z])', '<break time="400ms"/> ', text)
+
     # Add pause before/after conjunctions
     conjunctions = ['and', 'but', 'or', 'so', 'however', 'therefore', 'moreover']
     for conj in conjunctions:
         pattern = rf'\s+{conj}\s+'
         replacement = f' <break time="150ms"/> {conj} <break time="150ms"/> '
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-    
+
     return text
 
 
@@ -305,7 +309,7 @@ def apply_prosody(text: str, prosody_type: ProsodyType) -> str:
     return result
 
 
-def process_sentence(text: str) -> str:
+def process_sentence(text: str, use_ssml: bool = True) -> str:
     """
     Process a single sentence with prosody and pauses.
     
@@ -319,7 +323,7 @@ def process_sentence(text: str) -> str:
     prosody_type = detect_prosody_type(text)
     
     # Add internal pauses
-    text_with_pauses = add_pauses(text)
+    text_with_pauses = add_pauses(text, use_ssml=use_ssml)
     
     # Apply prosody wrapper
     result = apply_prosody(text_with_pauses, prosody_type)
@@ -349,7 +353,7 @@ def convert_to_ssml(text: str) -> str:
     processed_sentences = []
     for sentence in sentences:
         if sentence.strip():
-            processed = process_sentence(sentence.strip())
+            processed = process_sentence(sentence.strip(), use_ssml=True)
             processed_sentences.append(processed)
     
     # Combine into SSML document
@@ -374,9 +378,8 @@ def apply_english_prosody(text: str, use_ssml: bool = True) -> str:
     """
     if use_ssml:
         return convert_to_ssml(text)
-    else:
-        # For non-SSML mode, just add natural pauses with punctuation
-        return add_pauses(text)
+    # No SSML parsing: return plain text (no SSML tags).
+    return add_pauses(text, use_ssml=False)
 
 
 # =============================================================================
