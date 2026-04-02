@@ -1246,10 +1246,11 @@ async def entrypoint(ctx: JobContext):
                 asyncio.create_task(send_agent_transcript(text))
                 logger.info(f"before_tts_cb processing: {text[:50]}...")
 
-                from src.utils import apply_prosody, normalize_time_colons
+                from src.utils import apply_prosody, normalize_time_colons, normalize_punctuation_for_tts
                 agent_lang = get_agent_language()
                 use_ssml = _as_bool(get_agent_setting("tts_use_ssml", False), default=False)
                 tts_text = normalize_time_colons(text)
+                tts_text = normalize_punctuation_for_tts(tts_text)
                 processed_text = apply_prosody(tts_text, language=agent_lang, use_ssml=use_ssml)
                 return processed_text
             else:

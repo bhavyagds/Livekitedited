@@ -10,6 +10,10 @@ import re
 
 _TIME_AMPM_RE = re.compile(r"\b(\d{1,2})\s*:\s*([0-5]\d)\s*([AaPp]\.?[Mm]\.?)\b")
 _TIME_PLAIN_RE = re.compile(r"\b(\d{1,2})\s*:\s*([0-5]\d)\b")
+_PUNCT_NO_NUM_RE = re.compile(r"(?<!\d)[,;:](?!\d)")
+_DOT_NO_NUM_RE = re.compile(r"(?<!\d)\.(?!\d)")
+_BRACKETS_RE = re.compile(r"[()\[\]{}<>]")
+_MULTI_SPACE_RE = re.compile(r"\s{2,}")
 
 
 def normalize_time_colons(text: str) -> str:
@@ -34,4 +38,18 @@ def normalize_time_colons(text: str) -> str:
 
     text = _TIME_AMPM_RE.sub(_ampm_repl, text)
     text = _TIME_PLAIN_RE.sub(r"\1 \2", text)
+    return text
+
+
+def normalize_punctuation_for_tts(text: str) -> str:
+    """
+    Remove punctuation that TTS may speak aloud (comma, colon, semicolon, full stop).
+    Keeps decimal points between digits.
+    """
+    if not text:
+        return text
+    text = _PUNCT_NO_NUM_RE.sub(" ", text)
+    text = _DOT_NO_NUM_RE.sub(" ", text)
+    text = _BRACKETS_RE.sub(" ", text)
+    text = _MULTI_SPACE_RE.sub(" ", text).strip()
     return text
