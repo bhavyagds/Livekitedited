@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { LiveKitRoom, RoomAudioRenderer } from '@livekit/components-react';
 import '@livekit/components-styles';
 import { VoiceAgent } from './components/VoiceAgent';
@@ -15,6 +15,13 @@ function App() {
   const [connection, setConnection] = useState<ConnectionState | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Warm up backend caches on page load to reduce first-call latency.
+    fetch('/api/warmup').catch(() => {
+      // Best-effort only; ignore warmup failures.
+    });
+  }, []);
 
   const handleConnect = async () => {
     setIsConnecting(true);

@@ -3,12 +3,14 @@ Meallion Voice AI - Health Check Endpoints
 """
 
 import logging
+import time
 from datetime import datetime
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
 from src.config import settings
+from src.agents.prompts import get_system_prompt_async
 
 logger = logging.getLogger(__name__)
 
@@ -150,3 +152,30 @@ async def liveness_check() -> dict:
     Returns 200 if the service is alive.
     """
     return {"alive": True}
+
+
+@router.get("/warmup")
+async def warmup() -> dict:
+    """
+    Warm up DB-backed prompt cache on page load.
+    This reduces first-call latency by prefetching KB/prompts/settings.
+    """
+    start = time.perf_counter()
+    results = {"prompts_en": False, "prompts_el": False}
+    errors = []
+
+    try:
+        await get_system_prompt_async("en")
+        results["prompts_en"] = True
+    except Exception as e:
+        errors.append(f"prompts_en: {e}")
+
+    try:
+        await get_system_prompt_async("el")
+        results["prompts_el"] = True
+    except Exception as e:
+        errors.append(f"prompts_el: {e}")
+
+    elapsed_ms = int((time.perf_counter() - start) * 1000)
+    status = "ok" if not errors else "partial"
+    return {"status": status, "elapsed_ms": elapsed_ms, "results": results, "errors": errors}
