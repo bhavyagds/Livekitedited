@@ -1254,7 +1254,38 @@ async def entrypoint(ctx: JobContext):
                 processed_text = apply_prosody(tts_text, language=agent_lang, use_ssml=use_ssml)
                 return processed_text
             else:
-                logger.debug("before_tts_cb got LLMStream (will use committed fallback)")
+                logger.debug("before_tts_cb got LLMStream (applying streaming normalization)")
+                from src.utils import normalize_time_colons, normalize_punctuation_for_tts
+
+                def _extract_chunk_text(chunk) -> str:
+                    if isinstance(chunk, str):
+                        return chunk
+                    for attr in ("text", "delta", "content"):
+                        if hasattr(chunk, attr):
+                            value = getattr(chunk, attr)
+                            if isinstance(value, str):
+                                return value
+                    return str(chunk)
+
+                async def _normalized_stream(stream):
+                    raw_buffer = ""
+                    normalized_buffer = ""
+                    async for chunk in stream:
+                        chunk_text = _extract_chunk_text(chunk)
+                        if not chunk_text:
+                            continue
+                        raw_buffer += chunk_text
+                        updated = normalize_time_colons(raw_buffer)
+                        updated = normalize_punctuation_for_tts(updated)
+                        if updated.startswith(normalized_buffer):
+                            delta = updated[len(normalized_buffer):]
+                        else:
+                            delta = updated
+                        normalized_buffer = updated
+                        if delta:
+                            yield delta
+
+                return _normalized_stream(text)
         except Exception as e:
             logger.error(f"Error in before_tts_callback: {e}")
         return text  # Return text unchanged on error
