@@ -141,3 +141,14 @@ async def get_order_details(
     # Return FULL details in the configured language
     response = shopify.format_order_for_voice(order, include_details=True, language=agent_lang)
     return response
+
+
+def get_last_order_snapshot() -> dict | None:
+    """Return last looked-up order status info for deterministic responses."""
+    order = _last_order_cache.get("last")
+    if not order:
+        return None
+    return {
+        "order_number": order.order_number,
+        "status": order.status,
+    }

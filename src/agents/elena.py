@@ -1238,6 +1238,105 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.error(f"Failed to send agent info: {e}")
 
+    last_lookup_status = {
+        "status": None,
+        "order_number": None,
+        "language": None,
+        "updated_at": 0.0,
+    }
+
+    def _status_sentence(status: str, language: str) -> str:
+        sentences = {
+            "en": {
+                "processing": "Your order is being prepared.",
+                "in_transit": "Your order is on the way.",
+                "delivered": "Your order has been delivered.",
+                "completed": "Your order is completed.",
+                "cancelled": "Your order was cancelled.",
+            },
+            "el": {
+                "processing": "Η παραγγελία σας ετοιμάζεται.",
+                "in_transit": "Η παραγγελία σας είναι καθ οδόν.",
+                "delivered": "Η παραγγελία σας παραδόθηκε.",
+                "completed": "Η παραγγελία σας ολοκληρώθηκε.",
+                "cancelled": "Η παραγγελία σας ακυρώθηκε.",
+            },
+        }
+        return sentences.get(language, sentences["en"]).get(status, "")
+
+    def _status_keywords(language: str) -> dict:
+        if language == "el":
+            return {
+                "processing": ["ετοιμάζεται"],
+                "in_transit": ["καθ οδόν", "σε μεταφορά", "στο δρόμο"],
+                "delivered": ["παραδόθηκε"],
+                "completed": ["ολοκληρώθηκε"],
+                "cancelled": ["ακυρώθηκε", "ακυρωθηκε"],
+            }
+        return {
+            "processing": ["processing", "being processed", "being prepared", "preparing"],
+            "in_transit": ["on the way", "in transit", "out for delivery"],
+            "delivered": ["delivered"],
+            "completed": ["completed"],
+            "cancelled": ["cancelled", "canceled"],
+        }
+
+    def _sentence_mentions_status(sentence: str, language: str) -> bool:
+        lower = sentence.lower()
+        for keywords in _status_keywords(language).values():
+            for keyword in keywords:
+                if keyword in lower:
+                    return True
+        return False
+
+    def _enforce_order_status(text: str) -> str:
+        if not text:
+            return text
+        if not last_lookup_status["status"]:
+            return text
+        # Only enforce shortly after lookup to avoid stale overrides
+        if time.time() - last_lookup_status["updated_at"] > 180:
+            return text
+
+        language = last_lookup_status["language"] or get_agent_language()
+        expected_status = last_lookup_status["status"]
+        keywords = _status_keywords(language)
+        lower = text.lower()
+
+        found_status = None
+        for status, words in keywords.items():
+            if any(word in lower for word in words):
+                found_status = status
+                break
+
+        if not found_status:
+            return text
+        if found_status == expected_status:
+            return text
+
+        status_sentence = _status_sentence(expected_status, language)
+        if not status_sentence:
+            return text
+
+        # Replace any sentence that mentions a status with the correct one
+        parts = re.split(r'(?<=[.!?])\s+', text)
+        if len(parts) <= 1:
+            return status_sentence
+
+        new_parts = []
+        replaced = False
+        for sentence in parts:
+            if _sentence_mentions_status(sentence, language):
+                if not replaced:
+                    new_parts.append(status_sentence)
+                    replaced = True
+                continue
+            new_parts.append(sentence)
+
+        if not replaced:
+            return status_sentence
+        return " ".join(p for p in new_parts if p).strip()
+
     def before_tts_callback(agent_instance, text: str | llm.LLMStream):
         """Callback that fires BEFORE text is sent to TTS - apply prosody."""
         try:
@@ -1249,7 +1348,8 @@ async def entrypoint(ctx: JobContext):
                 from src.utils import apply_prosody, normalize_time_colons, normalize_punctuation_for_tts
                 agent_lang = get_agent_language()
                 use_ssml = _as_bool(get_agent_setting("tts_use_ssml", False), default=False)
-                tts_text = normalize_time_colons(text)
+                tts_text = _enforce_order_status(text)
+                tts_text = normalize_time_colons(tts_text)
                 tts_text = normalize_punctuation_for_tts(tts_text)
                 processed_text = apply_prosody(tts_text, language=agent_lang, use_ssml=use_ssml)
                 return processed_text
@@ -1275,7 +1375,8 @@ async def entrypoint(ctx: JobContext):
                         if not chunk_text:
                             continue
                         raw_buffer += chunk_text
-                        updated = normalize_time_colons(raw_buffer)
+                        updated = _enforce_order_status(raw_buffer)
+                        updated = normalize_time_colons(updated)
                         updated = normalize_punctuation_for_tts(updated)
                         if updated.startswith(normalized_buffer):
                             delta = updated[len(normalized_buffer):]
@@ -1557,6 +1658,13 @@ async def entrypoint(ctx: JobContext):
             result = getattr(fn, 'result', None)
             logger.info(f"🔧 [TOOL] {name} executed" + (f" - result: {str(result)[:100]}" if result else ""))
             room_log("TOOL_EXECUTED", name=name, result=_truncate(str(result)) if result else None)
+            if name == "lookup_order":
+                snapshot = order_lookup.get_last_order_snapshot()
+                if snapshot:
+                    last_lookup_status["status"] = snapshot.get("status")
+                    last_lookup_status["order_number"] = snapshot.get("order_number")
+                    last_lookup_status["language"] = get_agent_language()
+                    last_lookup_status["updated_at"] = time.time()
     
     # Store references for session management
     _current_session["agent"] = agent
