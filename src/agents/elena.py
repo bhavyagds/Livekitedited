@@ -486,7 +486,16 @@ def create_tts():
                 async for seg in self._fallback.stream(text, **kwargs):
                     yield seg
 
-        def stream(self, text, **kwargs):
+        def stream(self, text=None, **kwargs):
+            # LiveKit may call stream() with no args and push text later.
+            if text is None:
+                try:
+                    return self._active().stream()
+                except Exception as e:
+                    if self._active() is self._fallback:
+                        raise
+                    self._switch_to_fallback(e)
+                    return self._fallback.stream()
             return self._stream_with_fallback(text, **kwargs)
 
         async def synthesize(self, text, **kwargs):
