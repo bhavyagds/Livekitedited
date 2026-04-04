@@ -718,6 +718,61 @@ def create_stt():
     agent_lang = get_agent_language()
     stt_lang = get_stt_language(agent_lang)
     auto_language_switch = _as_bool(get_agent_setting("auto_language_switch", False), default=False)
+
+    class FailoverSTT:
+        """Wrap a primary STT and fall back to secondary on runtime failure."""
+
+        class _StreamWrapper:
+            def __init__(self, parent, stream):
+                self._parent = parent
+                self._stream = stream
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                try:
+                    return await self._stream.__anext__()
+                except Exception as e:
+                    if self._parent._active() is self._parent._fallback:
+                        raise
+                    self._parent._switch_to_fallback(e)
+                    raise
+
+            def __getattr__(self, name):
+                return getattr(self._stream, name)
+
+        def __init__(self, primary, fallback):
+            self._primary = primary
+            self._fallback = fallback
+            self._use_fallback = False
+
+        def _active(self):
+            return self._fallback if self._use_fallback else self._primary
+
+        def _switch_to_fallback(self, error: Exception):
+            if self._use_fallback:
+                return
+            logger.warning("Primary STT failed, switching to fallback: %s", error)
+            room_log("STT_FAILOVER", reason=str(error)[:200])
+            self._use_fallback = True
+
+        def stream(self, *args, **kwargs):
+            stream = self._active().stream(*args, **kwargs)
+            return self._StreamWrapper(self, stream)
+
+        async def transcribe(self, *args, **kwargs):
+            provider = self._active()
+            try:
+                return await provider.transcribe(*args, **kwargs)
+            except Exception as e:
+                if provider is self._fallback:
+                    raise
+                self._switch_to_fallback(e)
+                return await self._fallback.transcribe(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._active(), name)
     
     provider = str(get_agent_setting("stt_provider", "") or "").strip().lower()
     if not provider:
@@ -739,13 +794,19 @@ def create_stt():
     if provider == "deepgram" and USE_DEEPGRAM:
         logger.info(f"Using Deepgram STT (fast) - language: {stt_lang}")
         room_log("STT_PROVIDER", provider="deepgram", model="nova-3", language=stt_lang)
-        return deepgram.STT(
+        primary = deepgram.STT(
             model="nova-3",
             language=stt_lang,
             interim_results=True,  # Keep connection active with interim results
             punctuate=True,
             smart_format=True,
         )
+        # Fail over to OpenAI Whisper if Deepgram drops mid-call.
+        fallback = openai.STT(
+            model="whisper-1",
+            language=stt_lang,
+        )
+        return FailoverSTT(primary, fallback)
     
     # Fallback to OpenAI Whisper
     if provider == "deepgram" and not USE_DEEPGRAM:
