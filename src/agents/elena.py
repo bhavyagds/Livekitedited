@@ -455,6 +455,53 @@ def create_tts():
     import urllib.error
     import urllib.request
 
+    class FailoverTTS:
+        """Wrap a primary TTS and fall back to secondary on runtime failure."""
+
+        def __init__(self, primary, fallback):
+            self._primary = primary
+            self._fallback = fallback
+            self._use_fallback = False
+
+        def _active(self):
+            return self._fallback if self._use_fallback else self._primary
+
+        def _switch_to_fallback(self, error: Exception):
+            if self._use_fallback:
+                return
+            logger.warning("Primary TTS failed, switching to fallback: %s", error)
+            room_log("TTS_FAILOVER", reason=str(error)[:200])
+            self._use_fallback = True
+
+        async def _stream_with_fallback(self, text, **kwargs):
+            provider = self._active()
+            try:
+                async for seg in provider.stream(text, **kwargs):
+                    yield seg
+                return
+            except Exception as e:
+                if provider is self._fallback:
+                    raise
+                self._switch_to_fallback(e)
+                async for seg in self._fallback.stream(text, **kwargs):
+                    yield seg
+
+        def stream(self, text, **kwargs):
+            return self._stream_with_fallback(text, **kwargs)
+
+        async def synthesize(self, text, **kwargs):
+            provider = self._active()
+            try:
+                return await provider.synthesize(text, **kwargs)
+            except Exception as e:
+                if provider is self._fallback:
+                    raise
+                self._switch_to_fallback(e)
+                return await self._fallback.synthesize(text, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._active(), name)
+
     def create_openai_tts():
         """Fallback TTS provider using OpenAI audio API."""
         voice = str(get_agent_setting("openai_tts_voice", "alloy") or "alloy")
@@ -542,6 +589,8 @@ def create_tts():
     tts_provider = str(get_agent_setting("tts_provider", "elevenlabs") or "elevenlabs").lower()
     if tts_provider == "openai":
         return create_openai_tts()
+
+    enable_failover = _as_bool(get_agent_setting("tts_failover_enabled", True), default=True)
 
     if not elevenlabs_available():
         return create_openai_tts()
@@ -645,11 +694,14 @@ def create_tts():
         settings=voice_settings,
     )
     tts_use_ssml = _as_bool(get_agent_setting("tts_use_ssml", False), default=False)
-    return elevenlabs.TTS(
+    primary_tts = elevenlabs.TTS(
         voice=voice,
         model=tts_model,
         enable_ssml_parsing=tts_use_ssml,
     )
+    if enable_failover:
+        return FailoverTTS(primary_tts, create_openai_tts())
+    return primary_tts
 
 
 def create_stt():
