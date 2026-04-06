@@ -462,28 +462,72 @@ def create_tts():
             self._primary = primary
             self._fallback = fallback
             self._use_fallback = False
+            self._locked_provider = None  # "primary" or "fallback"
+            self._audio_emitted = False
+            self._lock_per_call = _as_bool(
+                get_agent_setting("tts_failover_lock_per_call", True),
+                default=True,
+            )
 
         def _active(self):
+            if self._locked_provider == "primary":
+                return self._primary
+            if self._locked_provider == "fallback":
+                return self._fallback
             return self._fallback if self._use_fallback else self._primary
+
+        def _lock_to(self, provider: str):
+            if not self._lock_per_call:
+                return
+            if self._locked_provider is None:
+                self._locked_provider = provider
+                logger.info("TTS provider locked to %s for this call", provider)
+                room_log("TTS_LOCKED", provider=provider)
 
         def _switch_to_fallback(self, error: Exception):
             if self._use_fallback:
-                return
+                return False
+            if self._locked_provider == "primary" and self._lock_per_call:
+                logger.warning(
+                    "Primary TTS failed after lock; keeping provider to avoid tone change: %s",
+                    error,
+                )
+                room_log("TTS_FAILOVER_BLOCKED", reason=str(error)[:200])
+                return False
             logger.warning("Primary TTS failed, switching to fallback: %s", error)
             room_log("TTS_FAILOVER", reason=str(error)[:200])
             self._use_fallback = True
+            self._lock_to("fallback")
+            return True
 
         async def _stream_with_fallback(self, text, **kwargs):
             provider = self._active()
             try:
                 async for seg in provider.stream(text, **kwargs):
+                    if not self._audio_emitted:
+                        self._audio_emitted = True
+                        if provider is self._primary:
+                            self._lock_to("primary")
+                        else:
+                            self._lock_to("fallback")
                     yield seg
                 return
             except Exception as e:
                 if provider is self._fallback:
                     raise
-                self._switch_to_fallback(e)
+                if self._audio_emitted and self._lock_per_call:
+                    logger.warning(
+                        "Primary TTS failed mid-call; keeping provider locked to avoid tone change: %s",
+                        e,
+                    )
+                    room_log("TTS_FAILOVER_BLOCKED", reason=str(e)[:200])
+                    raise
+                if not self._switch_to_fallback(e):
+                    raise
                 async for seg in self._fallback.stream(text, **kwargs):
+                    if not self._audio_emitted:
+                        self._audio_emitted = True
+                        self._lock_to("fallback")
                     yield seg
 
         def stream(self, text=None, **kwargs):
@@ -501,12 +545,31 @@ def create_tts():
         async def synthesize(self, text, **kwargs):
             provider = self._active()
             try:
-                return await provider.synthesize(text, **kwargs)
+                result = await provider.synthesize(text, **kwargs)
+                if not self._audio_emitted:
+                    self._audio_emitted = True
+                    if provider is self._primary:
+                        self._lock_to("primary")
+                    else:
+                        self._lock_to("fallback")
+                return result
             except Exception as e:
                 if provider is self._fallback:
                     raise
-                self._switch_to_fallback(e)
-                return await self._fallback.synthesize(text, **kwargs)
+                if self._audio_emitted and self._lock_per_call:
+                    logger.warning(
+                        "Primary TTS failed mid-call; keeping provider locked to avoid tone change: %s",
+                        e,
+                    )
+                    room_log("TTS_FAILOVER_BLOCKED", reason=str(e)[:200])
+                    raise
+                if not self._switch_to_fallback(e):
+                    raise
+                result = await self._fallback.synthesize(text, **kwargs)
+                if not self._audio_emitted:
+                    self._audio_emitted = True
+                    self._lock_to("fallback")
+                return result
 
         def __getattr__(self, name):
             return getattr(self._active(), name)
