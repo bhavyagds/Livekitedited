@@ -1262,6 +1262,60 @@ async def entrypoint(ctx: JobContext):
     set_runtime_language(base_language)
     session_language = {"value": base_language}
     auto_language_switch = _as_bool(get_agent_setting("auto_language_switch", False), default=False)
+    language_switch_min_turns = _as_int(
+        get_agent_setting("language_switch_min_turns", 2),
+        2,
+        min_value=1,
+        max_value=5,
+    )
+    language_switch_state = {"candidate": None, "count": 0}
+
+    def _explicit_language_request(text: str) -> Optional[str]:
+        """Detect explicit caller requests to change response language."""
+        lowered = (text or "").strip().lower()
+        if not lowered:
+            return None
+
+        english_requests = (
+            "speak english",
+            "in english",
+            "english please",
+            "switch to english",
+            "talk in english",
+            "μίλα αγγλικά",
+            "στα αγγλικά",
+        )
+        greek_requests = (
+            "speak greek",
+            "in greek",
+            "greek please",
+            "switch to greek",
+            "talk in greek",
+            "μίλα ελληνικά",
+            "στα ελληνικά",
+        )
+
+        if any(phrase in lowered for phrase in english_requests):
+            return "en"
+        if any(phrase in lowered for phrase in greek_requests):
+            return "el"
+        return None
+
+    def _apply_language_switch(new_lang: str, reason: str) -> None:
+        """Switch runtime/session language and append a scoped system hint."""
+        session_language["value"] = new_lang
+        set_runtime_language(new_lang)
+        language_switch_state["candidate"] = None
+        language_switch_state["count"] = 0
+        lang_name = "Greek" if new_lang == "el" else "English"
+        agent.chat_ctx.append(
+            role="system",
+            text=(
+                "LANGUAGE SWITCH:\n"
+                f"- Respond in {lang_name} for this response and until the caller switches again."
+            ),
+        )
+        room_log("LANGUAGE_SWITCH", language=new_lang, reason=reason)
 
     # Initialize abuse tracker for this session
     from src.utils.abuse_handler import AbuseTracker, check_and_respond_to_abuse
@@ -1723,21 +1777,32 @@ async def entrypoint(ctx: JobContext):
         asyncio.create_task(send_user_transcript(user_text))
 
         if auto_language_switch:
-            detected_lang = detect_language(user_text, default=session_language["value"])
-            if detected_lang != session_language["value"]:
-                session_language["value"] = detected_lang
-                set_runtime_language(detected_lang)
-                lang_name = "Greek" if detected_lang == "el" else "English"
-                agent.chat_ctx.append(
-                    role="system",
-                    text=(
-                        "LANGUAGE SWITCH:\n"
-                        f"- Respond in {lang_name} for this response and until the caller switches again."
-                    ),
-                )
-                room_log("LANGUAGE_SWITCH", language=detected_lang)
+            explicit_lang = _explicit_language_request(user_text)
+            if explicit_lang and explicit_lang != session_language["value"]:
+                _apply_language_switch(explicit_lang, reason="explicit_request")
             else:
-                set_runtime_language(detected_lang)
+                detected_lang = detect_language(user_text, default=session_language["value"])
+                if detected_lang != session_language["value"]:
+                    if language_switch_state["candidate"] == detected_lang:
+                        language_switch_state["count"] += 1
+                    else:
+                        language_switch_state["candidate"] = detected_lang
+                        language_switch_state["count"] = 1
+
+                    room_log(
+                        "LANGUAGE_SWITCH_CANDIDATE",
+                        current=session_language["value"],
+                        candidate=detected_lang,
+                        count=language_switch_state["count"],
+                        required=language_switch_min_turns,
+                    )
+
+                    if language_switch_state["count"] >= language_switch_min_turns:
+                        _apply_language_switch(detected_lang, reason="consecutive_detected")
+                else:
+                    language_switch_state["candidate"] = None
+                    language_switch_state["count"] = 0
+                    set_runtime_language(detected_lang)
         
         # Reset silence timer - user is responding
         reset_silence_timer()
