@@ -1065,8 +1065,9 @@ class ElenaFunctionContext(llm.FunctionContext):
         query: Annotated[str, llm.TypeInfo(description="The question to search for")],
     ) -> str:
         """Search the knowledge base for answers to common questions."""
-        room_log("TOOL_CALL", name="search_knowledge_base", query=query)
-        result = await knowledge_base.search_knowledge_base(query)
+        language = get_agent_language()
+        room_log("TOOL_CALL", name="search_knowledge_base", query=query, language=language)
+        result = await knowledge_base.search_knowledge_base(query, language=language)
         room_log("TOOL_RESULT", name="search_knowledge_base", result=_truncate(result))
         return result
 

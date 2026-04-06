@@ -25,10 +25,25 @@ def detect_language(text: Optional[str], default: str = "el") -> str:
     if not text:
         return default
 
-    if _GREEK_RE.search(text):
+    greek_chars = _GREEK_RE.findall(text)
+    latin_chars = _LATIN_RE.findall(text)
+    greek_count = len(greek_chars)
+    latin_count = len(latin_chars)
+
+    # Strong Greek signal: keep/switch to Greek immediately.
+    if greek_count > 0 and greek_count >= latin_count:
         return "el"
 
-    if _LATIN_RE.search(text):
+    # Switch to English only on a clear signal, not on short mixed tokens
+    # (e.g., product names, IDs, "ok", "yes"), to avoid accidental flips.
+    if latin_count >= 6 and greek_count == 0:
         return "en"
+
+    if latin_count >= 8 and latin_count > (greek_count * 2):
+        return "en"
+
+    # If there is any Greek at all, bias to Greek for mixed utterances.
+    if greek_count > 0:
+        return "el"
 
     return default

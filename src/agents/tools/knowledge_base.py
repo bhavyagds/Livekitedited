@@ -142,7 +142,7 @@ def get_kb_instance() -> KnowledgeBaseTool:
 
 async def search_knowledge_base(
     query: Annotated[str, "The customer's question or topic to search for"],
-    language: Annotated[str, "Language for response: 'en' or 'el'"] = "en",
+    language: Annotated[str, "Language for response: 'en', 'el', or 'auto'"] = "auto",
 ) -> str:
     """
     Search the Meallion knowledge base for answers to common questions.
@@ -170,7 +170,14 @@ async def search_knowledge_base(
     kb = get_kb_instance()
     
     query_lower = query.lower()
-    lang = "el" if language.lower() in ("el", "greek", "ελληνικά") else "en"
+    language_key = (language or "").strip().lower()
+    if language_key in ("", "auto"):
+        try:
+            from src.agents.prompts import get_agent_language
+            language_key = (get_agent_language() or "el").strip().lower()
+        except Exception:
+            language_key = "el"
+    lang = "el" if language_key in ("el", "greek") else "en"
     
     # First, try to search database items (most up-to-date)
     try:
