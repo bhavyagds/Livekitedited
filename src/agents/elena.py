@@ -1296,27 +1296,66 @@ async def entrypoint(ctx: JobContext):
     )
     language_switch_state = {"candidate": None, "count": 0}
 
+    def _normalize_switch_text(text: str) -> str:
+        """Normalize text for robust language-switch intent detection."""
+        lowered = (text or "").strip().lower()
+        if not lowered:
+            return ""
+        # Keep letters/numbers/spaces only to make phrase matching resilient.
+        lowered = re.sub(r"[^\w\s]", " ", lowered, flags=re.UNICODE)
+        lowered = re.sub(r"\s+", " ", lowered).strip()
+        return lowered
+
     def _explicit_language_request(text: str) -> Optional[str]:
         """Detect explicit caller requests to change response language."""
-        lowered = (text or "").strip().lower()
+        lowered = _normalize_switch_text(text)
         if not lowered:
             return None
 
         english_requests = (
             "speak english",
+            "speak in english",
+            "can you speak english",
+            "can you speak in english",
+            "can we speak english",
+            "can we speak in english",
             "in english",
             "english please",
             "switch to english",
+            "switch language to english",
             "talk in english",
+            "reply in english",
+            "respond in english",
+            "answer in english",
+            "details in english",
+            "english language",
+            "mila agglika",
+            "sta agglika",
+            "μιλα αγγλικα",
+            "στα αγγλικα",
             "μίλα αγγλικά",
             "στα αγγλικά",
         )
         greek_requests = (
             "speak greek",
+            "speak in greek",
+            "can you speak greek",
+            "can you speak in greek",
+            "can we speak greek",
+            "can we speak in greek",
             "in greek",
             "greek please",
             "switch to greek",
+            "switch language to greek",
             "talk in greek",
+            "reply in greek",
+            "respond in greek",
+            "answer in greek",
+            "greek language",
+            "mila ellinika",
+            "sta ellinika",
+            "μιλα ελληνικα",
+            "στα ελληνικα",
             "μίλα ελληνικά",
             "στα ελληνικά",
         )
@@ -1324,6 +1363,19 @@ async def entrypoint(ctx: JobContext):
         if any(phrase in lowered for phrase in english_requests):
             return "en"
         if any(phrase in lowered for phrase in greek_requests):
+            return "el"
+
+        # Fallback intent heuristics for broader phrasing coverage.
+        english_token = ("english" in lowered) or ("αγγλικ" in lowered)
+        greek_token = ("greek" in lowered) or ("ελληνικ" in lowered) or ("ellinik" in lowered)
+        switch_verbs = (
+            "speak", "talk", "reply", "respond", "answer", "switch", "language",
+            "μιλα", "μίλα", "μιλησουμε", "μιλήσουμε", "απάντηση",
+        )
+        has_switch_verb = any(v in lowered for v in switch_verbs)
+        if english_token and has_switch_verb:
+            return "en"
+        if greek_token and has_switch_verb:
             return "el"
         return None
 
@@ -1806,12 +1858,22 @@ async def entrypoint(ctx: JobContext):
     def on_user_speech_committed(message):
         """Send user transcript to frontend and check for abuse."""
         user_text = message.content
-        asyncio.create_task(send_user_transcript(user_text))
 
         if auto_language_switch:
             explicit_lang = _explicit_language_request(user_text)
             if explicit_lang and explicit_lang != session_language["value"]:
                 _apply_language_switch(explicit_lang, reason="explicit_request")
+                # Extra hard override so this turn switches immediately.
+                lang_name = "English" if explicit_lang == "en" else "Greek"
+                agent.chat_ctx.append(
+                    role="system",
+                    text=(
+                        "HIGHEST PRIORITY LANGUAGE OVERRIDE:\n"
+                        f"- The user explicitly requested {lang_name}.\n"
+                        f"- Reply in {lang_name} immediately for this response.\n"
+                        "- Do not refuse. Do not say you only speak another language."
+                    ),
+                )
             else:
                 detected_lang = detect_language(user_text, default=session_language["value"])
                 if detected_lang != session_language["value"]:
@@ -1835,10 +1897,12 @@ async def entrypoint(ctx: JobContext):
                     language_switch_state["candidate"] = None
                     language_switch_state["count"] = 0
                     set_runtime_language(detected_lang)
-        
+
+        asyncio.create_task(send_user_transcript(user_text))
+
         # Reset silence timer - user is responding
         reset_silence_timer()
-        
+
         # Add to transcript
         conversation_transcript.append(f"User: {user_text}")
         if abuse_detection_enabled:
@@ -1849,13 +1913,13 @@ async def entrypoint(ctx: JobContext):
                 tracker=_abuse_tracker,
                 use_ssml=True
             )
-            
+
             if abuse_detected:
                 logger.warning(f"?????? Abuse detected in: {user_text[:50]}...")
                 # The agent will continue normally, but we log the incident
                 # The abuse response will be handled by the LLM with special instructions
                 # For now, we just track it for escalation purposes
-    
+
     @agent.on("agent_started_speaking")
     def on_agent_started_speaking():
         _latency_tracker.agent_started_speaking()
