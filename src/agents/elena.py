@@ -790,6 +790,47 @@ def create_stt(*, is_sip_call: bool = False):
         default=False,
     )
     effective_stt_auto_detect = stt_auto_detect and (not is_sip_call or sip_stt_auto_detect)
+    openai_stt_model = str(get_agent_setting("openai_stt_model", "whisper-1") or "whisper-1").strip()
+    # Bias OpenAI STT to preserve source language (Greek/English) instead of translating.
+    openai_stt_prompt = str(
+        get_agent_setting(
+            "openai_stt_prompt",
+            (
+                "Transcribe exactly what is spoken. "
+                "Do not translate. "
+                "Keep the original spoken language. "
+                "Likely languages are Greek and English."
+            ),
+        )
+        or ""
+    ).strip()
+
+    def _create_openai_stt(*, language: Optional[str]) -> object:
+        """
+        Create OpenAI STT with best-effort compatibility across plugin versions.
+        Tries prompt + language hints first, then gracefully falls back.
+        """
+        attempts: list[dict] = []
+        base = {"model": openai_stt_model}
+
+        if language:
+            attempts.append({**base, "language": language, "prompt": openai_stt_prompt})
+            attempts.append({**base, "language": language})
+        else:
+            attempts.append({**base, "prompt": openai_stt_prompt})
+            attempts.append(base.copy())
+
+        last_error: Optional[Exception] = None
+        for kwargs in attempts:
+            try:
+                return openai.STT(**kwargs)
+            except TypeError as e:
+                last_error = e
+                continue
+
+        if last_error:
+            raise last_error
+        return openai.STT(model=openai_stt_model)
 
     class FailoverSTT:
         """Wrap a primary STT and fall back to secondary on runtime failure."""
@@ -855,10 +896,8 @@ def create_stt(*, is_sip_call: bool = False):
             logger.warning("Auto language switch enabled; forcing OpenAI Whisper for auto language detection.")
         try:
             logger.info("Using OpenAI Whisper STT - language: auto")
-            room_log("STT_PROVIDER", provider="openai", model="whisper-1", language="auto")
-            return openai.STT(
-                model="whisper-1",
-            )
+            room_log("STT_PROVIDER", provider="openai", model=openai_stt_model, language="auto")
+            return _create_openai_stt(language=None)
         except TypeError as e:
             logger.warning("OpenAI STT auto language failed (%s); falling back to %s", e, stt_lang)
     elif auto_language_switch and not effective_stt_auto_detect:
@@ -885,21 +924,15 @@ def create_stt(*, is_sip_call: bool = False):
             smart_format=True,
         )
         # Fail over to OpenAI Whisper if Deepgram drops mid-call.
-        fallback = openai.STT(
-            model="whisper-1",
-            language=stt_lang,
-        )
+        fallback = _create_openai_stt(language=stt_lang)
         return FailoverSTT(primary, fallback)
     
     # Fallback to OpenAI Whisper
     if provider == "deepgram" and not USE_DEEPGRAM:
         logger.warning("Deepgram requested but not available; falling back to OpenAI Whisper")
     logger.info(f"Using OpenAI Whisper STT - language: {stt_lang}")
-    room_log("STT_PROVIDER", provider="openai", model="whisper-1", language=stt_lang)
-    return openai.STT(
-        model="whisper-1",
-        language=stt_lang,
-    )
+    room_log("STT_PROVIDER", provider="openai", model=openai_stt_model, language=stt_lang)
+    return _create_openai_stt(language=stt_lang)
 
 
 def create_vad():
@@ -1874,6 +1907,12 @@ async def entrypoint(ctx: JobContext):
         if auto_language_switch:
             explicit_lang = _explicit_language_request(user_text)
             if explicit_lang and explicit_lang != session_language["value"]:
+                room_log(
+                    "LANGUAGE_SWITCH_INTENT",
+                    current=session_language["value"],
+                    requested=explicit_lang,
+                    reason="explicit_request",
+                )
                 _apply_language_switch(explicit_lang, reason="explicit_request")
                 # Extra hard override so this turn switches immediately.
                 lang_name = "English" if explicit_lang == "en" else "Greek"
@@ -1888,6 +1927,12 @@ async def entrypoint(ctx: JobContext):
                 )
             else:
                 detected_lang = detect_language(user_text, default=session_language["value"])
+                room_log(
+                    "USER_TEXT_LANG",
+                    current=session_language["value"],
+                    detected=detected_lang,
+                    explicit=explicit_lang or "",
+                )
                 if detected_lang != session_language["value"]:
                     if language_switch_state["candidate"] == detected_lang:
                         language_switch_state["count"] += 1
