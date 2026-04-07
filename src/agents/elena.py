@@ -776,11 +776,20 @@ def create_tts():
     return primary_tts
 
 
-def create_stt():
+def create_stt(*, is_sip_call: bool = False):
     """Create the Speech-to-Text instance optimized for speed."""
     agent_lang = get_agent_language()
     stt_lang = get_stt_language(agent_lang)
     auto_language_switch = _as_bool(get_agent_setting("auto_language_switch", False), default=False)
+    stt_auto_detect = _as_bool(
+        get_agent_setting("stt_auto_detect", auto_language_switch),
+        default=auto_language_switch,
+    )
+    sip_stt_auto_detect = _as_bool(
+        get_agent_setting("sip_stt_auto_detect", False),
+        default=False,
+    )
+    effective_stt_auto_detect = stt_auto_detect and (not is_sip_call or sip_stt_auto_detect)
 
     class FailoverSTT:
         """Wrap a primary STT and fall back to secondary on runtime failure."""
@@ -841,7 +850,7 @@ def create_stt():
     if not provider:
         provider = "deepgram" if USE_DEEPGRAM else "openai"
 
-    if auto_language_switch:
+    if auto_language_switch and effective_stt_auto_detect:
         if provider == "deepgram" and USE_DEEPGRAM:
             logger.warning("Auto language switch enabled; forcing OpenAI Whisper for auto language detection.")
         try:
@@ -852,6 +861,17 @@ def create_stt():
             )
         except TypeError as e:
             logger.warning("OpenAI STT auto language failed (%s); falling back to %s", e, stt_lang)
+    elif auto_language_switch and not effective_stt_auto_detect:
+        if is_sip_call and not sip_stt_auto_detect:
+            logger.info(
+                "Auto language switch enabled, but SIP STT auto detect is disabled; using fixed STT language: %s",
+                stt_lang,
+            )
+        else:
+            logger.info(
+                "Auto language switch enabled, but STT auto detect is disabled; using fixed STT language: %s",
+                stt_lang,
+            )
     
     # Use Deepgram if available (faster than Whisper) and explicitly selected
     if provider == "deepgram" and USE_DEEPGRAM:
@@ -1262,8 +1282,14 @@ async def entrypoint(ctx: JobContext):
     set_runtime_language(base_language)
     session_language = {"value": base_language}
     auto_language_switch = _as_bool(get_agent_setting("auto_language_switch", False), default=False)
+    language_switch_min_turns_setting = get_agent_setting("language_switch_min_turns", 2)
+    if is_sip_call:
+        language_switch_min_turns_setting = get_agent_setting(
+            "sip_language_switch_min_turns",
+            language_switch_min_turns_setting,
+        )
     language_switch_min_turns = _as_int(
-        get_agent_setting("language_switch_min_turns", 2),
+        language_switch_min_turns_setting,
         2,
         min_value=1,
         max_value=5,
@@ -1652,6 +1678,12 @@ async def entrypoint(ctx: JobContext):
         min_endpointing_delay,
         interrupt_min_words,
     )
+    logger.info(
+        "Language switch config: auto_language_switch=%s min_turns=%s call_type=%s",
+        auto_language_switch,
+        language_switch_min_turns,
+        call_type,
+    )
     preemptive_synthesis = _as_bool(
         get_agent_setting("preemptive_synthesis", True),
         default=True,
@@ -1660,7 +1692,7 @@ async def entrypoint(ctx: JobContext):
     logger.info(f"⏱️ Creating agent ({time.time() - startup_time:.1f}s)")
     agent = VoicePipelineAgent(
         vad=create_vad(),
-        stt=create_stt(),
+        stt=create_stt(is_sip_call=is_sip_call),
         llm=create_llm(),
         tts=create_tts(),
         chat_ctx=initial_ctx,

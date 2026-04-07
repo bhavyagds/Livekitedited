@@ -940,6 +940,10 @@ class DatabaseService:
             "agent_greeting_enabled": {"value": True, "description": "Enable greeting on call start"},
             "abuse_detection_enabled": {"value": True, "description": "Enable abuse detection"},
             "auto_language_switch": {"value": True, "description": "Auto-switch response language based on caller"},
+            "language_switch_min_turns": {"value": 2, "description": "Consecutive turns required before auto language switch"},
+            "sip_language_switch_min_turns": {"value": 2, "description": "Consecutive turns required before auto language switch for SIP calls"},
+            "stt_auto_detect": {"value": True, "description": "Allow STT language auto-detection when auto language switch is enabled"},
+            "sip_stt_auto_detect": {"value": False, "description": "Allow STT language auto-detection for SIP calls"},
 
             # Background audio (Settings page)
             "bg_audio_enabled": {"value": False, "description": "Enable background audio"},
