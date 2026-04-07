@@ -1663,17 +1663,28 @@ async def entrypoint(ctx: JobContext):
                 asyncio.create_task(send_agent_transcript(text))
                 logger.info(f"before_tts_cb processing: {text[:50]}...")
 
-                from src.utils import apply_prosody, normalize_time_colons, normalize_punctuation_for_tts
+                from src.utils import (
+                    apply_prosody,
+                    normalize_time_colons,
+                    normalize_numeric_ids_for_tts,
+                    normalize_punctuation_for_tts,
+                )
                 agent_lang = get_agent_language()
                 use_ssml = _as_bool(get_agent_setting("tts_use_ssml", False), default=False)
                 tts_text = _enforce_order_status(text)
                 tts_text = normalize_time_colons(tts_text)
+                tts_text = normalize_numeric_ids_for_tts(tts_text, language=agent_lang)
                 tts_text = normalize_punctuation_for_tts(tts_text)
                 processed_text = apply_prosody(tts_text, language=agent_lang, use_ssml=use_ssml)
                 return processed_text
             else:
                 logger.debug("before_tts_cb got LLMStream (applying streaming normalization)")
-                from src.utils import normalize_time_colons, normalize_punctuation_for_tts
+                from src.utils import (
+                    normalize_time_colons,
+                    normalize_numeric_ids_for_tts,
+                    normalize_punctuation_for_tts,
+                )
+                agent_lang = get_agent_language()
 
                 def _extract_chunk_text(chunk) -> str:
                     if isinstance(chunk, str):
@@ -1695,6 +1706,7 @@ async def entrypoint(ctx: JobContext):
                         raw_buffer += chunk_text
                         updated = _enforce_order_status(raw_buffer)
                         updated = normalize_time_colons(updated)
+                        updated = normalize_numeric_ids_for_tts(updated, language=agent_lang)
                         updated = normalize_punctuation_for_tts(updated)
                         if updated.startswith(normalized_buffer):
                             delta = updated[len(normalized_buffer):]
