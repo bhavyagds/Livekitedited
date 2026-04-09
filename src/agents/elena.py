@@ -1510,30 +1510,6 @@ async def entrypoint(ctx: JobContext):
         min_value=1,
         max_value=5,
     )
-    language_switch_confidence_threshold = _as_float(
-        get_agent_setting("language_switch_confidence_threshold", 0.68),
-        0.68,
-        min_value=0.50,
-        max_value=0.95,
-    )
-    english_switch_confidence_threshold = _as_float(
-        get_agent_setting(
-            "english_switch_confidence_threshold",
-            max(0.74, language_switch_confidence_threshold),
-        ),
-        max(0.74, language_switch_confidence_threshold),
-        min_value=0.50,
-        max_value=0.99,
-    )
-    greek_switch_confidence_threshold = _as_float(
-        get_agent_setting(
-            "greek_switch_confidence_threshold",
-            language_switch_confidence_threshold,
-        ),
-        language_switch_confidence_threshold,
-        min_value=0.50,
-        max_value=0.99,
-    )
     language_switch_state = {"candidate": None, "count": 0}
 
     def _normalize_switch_text(text: str) -> str:
@@ -1619,35 +1595,26 @@ async def entrypoint(ctx: JobContext):
             return "el"
         return None
 
-    def _language_confidence(text: str, target_lang: str) -> float:
+    def _english_switch_confident(text: str) -> bool:
         """
-        Compute a lightweight confidence score in [0, 1] for a target language.
-
-        This is transcript-based (not model-native STT confidence) and is used
-        to gate mid-call language switching.
+        Return True only when transcript strongly looks like real English.
+        This prevents Greek speech transliterated into latin characters
+        from incorrectly switching the call to English.
         """
         raw = (text or "").strip()
         if not raw:
-            return 0.0
+            return False
 
-        greek_count = len(re.findall(r"[\u0370-\u03FF\u1F00-\u1FFF]", raw))
-        latin_count = len(re.findall(r"[A-Za-z]", raw))
-        total_chars = max(greek_count + latin_count, 1)
-        greek_ratio = greek_count / total_chars
-        latin_ratio = latin_count / total_chars
+        # If any Greek script exists, do not treat as English auto-switch.
+        if re.search(r"[\u0370-\u03FF\u1F00-\u1FFF]", raw):
+            return False
 
-        if target_lang == "el":
-            score = 0.0
-            if greek_count > 0:
-                score += 0.70 * greek_ratio
-                score += 0.20 * min(greek_count / 6.0, 1.0)
-                if greek_count >= latin_count:
-                    score += 0.10
-            return max(0.0, min(1.0, score))
-
-        # English confidence
         lowered = raw.lower()
         tokens = re.findall(r"[a-z']+", lowered)
+        if len(tokens) < 4:
+            return False
+
+        # Function/content words that appear frequently in real English utterances.
         english_markers = {
             "i", "you", "we", "they", "he", "she", "it",
             "am", "is", "are", "was", "were",
@@ -1658,44 +1625,24 @@ async def entrypoint(ctx: JobContext):
         marker_hits = sum(1 for t in tokens if t in english_markers)
         marker_ratio = marker_hits / max(len(tokens), 1)
 
-        score = 0.0
-        if latin_count > 0:
-            score += 0.50 * latin_ratio
-            score += 0.30 * marker_ratio
-            score += 0.20 * min(len(tokens) / 6.0, 1.0)
+        # Be strict from Greek -> English: require clear English signal.
+        return marker_hits >= 2 and marker_ratio >= 0.22
 
-        # Mixed Greek+Latin text is usually Greek speech noise; penalize.
-        if greek_count > 0:
-            score *= 0.40
-
-        return max(0.0, min(1.0, score))
-
-    def _allow_auto_language_switch(
-        current_lang: str,
-        detected_lang: str,
-        text: str,
-    ) -> tuple[bool, float, float]:
-        """Gate automatic switching with confidence thresholds."""
+    def _allow_auto_language_switch(current_lang: str, detected_lang: str, text: str) -> bool:
+        """Gate automatic switching to reduce false positives from noisy STT output."""
         if detected_lang == current_lang:
-            return False, 1.0, 1.0
-
-        confidence = _language_confidence(text, detected_lang)
-        threshold = (
-            english_switch_confidence_threshold
-            if detected_lang == "en"
-            else greek_switch_confidence_threshold
-        )
-        allowed = confidence >= threshold
-        if not allowed:
-            room_log(
-                "LANGUAGE_SWITCH_SUPPRESSED",
-                current=current_lang,
-                candidate=detected_lang,
-                reason="low_confidence",
-                confidence=round(confidence, 3),
-                threshold=round(threshold, 3),
-            )
-        return allowed, confidence, threshold
+            return False
+        if current_lang == "el" and detected_lang == "en":
+            allowed = _english_switch_confident(text)
+            if not allowed:
+                room_log(
+                    "LANGUAGE_SWITCH_SUPPRESSED",
+                    current=current_lang,
+                    candidate=detected_lang,
+                    reason="low_english_confidence",
+                )
+            return allowed
+        return True
 
     def _apply_language_switch(new_lang: str, reason: str) -> None:
         """Switch runtime/session language and append a scoped system hint."""
@@ -2081,12 +2028,10 @@ async def entrypoint(ctx: JobContext):
         interrupt_min_words,
     )
     logger.info(
-        "Language switch config: auto_language_switch=%s min_turns=%s call_type=%s en_threshold=%.2f el_threshold=%.2f",
+        "Language switch config: auto_language_switch=%s min_turns=%s call_type=%s",
         auto_language_switch,
         language_switch_min_turns,
         call_type,
-        english_switch_confidence_threshold,
-        greek_switch_confidence_threshold,
     )
     preemptive_synthesis = _as_bool(
         get_agent_setting("preemptive_synthesis", True),
@@ -2233,25 +2178,17 @@ async def entrypoint(ctx: JobContext):
                     ),
                 )
             else:
-                raw_detected_lang = detect_language(user_text, default=session_language["value"])
-                detected_lang = raw_detected_lang
-                switch_confidence = None
-                switch_threshold = None
-                if raw_detected_lang != session_language["value"]:
-                    allowed, switch_confidence, switch_threshold = _allow_auto_language_switch(
-                        session_language["value"],
-                        raw_detected_lang,
-                        user_text,
-                    )
-                    if not allowed:
-                        detected_lang = session_language["value"]
+                detected_lang = detect_language(user_text, default=session_language["value"])
+                if detected_lang != session_language["value"] and not _allow_auto_language_switch(
+                    session_language["value"],
+                    detected_lang,
+                    user_text,
+                ):
+                    detected_lang = session_language["value"]
                 room_log(
                     "USER_TEXT_LANG",
                     current=session_language["value"],
                     detected=detected_lang,
-                    raw_detected=raw_detected_lang,
-                    confidence=round(switch_confidence, 3) if switch_confidence is not None else None,
-                    threshold=round(switch_threshold, 3) if switch_threshold is not None else None,
                     explicit=explicit_lang or "",
                 )
                 if detected_lang != session_language["value"]:
