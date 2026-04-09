@@ -1487,6 +1487,55 @@ async def entrypoint(ctx: JobContext):
             return "el"
         return None
 
+    def _english_switch_confident(text: str) -> bool:
+        """
+        Return True only when transcript strongly looks like real English.
+        This prevents Greek speech transliterated into latin characters
+        from incorrectly switching the call to English.
+        """
+        raw = (text or "").strip()
+        if not raw:
+            return False
+
+        # If any Greek script exists, do not treat as English auto-switch.
+        if re.search(r"[\u0370-\u03FF\u1F00-\u1FFF]", raw):
+            return False
+
+        lowered = raw.lower()
+        tokens = re.findall(r"[a-z']+", lowered)
+        if len(tokens) < 4:
+            return False
+
+        # Function/content words that appear frequently in real English utterances.
+        english_markers = {
+            "i", "you", "we", "they", "he", "she", "it",
+            "am", "is", "are", "was", "were",
+            "have", "has", "had", "do", "did", "can",
+            "the", "a", "an", "to", "for", "of", "in", "on", "with", "and",
+            "please", "my", "your", "order", "problem", "food",
+        }
+        marker_hits = sum(1 for t in tokens if t in english_markers)
+        marker_ratio = marker_hits / max(len(tokens), 1)
+
+        # Be strict from Greek -> English: require clear English signal.
+        return marker_hits >= 2 and marker_ratio >= 0.22
+
+    def _allow_auto_language_switch(current_lang: str, detected_lang: str, text: str) -> bool:
+        """Gate automatic switching to reduce false positives from noisy STT output."""
+        if detected_lang == current_lang:
+            return False
+        if current_lang == "el" and detected_lang == "en":
+            allowed = _english_switch_confident(text)
+            if not allowed:
+                room_log(
+                    "LANGUAGE_SWITCH_SUPPRESSED",
+                    current=current_lang,
+                    candidate=detected_lang,
+                    reason="low_english_confidence",
+                )
+            return allowed
+        return True
+
     def _apply_language_switch(new_lang: str, reason: str) -> None:
         """Switch runtime/session language and append a scoped system hint."""
         session_language["value"] = new_lang
@@ -2002,6 +2051,12 @@ async def entrypoint(ctx: JobContext):
                 )
             else:
                 detected_lang = detect_language(user_text, default=session_language["value"])
+                if detected_lang != session_language["value"] and not _allow_auto_language_switch(
+                    session_language["value"],
+                    detected_lang,
+                    user_text,
+                ):
+                    detected_lang = session_language["value"]
                 room_log(
                     "USER_TEXT_LANG",
                     current=session_language["value"],
