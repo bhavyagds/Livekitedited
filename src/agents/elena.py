@@ -344,6 +344,7 @@ _current_session: dict = {
     "room_name": None,
     "job_id": None,
     "call_id": None,
+    "tts_provider": "unknown",
     "room_logger": None,
     "should_end": False,
     "silence_tracker": None,
@@ -370,6 +371,17 @@ def _truncate(text: str, max_len: int = 500) -> str:
     if len(cleaned) <= max_len:
         return cleaned
     return cleaned[:max_len] + "…"
+
+
+def _strip_markup_for_output(text: str) -> str:
+    """Strip SSML/markdown markers so logs/UI don't include literal markup."""
+    if not text:
+        return ""
+    cleaned = re.sub(r"</?[^>]+>", " ", str(text))
+    cleaned = re.sub(r"^\s*(?:[-*]|\u2022)\s+", " ", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"[*_`~#]+", " ", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return cleaned.strip()
 
 
 def _create_room_logger(room_name: str, job_id: Optional[str]) -> tuple[logging.Logger, str]:
@@ -531,6 +543,7 @@ def create_tts():
                 return
             if self._locked_provider is None:
                 self._locked_provider = provider
+                _current_session["tts_provider"] = "elevenlabs" if provider == "primary" else "openai"
                 logger.info("TTS provider locked to %s for this call", provider)
                 room_log("TTS_LOCKED", provider=provider)
 
@@ -636,6 +649,7 @@ def create_tts():
         )
         logger.warning(f"Falling back to OpenAI TTS: model={model}, voice={voice}, speed={speed}")
         room_log("TTS_PROVIDER", provider="openai", model=model, voice=voice, speed=speed)
+        _current_session["tts_provider"] = "openai"
         tts = openai.TTS(model=model, voice=voice, speed=speed)
         setattr(tts, "_supports_ssml", False)
         setattr(tts, "_provider_name", "openai")
@@ -794,6 +808,7 @@ def create_tts():
         stability=voice_stability,
         similarity=voice_similarity,
     )
+    _current_session["tts_provider"] = "elevenlabs"
 
     allow_advanced = _as_bool(
         get_agent_setting("elevenlabs_allow_advanced_settings", False),
@@ -1786,7 +1801,7 @@ async def entrypoint(ctx: JobContext):
     async def send_agent_transcript(text: str):
         """Send spoken agent text to frontend chat in realtime."""
         try:
-            cleaned = (text or "").strip()
+            cleaned = _strip_markup_for_output(text)
             if not cleaned:
                 return
             if cleaned in _sent_agent_transcripts:
@@ -1944,7 +1959,6 @@ async def entrypoint(ctx: JobContext):
         try:
             # text can be a string or LLMStream - handle both
             if isinstance(text, str):
-                asyncio.create_task(send_agent_transcript(text))
                 logger.info(f"before_tts_cb processing: {text[:50]}...")
                 strict_wait_phrase = _as_bool(
                     get_agent_setting("order_lookup_wait_phrase_strict", True),
@@ -1991,6 +2005,8 @@ async def entrypoint(ctx: JobContext):
                             supports_ssml = bool(getattr(tts_engine, "_supports_ssml", False))
                     else:
                         supports_ssml = bool(getattr(tts_engine, "_supports_ssml", False))
+                if tts_provider == "unknown":
+                    tts_provider = str(_current_session.get("tts_provider") or "unknown")
 
                 if use_ssml and not supports_ssml:
                     room_log(
@@ -2004,6 +2020,15 @@ async def entrypoint(ctx: JobContext):
                 tts_text = normalize_time_colons(tts_text)
                 tts_text = normalize_numeric_ids_for_tts(tts_text, language=agent_lang)
                 tts_text = normalize_punctuation_for_tts(tts_text)
+                cleaned_ui_text = _strip_markup_for_output(tts_text)
+                if cleaned_ui_text:
+                    asyncio.create_task(send_agent_transcript(cleaned_ui_text))
+                    room_log(
+                        "TTS_TEXT_FINAL",
+                        provider=tts_provider,
+                        ssml=use_ssml,
+                        text=_truncate(cleaned_ui_text),
+                    )
                 processed_text = apply_prosody(tts_text, language=agent_lang, use_ssml=use_ssml)
                 return processed_text
             else:
@@ -2298,11 +2323,12 @@ async def entrypoint(ctx: JobContext):
         try:
             text = message.content if hasattr(message, 'content') else None
             if text:
-                asyncio.create_task(send_agent_transcript(text))
-                asyncio.create_task(send_agent_info(text))
-                conversation_transcript.append(f"Agent: {text}")
-                logger.info(f"agent_speech_committed: {text[:50]}...")
-                room_log("AGENT_TEXT", text=_truncate(text))
+                display_text = _strip_markup_for_output(text)
+                asyncio.create_task(send_agent_transcript(display_text or text))
+                asyncio.create_task(send_agent_info(display_text or text))
+                conversation_transcript.append(f"Agent: {display_text or text}")
+                logger.info(f"agent_speech_committed: {(display_text or text)[:50]}...")
+                room_log("AGENT_TEXT", text=_truncate(display_text or text))
         except Exception as e:
             logger.error(f"Error in agent_speech_committed: {e}")
     # Track detailed metrics from pipeline
