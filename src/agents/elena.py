@@ -1510,6 +1510,12 @@ async def entrypoint(ctx: JobContext):
         min_value=1,
         max_value=5,
     )
+    explicit_language_lock_seconds = _as_int(
+        get_agent_setting("explicit_language_lock_seconds", 120),
+        120,
+        min_value=0,
+        max_value=600,
+    )
     language_switch_confidence_threshold = _as_float(
         get_agent_setting("language_switch_confidence_threshold", 0.68),
         0.68,
@@ -1535,6 +1541,7 @@ async def entrypoint(ctx: JobContext):
         max_value=0.99,
     )
     language_switch_state = {"candidate": None, "count": 0}
+    explicit_language_lock = {"lang": None, "until": 0.0}
 
     def _normalize_switch_text(text: str) -> str:
         """Normalize text for robust language-switch intent detection."""
@@ -1552,72 +1559,60 @@ async def entrypoint(ctx: JobContext):
         if not lowered:
             return None
 
-        english_requests = (
-            "speak english",
-            "speak in english",
-            "can you speak english",
-            "can you speak in english",
-            "can we speak english",
-            "can we speak in english",
-            "in english",
-            "english please",
-            "switch to english",
-            "switch language to english",
-            "talk in english",
-            "reply in english",
-            "respond in english",
-            "answer in english",
-            "details in english",
-            "english language",
-            "mila agglika",
-            "sta agglika",
-            "μιλα αγγλικα",
-            "στα αγγλικα",
-            "μίλα αγγλικά",
-            "στα αγγλικά",
-        )
-        greek_requests = (
-            "speak greek",
-            "speak in greek",
-            "can you speak greek",
-            "can you speak in greek",
-            "can we speak greek",
-            "can we speak in greek",
-            "in greek",
-            "greek please",
-            "switch to greek",
-            "switch language to greek",
-            "talk in greek",
-            "reply in greek",
-            "respond in greek",
-            "answer in greek",
-            "greek language",
-            "mila ellinika",
-            "sta ellinika",
-            "μιλα ελληνικα",
-            "στα ελληνικα",
-            "μίλα ελληνικά",
-            "στα ελληνικά",
-        )
+        # Detect "English" intent robustly (handles common STT spellings + Greek script).
+        english_token = any(
+            token in lowered
+            for token in (
+                "english",
+                "agglik",
+                "anglik",
+                "inglis",
+                "englis",
+                "eglis",
+            )
+        ) or bool(re.search(r"[\u03B1\u0391][\u03B3\u0393]{2}[\u03BB\u039B]", lowered))
 
-        if any(phrase in lowered for phrase in english_requests):
-            return "en"
-        if any(phrase in lowered for phrase in greek_requests):
-            return "el"
+        # Detect "Greek" intent robustly (handles transliterations + Greek script).
+        greek_token = any(
+            token in lowered
+            for token in (
+                "greek",
+                "ellinik",
+                "elinik",
+            )
+        ) or bool(re.search(r"[\u03B5\u0395][\u03BB\u039B]{2}[\u03B7\u0397\u03B9\u0399][\u03BD\u039D]", lowered))
 
-        # Fallback intent heuristics for broader phrasing coverage.
-        english_token = ("english" in lowered) or ("αγγλικ" in lowered)
-        greek_token = ("greek" in lowered) or ("ελληνικ" in lowered) or ("ellinik" in lowered)
         switch_verbs = (
             "speak", "talk", "reply", "respond", "answer", "switch", "language",
-            "μιλα", "μίλα", "μιλησουμε", "μιλήσουμε", "απάντηση",
+            "mila", "milise", "milisoume", "apantise", "apantisi",
+            "sta", "se", "stin", "glossa",
         )
         has_switch_verb = any(v in lowered for v in switch_verbs)
-        if english_token and has_switch_verb:
+        polite_hint = "please" in lowered
+
+        if english_token and (has_switch_verb or polite_hint):
             return "en"
-        if greek_token and has_switch_verb:
+        if greek_token and (has_switch_verb or polite_hint):
             return "el"
         return None
+
+    def _set_explicit_language_lock(lang: str) -> None:
+        """Lock active language for a short time after an explicit user request."""
+        if explicit_language_lock_seconds <= 0:
+            return
+        explicit_language_lock["lang"] = lang
+        explicit_language_lock["until"] = time.time() + explicit_language_lock_seconds
+        room_log("LANGUAGE_SWITCH_LOCKED", language=lang, ttl_s=explicit_language_lock_seconds)
+
+    def _active_explicit_language_lock() -> Optional[str]:
+        """Return active lock language, if not expired."""
+        lang = explicit_language_lock.get("lang")
+        until = float(explicit_language_lock.get("until") or 0.0)
+        if not lang or time.time() >= until:
+            explicit_language_lock["lang"] = None
+            explicit_language_lock["until"] = 0.0
+            return None
+        return str(lang)
 
     def _language_confidence(text: str, target_lang: str) -> float:
         """
@@ -1703,6 +1698,8 @@ async def entrypoint(ctx: JobContext):
         set_runtime_language(new_lang)
         language_switch_state["candidate"] = None
         language_switch_state["count"] = 0
+        if reason == "explicit_request":
+            _set_explicit_language_lock(new_lang)
         lang_name = "Greek" if new_lang == "el" else "English"
         agent.chat_ctx.append(
             role="system",
@@ -1712,6 +1709,22 @@ async def entrypoint(ctx: JobContext):
             ),
         )
         room_log("LANGUAGE_SWITCH", language=new_lang, reason=reason)
+
+    def _append_hard_language_override(lang: str, reason: str) -> None:
+        """Force the next response language for stronger persistence."""
+        lang_name = "English" if lang == "en" else "Greek"
+        other_lang = "Greek" if lang == "en" else "English"
+        agent.chat_ctx.append(
+            role="system",
+            text=(
+                "HIGHEST PRIORITY LANGUAGE OVERRIDE:\n"
+                f"- Active language is {lang_name}.\n"
+                f"- Reply in {lang_name} for this response.\n"
+                f"- Do NOT respond in {other_lang}.\n"
+                "- Do not refuse language switch requests."
+            ),
+        )
+        room_log("LANGUAGE_OVERRIDE_ENFORCED", language=lang, reason=reason)
 
     # Initialize abuse tracker for this session
     from src.utils.abuse_handler import AbuseTracker, check_and_respond_to_abuse
@@ -2081,12 +2094,13 @@ async def entrypoint(ctx: JobContext):
         interrupt_min_words,
     )
     logger.info(
-        "Language switch config: auto_language_switch=%s min_turns=%s call_type=%s en_threshold=%.2f el_threshold=%.2f",
+        "Language switch config: auto_language_switch=%s min_turns=%s call_type=%s en_threshold=%.2f el_threshold=%.2f explicit_lock_s=%s",
         auto_language_switch,
         language_switch_min_turns,
         call_type,
         english_switch_confidence_threshold,
         greek_switch_confidence_threshold,
+        explicit_language_lock_seconds,
     )
     preemptive_synthesis = _as_bool(
         get_agent_setting("preemptive_synthesis", True),
@@ -2213,31 +2227,44 @@ async def entrypoint(ctx: JobContext):
 
         if auto_language_switch:
             explicit_lang = _explicit_language_request(user_text)
-            if explicit_lang and explicit_lang != session_language["value"]:
-                room_log(
-                    "LANGUAGE_SWITCH_INTENT",
-                    current=session_language["value"],
-                    requested=explicit_lang,
-                    reason="explicit_request",
-                )
-                _apply_language_switch(explicit_lang, reason="explicit_request")
+            if explicit_lang:
+                if explicit_lang != session_language["value"]:
+                    room_log(
+                        "LANGUAGE_SWITCH_INTENT",
+                        current=session_language["value"],
+                        requested=explicit_lang,
+                        reason="explicit_request",
+                    )
+                    _apply_language_switch(explicit_lang, reason="explicit_request")
+                else:
+                    _set_explicit_language_lock(explicit_lang)
+                    room_log(
+                        "LANGUAGE_SWITCH_INTENT",
+                        current=session_language["value"],
+                        requested=explicit_lang,
+                        reason="explicit_request_reaffirmed",
+                    )
+
                 # Extra hard override so this turn switches immediately.
-                lang_name = "English" if explicit_lang == "en" else "Greek"
-                agent.chat_ctx.append(
-                    role="system",
-                    text=(
-                        "HIGHEST PRIORITY LANGUAGE OVERRIDE:\n"
-                        f"- The user explicitly requested {lang_name}.\n"
-                        f"- Reply in {lang_name} immediately for this response.\n"
-                        "- Do not refuse. Do not say you only speak another language."
-                    ),
-                )
+                _append_hard_language_override(explicit_lang, reason="explicit_request")
             else:
                 raw_detected_lang = detect_language(user_text, default=session_language["value"])
                 detected_lang = raw_detected_lang
                 switch_confidence = None
                 switch_threshold = None
-                if raw_detected_lang != session_language["value"]:
+                locked_lang = _active_explicit_language_lock()
+                if locked_lang and raw_detected_lang != locked_lang:
+                    detected_lang = locked_lang
+                    if session_language["value"] != locked_lang:
+                        _apply_language_switch(locked_lang, reason="explicit_lock_reapply")
+                    room_log(
+                        "LANGUAGE_SWITCH_SUPPRESSED",
+                        current=session_language["value"],
+                        candidate=raw_detected_lang,
+                        reason="explicit_lock_active",
+                        locked_language=locked_lang,
+                    )
+                elif raw_detected_lang != session_language["value"]:
                     allowed, switch_confidence, switch_threshold = _allow_auto_language_switch(
                         session_language["value"],
                         raw_detected_lang,
@@ -2252,8 +2279,11 @@ async def entrypoint(ctx: JobContext):
                     raw_detected=raw_detected_lang,
                     confidence=round(switch_confidence, 3) if switch_confidence is not None else None,
                     threshold=round(switch_threshold, 3) if switch_threshold is not None else None,
+                    locked=locked_lang or "",
                     explicit=explicit_lang or "",
                 )
+                if locked_lang:
+                    _append_hard_language_override(locked_lang, reason="explicit_lock_active")
                 if detected_lang != session_language["value"]:
                     if language_switch_state["candidate"] == detected_lang:
                         language_switch_state["count"] += 1
