@@ -791,6 +791,7 @@ def create_stt(*, is_sip_call: bool = False):
     )
     effective_stt_auto_detect = stt_auto_detect and (not is_sip_call or sip_stt_auto_detect)
     openai_stt_model = str(get_agent_setting("openai_stt_model", "whisper-1") or "whisper-1").strip()
+    deepgram_stt_model = str(get_agent_setting("deepgram_stt_model", "nova-3") or "nova-3").strip()
     # Bias OpenAI STT to preserve source language (Greek/English) instead of translating.
     openai_stt_prompt = str(
         get_agent_setting(
@@ -823,14 +824,67 @@ def create_stt(*, is_sip_call: bool = False):
         last_error: Optional[Exception] = None
         for kwargs in attempts:
             try:
+                logger.info(
+                    "Creating OpenAI STT: model=%s language=%s prompt=%s",
+                    kwargs.get("model"),
+                    kwargs.get("language", "auto"),
+                    bool(kwargs.get("prompt")),
+                )
                 return openai.STT(**kwargs)
             except TypeError as e:
                 last_error = e
+                logger.warning("OpenAI STT args not supported, retrying with fallback args: %s", e)
                 continue
 
         if last_error:
             raise last_error
         return openai.STT(model=openai_stt_model)
+
+    def _create_deepgram_stt(*, language: Optional[str], auto_detect: bool) -> object:
+        """
+        Create Deepgram STT with best-effort compatibility across plugin versions.
+        For auto language switching, prefer Deepgram auto language detection.
+        """
+        if not USE_DEEPGRAM:
+            raise RuntimeError("Deepgram plugin is not available")
+
+        base = {
+            "model": deepgram_stt_model,
+            "interim_results": True,
+            "punctuate": True,
+            "smart_format": True,
+        }
+        attempts: list[dict] = []
+
+        if auto_detect:
+            attempts.append({**base, "detect_language": True, "language": "multi"})
+            attempts.append({**base, "detect_language": True})
+            attempts.append({**base, "language": "multi"})
+            attempts.append(base.copy())
+        elif language:
+            attempts.append({**base, "language": language})
+            attempts.append(base.copy())
+        else:
+            attempts.append(base.copy())
+
+        last_error: Optional[Exception] = None
+        for kwargs in attempts:
+            try:
+                logger.info(
+                    "Creating Deepgram STT: model=%s language=%s detect_language=%s",
+                    kwargs.get("model"),
+                    kwargs.get("language", "auto"),
+                    kwargs.get("detect_language", False),
+                )
+                return deepgram.STT(**kwargs)
+            except TypeError as e:
+                last_error = e
+                logger.warning("Deepgram STT args not supported, retrying with fallback args: %s", e)
+                continue
+
+        if last_error:
+            raise last_error
+        return deepgram.STT(model=deepgram_stt_model)
 
     class FailoverSTT:
         """Wrap a primary STT and fall back to secondary on runtime failure."""
@@ -891,16 +945,7 @@ def create_stt(*, is_sip_call: bool = False):
     if not provider:
         provider = "deepgram" if USE_DEEPGRAM else "openai"
 
-    if auto_language_switch and effective_stt_auto_detect:
-        if provider == "deepgram" and USE_DEEPGRAM:
-            logger.warning("Auto language switch enabled; forcing OpenAI Whisper for auto language detection.")
-        try:
-            logger.info("Using OpenAI Whisper STT - language: auto")
-            room_log("STT_PROVIDER", provider="openai", model=openai_stt_model, language="auto")
-            return _create_openai_stt(language=None)
-        except TypeError as e:
-            logger.warning("OpenAI STT auto language failed (%s); falling back to %s", e, stt_lang)
-    elif auto_language_switch and not effective_stt_auto_detect:
+    if auto_language_switch and not effective_stt_auto_detect:
         if is_sip_call and not sip_stt_auto_detect:
             logger.info(
                 "Auto language switch enabled, but SIP STT auto detect is disabled; using fixed STT language: %s",
@@ -912,25 +957,47 @@ def create_stt(*, is_sip_call: bool = False):
                 stt_lang,
             )
     
-    # Use Deepgram if available (faster than Whisper) and explicitly selected
+    # Use Deepgram as primary when selected; OpenAI remains the fallback.
     if provider == "deepgram" and USE_DEEPGRAM:
-        logger.info(f"Using Deepgram STT (fast) - language: {stt_lang}")
-        room_log("STT_PROVIDER", provider="deepgram", model="nova-3", language=stt_lang)
-        primary = deepgram.STT(
-            model="nova-3",
-            language=stt_lang,
-            interim_results=True,  # Keep connection active with interim results
-            punctuate=True,
-            smart_format=True,
+        use_auto_detect = auto_language_switch and effective_stt_auto_detect
+        fallback_language = None if use_auto_detect else stt_lang
+        fallback = _create_openai_stt(language=fallback_language)
+        try:
+            primary = _create_deepgram_stt(language=stt_lang, auto_detect=use_auto_detect)
+        except Exception as e:
+            logger.warning("Deepgram STT init failed, falling back to OpenAI STT: %s", e)
+            room_log("STT_FAILOVER", reason=f"deepgram_init_failed:{str(e)[:180]}")
+            if use_auto_detect:
+                logger.info("Using OpenAI STT - model: %s - language: auto", openai_stt_model)
+                room_log("STT_PROVIDER", provider="openai", model=openai_stt_model, language="auto")
+                return _create_openai_stt(language=None)
+            logger.info("Using OpenAI STT - model: %s - language: %s", openai_stt_model, stt_lang)
+            room_log("STT_PROVIDER", provider="openai", model=openai_stt_model, language=stt_lang)
+            return _create_openai_stt(language=stt_lang)
+
+        stt_language_for_log = "auto" if use_auto_detect else stt_lang
+        logger.info("Using Deepgram STT (priority) - model: %s - language: %s", deepgram_stt_model, stt_language_for_log)
+        room_log(
+            "STT_PROVIDER",
+            provider="deepgram",
+            model=deepgram_stt_model,
+            language=stt_language_for_log,
+            auto_detect=use_auto_detect,
         )
-        # Fail over to OpenAI Whisper if Deepgram drops mid-call.
-        fallback = _create_openai_stt(language=stt_lang)
         return FailoverSTT(primary, fallback)
+
+    if auto_language_switch and effective_stt_auto_detect:
+        try:
+            logger.info("Using OpenAI STT - model: %s - language: auto", openai_stt_model)
+            room_log("STT_PROVIDER", provider="openai", model=openai_stt_model, language="auto")
+            return _create_openai_stt(language=None)
+        except TypeError as e:
+            logger.warning("OpenAI STT auto language failed (%s); falling back to %s", e, stt_lang)
     
     # Fallback to OpenAI Whisper
     if provider == "deepgram" and not USE_DEEPGRAM:
         logger.warning("Deepgram requested but not available; falling back to OpenAI Whisper")
-    logger.info(f"Using OpenAI Whisper STT - language: {stt_lang}")
+    logger.info("Using OpenAI STT - model: %s - language: %s", openai_stt_model, stt_lang)
     room_log("STT_PROVIDER", provider="openai", model=openai_stt_model, language=stt_lang)
     return _create_openai_stt(language=stt_lang)
 
