@@ -349,6 +349,8 @@ _current_session: dict = {
     "silence_tracker": None,
     "silence_pause_depth": 0,
     "last_lookup_wait_phrase": None,
+    "pending_lookup_wait_phrase": None,
+    "pending_lookup_wait_phrase_set_at": 0.0,
 }
 
 
@@ -1167,6 +1169,8 @@ class ElenaFunctionContext(llm.FunctionContext):
         options = [p for p in phrases if p != last_phrase] or list(phrases)
         phrase = random.choice(options)
         _current_session["last_lookup_wait_phrase"] = phrase
+        _current_session["pending_lookup_wait_phrase"] = phrase
+        _current_session["pending_lookup_wait_phrase_set_at"] = time.time()
         room_log("TOOL_WAIT_ACK_SELECTED", language=lang, phrase=_truncate(phrase))
         return phrase
 
@@ -1403,6 +1407,8 @@ async def entrypoint(ctx: JobContext):
     _current_session["silence_tracker"] = None
     _current_session["silence_pause_depth"] = 0
     _current_session["last_lookup_wait_phrase"] = None
+    _current_session["pending_lookup_wait_phrase"] = None
+    _current_session["pending_lookup_wait_phrase_set_at"] = 0.0
     
     # =========================================================================
     # PARALLEL STARTUP - Run ALL independent operations concurrently for speed
@@ -1924,6 +1930,23 @@ async def entrypoint(ctx: JobContext):
             if isinstance(text, str):
                 asyncio.create_task(send_agent_transcript(text))
                 logger.info(f"before_tts_cb processing: {text[:50]}...")
+                strict_wait_phrase = _as_bool(
+                    get_agent_setting("order_lookup_wait_phrase_strict", True),
+                    default=True,
+                )
+                if strict_wait_phrase:
+                    pending_phrase = _current_session.get("pending_lookup_wait_phrase")
+                    pending_set_at = float(_current_session.get("pending_lookup_wait_phrase_set_at") or 0.0)
+                    if pending_phrase and (time.time() - pending_set_at) <= 20.0:
+                        if pending_phrase.lower() not in text.lower():
+                            text = f"{pending_phrase} {text}".strip()
+                            room_log("TOOL_WAIT_ACK_ENFORCED", phrase=_truncate(pending_phrase))
+                        _current_session["pending_lookup_wait_phrase"] = None
+                        _current_session["pending_lookup_wait_phrase_set_at"] = 0.0
+                    elif pending_phrase:
+                        # Expire stale pending phrase to avoid polluting unrelated turns.
+                        _current_session["pending_lookup_wait_phrase"] = None
+                        _current_session["pending_lookup_wait_phrase_set_at"] = 0.0
 
                 from src.utils import (
                     apply_prosody,
@@ -2364,6 +2387,8 @@ async def entrypoint(ctx: JobContext):
             _current_session["silence_tracker"] = None
             _current_session["silence_pause_depth"] = 0
             _current_session["last_lookup_wait_phrase"] = None
+            _current_session["pending_lookup_wait_phrase"] = None
+            _current_session["pending_lookup_wait_phrase_set_at"] = 0.0
             set_runtime_language(None)
     # Handle participant disconnection
     @ctx.room.on("participant_disconnected")
