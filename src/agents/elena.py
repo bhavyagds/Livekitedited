@@ -1594,6 +1594,12 @@ async def entrypoint(ctx: JobContext):
             return "en"
         if greek_token and (has_switch_verb or polite_hint):
             return "el"
+        # STT can heavily distort verbs; if only one language token is present,
+        # still treat it as an explicit language request.
+        if english_token and not greek_token:
+            return "en"
+        if greek_token and not english_token:
+            return "el"
         return None
 
     def _set_explicit_language_lock(lang: str) -> None:
