@@ -501,12 +501,13 @@ def create_tts():
     class FailoverTTS:
         """Wrap a primary TTS and fall back to secondary on runtime failure."""
 
-        def __init__(self, primary, fallback):
+        def __init__(self, primary, fallback, *, primary_supports_ssml: bool = False):
             self._primary = primary
             self._fallback = fallback
             self._use_fallback = False
             self._locked_provider = None  # "primary" or "fallback"
             self._audio_emitted = False
+            self._primary_supports_ssml = primary_supports_ssml
             self._lock_per_call = _as_bool(
                 get_agent_setting("tts_failover_lock_per_call", True),
                 default=True,
@@ -518,6 +519,12 @@ def create_tts():
             if self._locked_provider == "fallback":
                 return self._fallback
             return self._fallback if self._use_fallback else self._primary
+
+        def current_provider_name(self) -> str:
+            return "elevenlabs" if self._active() is self._primary else "openai"
+
+        def supports_ssml(self) -> bool:
+            return self._active() is self._primary and self._primary_supports_ssml
 
         def _lock_to(self, provider: str):
             if not self._lock_per_call:
@@ -629,7 +636,10 @@ def create_tts():
         )
         logger.warning(f"Falling back to OpenAI TTS: model={model}, voice={voice}, speed={speed}")
         room_log("TTS_PROVIDER", provider="openai", model=model, voice=voice, speed=speed)
-        return openai.TTS(model=model, voice=voice, speed=speed)
+        tts = openai.TTS(model=model, voice=voice, speed=speed)
+        setattr(tts, "_supports_ssml", False)
+        setattr(tts, "_provider_name", "openai")
+        return tts
 
     def elevenlabs_available() -> bool:
         """Check whether ElevenLabs key is valid for core voice endpoints."""
@@ -814,8 +824,14 @@ def create_tts():
         model=tts_model,
         enable_ssml_parsing=tts_use_ssml,
     )
+    setattr(primary_tts, "_supports_ssml", tts_use_ssml)
+    setattr(primary_tts, "_provider_name", "elevenlabs")
     if enable_failover:
-        return FailoverTTS(primary_tts, create_openai_tts())
+        return FailoverTTS(
+            primary_tts,
+            create_openai_tts(),
+            primary_supports_ssml=tts_use_ssml,
+        )
     return primary_tts
 
 
@@ -1956,6 +1972,34 @@ async def entrypoint(ctx: JobContext):
                 )
                 agent_lang = get_agent_language()
                 use_ssml = _as_bool(get_agent_setting("tts_use_ssml", False), default=False)
+                tts_engine = getattr(agent_instance, "_tts", None) or getattr(agent_instance, "tts", None)
+                tts_provider = "unknown"
+                supports_ssml = False
+                if tts_engine is not None:
+                    if hasattr(tts_engine, "current_provider_name"):
+                        try:
+                            tts_provider = tts_engine.current_provider_name()
+                        except Exception:
+                            tts_provider = str(getattr(tts_engine, "_provider_name", "unknown"))
+                    else:
+                        tts_provider = str(getattr(tts_engine, "_provider_name", "unknown"))
+
+                    if hasattr(tts_engine, "supports_ssml"):
+                        try:
+                            supports_ssml = bool(tts_engine.supports_ssml())
+                        except Exception:
+                            supports_ssml = bool(getattr(tts_engine, "_supports_ssml", False))
+                    else:
+                        supports_ssml = bool(getattr(tts_engine, "_supports_ssml", False))
+
+                if use_ssml and not supports_ssml:
+                    room_log(
+                        "SSML_DISABLED_FOR_PROVIDER",
+                        requested=True,
+                        provider=tts_provider,
+                    )
+                    use_ssml = False
+
                 tts_text = _enforce_order_status(text)
                 tts_text = normalize_time_colons(tts_text)
                 tts_text = normalize_numeric_ids_for_tts(tts_text, language=agent_lang)

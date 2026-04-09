@@ -19,6 +19,9 @@ _PUNCT_NO_NUM_RE = re.compile(r"(?<!\d)[,;:](?!\d)")
 _DOT_NO_NUM_RE = re.compile(r"(?<!\d)\.(?!\d)")
 _BRACKETS_RE = re.compile(r"[()\[\]{}<>]")
 _DASHES_RE = re.compile(r"[–—-]+")
+_SSML_TAG_RE = re.compile(r"</?[^>]+>")
+_MD_BULLET_RE = re.compile(r"^\s*(?:[-*]|\u2022)\s+", re.MULTILINE)
+_MD_MARKER_RE = re.compile(r"[*_`~#]+")
 _MULTI_SPACE_RE = re.compile(r"\s{2,}")
 
 # Read common Greek-call identifiers digit-by-digit for better clarity:
@@ -89,6 +92,10 @@ def normalize_punctuation_for_tts(text: str) -> str:
     """
     if not text:
         return text
+    # Remove markup so engines do not read tags/markdown literally.
+    text = _SSML_TAG_RE.sub(" ", text)
+    text = _MD_BULLET_RE.sub(" ", text)
+    text = _MD_MARKER_RE.sub(" ", text)
     text = _PUNCT_NO_NUM_RE.sub(" ", text)
     text = _DOT_NO_NUM_RE.sub(" ", text)
     text = _BRACKETS_RE.sub(" ", text)
