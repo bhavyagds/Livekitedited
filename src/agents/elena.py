@@ -857,8 +857,8 @@ def create_stt(*, is_sip_call: bool = False):
         attempts: list[dict] = []
 
         if auto_detect:
-            attempts.append({**base, "detect_language": True, "language": "multi"})
-            attempts.append({**base, "detect_language": True})
+            # Deepgram streaming mode in this SDK does not support detect_language=True.
+            # "language=multi" is the best-effort auto-language option for streaming.
             attempts.append({**base, "language": "multi"})
             attempts.append(base.copy())
         elif language:
@@ -925,8 +925,16 @@ def create_stt(*, is_sip_call: bool = False):
             self._use_fallback = True
 
         def stream(self, *args, **kwargs):
-            stream = self._active().stream(*args, **kwargs)
-            return self._StreamWrapper(self, stream)
+            provider = self._active()
+            try:
+                stream = provider.stream(*args, **kwargs)
+                return self._StreamWrapper(self, stream)
+            except Exception as e:
+                if provider is self._fallback:
+                    raise
+                self._switch_to_fallback(e)
+                stream = self._fallback.stream(*args, **kwargs)
+                return self._StreamWrapper(self, stream)
 
         async def transcribe(self, *args, **kwargs):
             provider = self._active()
