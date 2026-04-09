@@ -9,6 +9,7 @@ import time
 import os
 import re
 import json
+import random
 import threading
 from datetime import datetime
 from typing import Annotated, Optional
@@ -347,6 +348,7 @@ _current_session: dict = {
     "should_end": False,
     "silence_tracker": None,
     "silence_pause_depth": 0,
+    "last_lookup_wait_phrase": None,
 }
 
 
@@ -1143,6 +1145,31 @@ def create_vad():
 class ElenaFunctionContext(llm.FunctionContext):
     """Function context with all Elena's tools as methods."""
 
+    def _pick_lookup_wait_phrase(self) -> str:
+        """Pick a natural, non-repeating wait phrase based on current language."""
+        lang = get_agent_language()
+        if lang == "en":
+            phrases = (
+                "Got it. Please give me a moment to check the details for you.",
+                "Okay, I have it. One moment while I pull up the details.",
+                "Thanks, let me check that for you right away.",
+                "Perfect, I’ll quickly look this up for you now.",
+            )
+        else:
+            phrases = (
+                "Ωραία, το έχω. Δώστε μου μια στιγμή να το ελέγξω.",
+                "Εντάξει, το πήρα. Μια στιγμή να δω τις λεπτομέρειες.",
+                "Τέλεια, ευχαριστώ. Το ελέγχω αμέσως για εσάς.",
+                "Σας ευχαριστώ, το έχω. Δώστε μου ένα λεπτό να το βρω.",
+            )
+
+        last_phrase = _current_session.get("last_lookup_wait_phrase")
+        options = [p for p in phrases if p != last_phrase] or list(phrases)
+        phrase = random.choice(options)
+        _current_session["last_lookup_wait_phrase"] = phrase
+        room_log("TOOL_WAIT_ACK_SELECTED", language=lang, phrase=_truncate(phrase))
+        return phrase
+
     async def _run_tool_with_silence_pause(self, name: str, coro):
         """Pause silence prompts during tool I/O and resume afterward."""
         _pause_silence_for_tool(name)
@@ -1163,6 +1190,8 @@ class ElenaFunctionContext(llm.FunctionContext):
             order_lookup.lookup_order(order_number),
         )
         room_log("TOOL_RESULT", name="lookup_order", result=_truncate(result))
+        if _as_bool(get_agent_setting("order_lookup_wait_phrase_enabled", True), default=True):
+            return f"{self._pick_lookup_wait_phrase()} {result}"
         return result
 
     @llm.ai_callable()
@@ -1177,6 +1206,8 @@ class ElenaFunctionContext(llm.FunctionContext):
             order_lookup.get_order_details(order_number),
         )
         room_log("TOOL_RESULT", name="get_order_details", result=_truncate(result))
+        if _as_bool(get_agent_setting("order_lookup_wait_phrase_enabled", True), default=True):
+            return f"{self._pick_lookup_wait_phrase()} {result}"
         return result
 
     @llm.ai_callable()
@@ -1371,6 +1402,7 @@ async def entrypoint(ctx: JobContext):
     _current_session["should_end"] = False
     _current_session["silence_tracker"] = None
     _current_session["silence_pause_depth"] = 0
+    _current_session["last_lookup_wait_phrase"] = None
     
     # =========================================================================
     # PARALLEL STARTUP - Run ALL independent operations concurrently for speed
@@ -2331,6 +2363,7 @@ async def entrypoint(ctx: JobContext):
         finally:
             _current_session["silence_tracker"] = None
             _current_session["silence_pause_depth"] = 0
+            _current_session["last_lookup_wait_phrase"] = None
             set_runtime_language(None)
     # Handle participant disconnection
     @ctx.room.on("participant_disconnected")
