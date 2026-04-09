@@ -67,12 +67,14 @@ def _get_response_language_instruction(language: str) -> str:
         return (
             "RESPONSE LANGUAGE REQUIREMENT:\n"
             "- You must reply in Greek (??????????????) for all normal responses.\n"
-            "- Use English only if the caller explicitly asks for English."
+            "- Do not switch to English.\n"
+            "- If the caller speaks another language, politely ask them to continue in Greek."
         )
     return (
         "RESPONSE LANGUAGE REQUIREMENT:\n"
         "- You must reply in English for all normal responses.\n"
-        "- Use Greek only if the caller explicitly asks for Greek."
+        "- Do not switch to Greek.\n"
+        "- If the caller speaks another language, politely ask them to continue in English."
     )
 
 
@@ -295,8 +297,9 @@ def build_system_prompt(language: str = "el") -> str:
     # Build system prompt from DB content only
     parts = []
 
-    # Always enforce response language according to selected agent language.
-    parts.append(_get_response_language_instruction(language))
+    # Enforce response language according to selected agent language.
+    lang_instruction = _get_response_language_instruction(language)
+    parts.append(lang_instruction)
     
     # Add prompts content (this should contain ALL instructions from DB)
     if prompts_content:
@@ -318,6 +321,9 @@ DO NOT say "I don't have information" if the answer is below.""")
         parts.append("="*60)
         parts.append(kb_content)
         parts.append("="*60 + "\n")
+
+    # Repeat language guardrail at the end so it remains the strongest instruction.
+    parts.append(lang_instruction)
     
     system_prompt = "\n\n".join(parts)
     logger.info(f"📋 Built system prompt: {len(system_prompt)} chars, KB: {'yes' if kb_content else 'no'}")
@@ -337,8 +343,9 @@ async def build_system_prompt_async(language: str = "el") -> str:
     # Build system prompt from DB content only
     parts = []
 
-    # Always enforce response language according to selected agent language.
-    parts.append(_get_response_language_instruction(language))
+    # Enforce response language according to selected agent language.
+    lang_instruction = _get_response_language_instruction(language)
+    parts.append(lang_instruction)
     
     # Add prompts content (this should contain ALL instructions from DB)
     if prompts_content:
@@ -360,6 +367,9 @@ DO NOT say "I don't have information" if the answer is below.""")
         parts.append("="*60)
         parts.append(kb_content)
         parts.append("="*60 + "\n")
+
+    # Repeat language guardrail at the end so it remains the strongest instruction.
+    parts.append(lang_instruction)
     
     system_prompt = "\n\n".join(parts)
     logger.info(f"📋 Built system prompt (async): {len(system_prompt)} chars, KB: {'yes' if kb_content else 'no'}")
