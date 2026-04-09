@@ -345,6 +345,8 @@ _current_session: dict = {
     "call_id": None,
     "room_logger": None,
     "should_end": False,
+    "silence_tracker": None,
+    "silence_pause_depth": 0,
 }
 
 
@@ -402,6 +404,43 @@ def room_log(event: str, **fields):
     }
     payload.update(fields)
     room_logger.info(json.dumps(payload, ensure_ascii=False))
+
+
+def _pause_silence_for_tool(tool_name: str) -> None:
+    """Temporarily pause silence prompts while a long-running tool executes."""
+    tracker = _current_session.get("silence_tracker")
+    if not isinstance(tracker, dict):
+        return
+
+    depth = int(_current_session.get("silence_pause_depth") or 0) + 1
+    _current_session["silence_pause_depth"] = depth
+    tracker["tool_pause_depth"] = depth
+    tracker["paused_by_tool"] = True
+    tracker["is_waiting_for_response"] = False
+    if depth == 1:
+        tracker["pause_started_at"] = time.time()
+        room_log("SILENCE_PAUSED", reason=f"tool:{tool_name}", depth=depth)
+
+
+def _resume_silence_for_tool(tool_name: str) -> None:
+    """Resume silence prompts after tool execution completes."""
+    tracker = _current_session.get("silence_tracker")
+    if not isinstance(tracker, dict):
+        return
+
+    depth = max(0, int(_current_session.get("silence_pause_depth") or 0) - 1)
+    _current_session["silence_pause_depth"] = depth
+    tracker["tool_pause_depth"] = depth
+    if depth > 0:
+        return
+
+    now = time.time()
+    tracker["paused_by_tool"] = False
+    tracker["last_user_speech"] = now
+    tracker["last_agent_speech"] = now
+    tracker["is_waiting_for_response"] = True
+    started_at = float(tracker.get("pause_started_at") or now)
+    room_log("SILENCE_RESUMED", reason=f"tool:{tool_name}", paused_s=round(now - started_at, 2))
 
 
 def create_llm():
@@ -1104,6 +1143,14 @@ def create_vad():
 class ElenaFunctionContext(llm.FunctionContext):
     """Function context with all Elena's tools as methods."""
 
+    async def _run_tool_with_silence_pause(self, name: str, coro):
+        """Pause silence prompts during tool I/O and resume afterward."""
+        _pause_silence_for_tool(name)
+        try:
+            return await coro
+        finally:
+            _resume_silence_for_tool(name)
+
     @llm.ai_callable()
     async def lookup_order(
         self,
@@ -1111,7 +1158,10 @@ class ElenaFunctionContext(llm.FunctionContext):
     ) -> str:
         """Look up an order. Returns brief status first. Use get_order_details for more info."""
         room_log("TOOL_CALL", name="lookup_order", order_number=order_number)
-        result = await order_lookup.lookup_order(order_number)
+        result = await self._run_tool_with_silence_pause(
+            "lookup_order",
+            order_lookup.lookup_order(order_number),
+        )
         room_log("TOOL_RESULT", name="lookup_order", result=_truncate(result))
         return result
 
@@ -1122,7 +1172,10 @@ class ElenaFunctionContext(llm.FunctionContext):
     ) -> str:
         """Get FULL order details (items, prices, address). Use after lookup_order when customer wants more info."""
         room_log("TOOL_CALL", name="get_order_details", order_number=order_number)
-        result = await order_lookup.get_order_details(order_number)
+        result = await self._run_tool_with_silence_pause(
+            "get_order_details",
+            order_lookup.get_order_details(order_number),
+        )
         room_log("TOOL_RESULT", name="get_order_details", result=_truncate(result))
         return result
 
@@ -1142,8 +1195,11 @@ class ElenaFunctionContext(llm.FunctionContext):
             customer_phone=customer_phone,
             customer_email=customer_email,
         )
-        result = await support_ticket.create_support_ticket(
-            customer_name, customer_phone, customer_email, issue_description
+        result = await self._run_tool_with_silence_pause(
+            "create_support_ticket",
+            support_ticket.create_support_ticket(
+                customer_name, customer_phone, customer_email, issue_description
+            ),
         )
         room_log("TOOL_RESULT", name="create_support_ticket", result=_truncate(result))
         return result
@@ -1156,7 +1212,10 @@ class ElenaFunctionContext(llm.FunctionContext):
     ) -> str:
         """Validate a support ticket field value."""
         room_log("TOOL_CALL", name="validate_ticket_field", field=field_name, value=value)
-        result = await support_ticket.validate_ticket_field(field_name, value)
+        result = await self._run_tool_with_silence_pause(
+            "validate_ticket_field",
+            support_ticket.validate_ticket_field(field_name, value),
+        )
         room_log("TOOL_RESULT", name="validate_ticket_field", result=_truncate(result))
         return result
 
@@ -1181,8 +1240,11 @@ class ElenaFunctionContext(llm.FunctionContext):
             customer_name=customer_name,
             customer_phone=customer_phone,
         )
-        result = await support_ticket.log_customer_query(
-            customer_question, customer_name, customer_phone
+        result = await self._run_tool_with_silence_pause(
+            "log_customer_query",
+            support_ticket.log_customer_query(
+                customer_question, customer_name, customer_phone
+            ),
         )
         room_log("TOOL_RESULT", name="log_customer_query", result=_truncate(result))
         return result
@@ -1195,7 +1257,10 @@ class ElenaFunctionContext(llm.FunctionContext):
         """Search the knowledge base for answers to common questions."""
         language = get_agent_language()
         room_log("TOOL_CALL", name="search_knowledge_base", query=query, language=language)
-        result = await knowledge_base.search_knowledge_base(query, language=language)
+        result = await self._run_tool_with_silence_pause(
+            "search_knowledge_base",
+            knowledge_base.search_knowledge_base(query, language=language),
+        )
         room_log("TOOL_RESULT", name="search_knowledge_base", result=_truncate(result))
         return result
 
@@ -1203,7 +1268,10 @@ class ElenaFunctionContext(llm.FunctionContext):
     async def get_brand_info(self) -> str:
         """Get information about the Meallion brand."""
         room_log("TOOL_CALL", name="get_brand_info")
-        result = await knowledge_base.get_brand_info()
+        result = await self._run_tool_with_silence_pause(
+            "get_brand_info",
+            knowledge_base.get_brand_info(),
+        )
         room_log("TOOL_RESULT", name="get_brand_info", result=_truncate(result))
         return result
 
@@ -1301,6 +1369,8 @@ async def entrypoint(ctx: JobContext):
     
     # Reset session state
     _current_session["should_end"] = False
+    _current_session["silence_tracker"] = None
+    _current_session["silence_pause_depth"] = 0
     
     # =========================================================================
     # PARALLEL STARTUP - Run ALL independent operations concurrently for speed
@@ -1581,7 +1651,10 @@ async def entrypoint(ctx: JobContext):
         "silence_timeout": silence_timeout,
         "is_waiting_for_response": False,
         "enabled": True,
+        "paused_by_tool": False,
+        "tool_pause_depth": 0,
     }
+    _current_session["silence_tracker"] = silence_tracker
     
     def reset_silence_timer():
         """Reset the silence timer when user speaks."""
@@ -2256,6 +2329,8 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.error(f"Error handling call end: {e}")
         finally:
+            _current_session["silence_tracker"] = None
+            _current_session["silence_pause_depth"] = 0
             set_runtime_language(None)
     # Handle participant disconnection
     @ctx.room.on("participant_disconnected")
@@ -2366,6 +2441,10 @@ async def entrypoint(ctx: JobContext):
                 
                 # Only check silence if we're waiting for a response
                 if not silence_tracker["is_waiting_for_response"]:
+                    continue
+
+                # Pause silence prompts while tool calls are executing.
+                if silence_tracker.get("paused_by_tool"):
                     continue
                 
                 # Calculate time since last activity
