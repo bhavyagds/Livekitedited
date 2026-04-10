@@ -1542,6 +1542,8 @@ async def entrypoint(ctx: JobContext):
         max_value=5,
     )
     language_switch_state = {"candidate": None, "count": 0}
+    language_lock_state = {"el": 0, "en": 0, "el_last": "", "en_last": ""}
+    language_lock_cache: dict[tuple[str, str], str] = {}
 
     def _normalize_switch_text(text: str) -> str:
         """Normalize text for robust language-switch intent detection."""
@@ -1691,6 +1693,42 @@ async def entrypoint(ctx: JobContext):
         )
         room_log("LANGUAGE_SWITCH", language=new_lang, reason=reason)
 
+    def _get_language_lock_phrase(expected_lang: str, source_text: str) -> str:
+        """Rotate lock phrases but keep deterministic output for the same source text."""
+        phrases = {
+            "el": [
+                "Παρακαλώ, μπορείτε να συνεχίσετε στα ελληνικά; Ευχαριστώ!",
+                "Συνεχίζουμε στα ελληνικά. Πείτε μου πώς μπορώ να βοηθήσω.",
+                "Θα συνεχίσω στα ελληνικά. Πείτε μου το αίτημά σας.",
+                "Μπορούμε να προχωρήσουμε στα ελληνικά. Πώς μπορώ να σας εξυπηρετήσω;",
+            ],
+            "en": [
+                "Please continue in English. Thank you!",
+                "We will continue in English. Tell me how I can help.",
+                "I will continue in English. Please share your request.",
+                "Let's proceed in English. How can I assist you?",
+            ],
+        }
+        options = phrases.get(expected_lang) or phrases["en"]
+        cache_key = (expected_lang, (source_text or "").strip())
+        cached = language_lock_cache.get(cache_key)
+        if cached:
+            return cached
+
+        idx = int(language_lock_state.get(expected_lang, 0)) % len(options)
+        selected = options[idx]
+        last_key = f"{expected_lang}_last"
+        if len(options) > 1 and selected == language_lock_state.get(last_key):
+            idx = (idx + 1) % len(options)
+            selected = options[idx]
+
+        language_lock_state[expected_lang] = idx + 1
+        language_lock_state[last_key] = selected
+        language_lock_cache[cache_key] = selected
+        if len(language_lock_cache) > 200:
+            language_lock_cache.clear()
+        return selected
+
     def _enforce_locked_output_language(text: str) -> str:
         """
         Keep agent output in the admin-selected language when auto switching is disabled.
@@ -1712,9 +1750,7 @@ async def entrypoint(ctx: JobContext):
             detected=detected_lang,
             reason="auto_switch_disabled",
         )
-        if expected_lang == "el":
-            return "Συγγνώμη, συνεχίζω στα ελληνικά. Πείτε μου πώς μπορώ να σας βοηθήσω."
-        return "Sorry, I will continue in English. Please tell me how I can help."
+        return _get_language_lock_phrase(expected_lang, text)
 
     # Initialize abuse tracker for this session
     from src.utils.abuse_handler import AbuseTracker, check_and_respond_to_abuse
