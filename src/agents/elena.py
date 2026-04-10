@@ -1831,48 +1831,128 @@ async def entrypoint(ctx: JobContext):
     def _build_prefetch_voice_summary(result_text: str, language: str) -> str:
         """
         Convert raw lookup text into a short, natural voice summary.
-        Keeps status/delivery/total, drops PII-heavy lines.
+        Formats order id/date/total for speech and avoids raw tool formatting.
         """
         text = _strip_markup_for_output(result_text or "")
         if not text:
             return ""
 
-        # Split into sentence-ish chunks while preserving order.
-        chunks = [c.strip() for c in re.split(r"(?<=[.!?])\s+", text) if c.strip()]
-        if not chunks:
-            return text
+        lang = (language or "en").lower()
 
-        pii_markers = (
-            "customer:",
-            "delivery address:",
-            "email:",
-            "phone:",
-            "πελάτης:",
-            "διεύθυνση",
-            "τηλέφωνο",
-            "email",
+        def _digits_spaced(raw: str) -> str:
+            digits = re.sub(r"\D", "", raw or "")
+            return " ".join(list(digits)) if digits else ""
+
+        def _month_name(month: int) -> str:
+            if lang == "el":
+                names = {
+                    1: "??????????", 2: "???????????", 3: "???????", 4: "????????",
+                    5: "?????", 6: "???????", 7: "???????", 8: "?????????",
+                    9: "???????????", 10: "?????????", 11: "?????????", 12: "??????????",
+                }
+            else:
+                names = {
+                    1: "January", 2: "February", 3: "March", 4: "April",
+                    5: "May", 6: "June", 7: "July", 8: "August",
+                    9: "September", 10: "October", 11: "November", 12: "December",
+                }
+            return names.get(month, "")
+
+        def _format_date_for_voice(raw_date: str) -> str:
+            m = re.search(r"(\d{4})[/-](\d{2})[/-](\d{2})", raw_date or "")
+            if not m:
+                return raw_date
+            month = int(m.group(2))
+            day = int(m.group(3))
+            month_name = _month_name(month)
+            if not month_name:
+                return raw_date
+            if lang == "el":
+                return f"{day} {month_name}"
+            return f"{month_name} {day}"
+
+        order_match = re.search(r"(?i)\border\s*#?\s*(\d{3,8})\b", text)
+        if not order_match:
+            order_match = re.search(r"(?i)\b???????\w*\s*(\d{3,8})\b", text)
+        order_number = order_match.group(1) if order_match else ""
+
+        status_match = re.search(r"(?i)\bis\s+([a-z_]+)\b", text)
+        status = (status_match.group(1).lower() if status_match else "")
+        if not status:
+            if re.search(r"(?i)\b???????", text):
+                status = "completed"
+            elif re.search(r"(?i)\b????", text):
+                status = "cancelled"
+
+        date_match = re.search(
+            r"(?i)(?:delivery(?:\s+on)?|scheduled for delivery on|????????(?:\s+????)?)\s*[:\-]?\s*(\d{4}[/-]\d{2}[/-]\d{2})",
+            text,
         )
-        keep_chunks = [c for c in chunks if not any(m in c.lower() for m in pii_markers)]
+        raw_date = date_match.group(1) if date_match else ""
+        spoken_date = _format_date_for_voice(raw_date) if raw_date else ""
 
-        if language == "en":
-            intro = "Thanks for waiting. I found your order."
-            followup = "Would you like more details about this order?"
+        total_match = re.search(r"(?i)\btotal\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?)\s*([A-Z?]{1,4})?", text)
+        if not total_match:
+            total_match = re.search(r"(?i)\b??????\s*[:\-]?\s*([0-9]+(?:[.,][0-9]+)?)", text)
+        total_amount = ""
+        currency = "EUR" if lang != "el" else "????"
+        if total_match:
+            total_amount = (total_match.group(1) or "").replace(",", ".")
+            if total_match.lastindex and total_match.group(2):
+                currency = total_match.group(2).upper()
+
+        if lang == "el":
+            intro = "????????? ??? ??? ???????. ????? ??? ?????????? ???."
+            if status == "completed":
+                status_phrase = "???? ???????????"
+            elif status == "cancelled":
+                status_phrase = "???? ????????"
+            elif status:
+                status_phrase = f"????? ?? ????????? {status}"
+            else:
+                status_phrase = "???????"
+
+            parts = [intro]
+            if order_number:
+                parts.append(f"? ??????? ??????????? {_digits_spaced(order_number)} {status_phrase}.")
+            elif status_phrase:
+                parts.append(f"? ?????????? ??? {status_phrase}.")
+            if spoken_date:
+                parts.append(f"? ???????? ????? ???????????????? ??? {spoken_date}.")
+            if total_amount:
+                whole, _, decimals = total_amount.partition(".")
+                if decimals:
+                    parts.append(f"?? ?????? ????? {int(whole)} {currency} ??? {int(decimals[:2]):02d} ?????.")
+                else:
+                    parts.append(f"?? ?????? ????? {int(whole)} {currency}.")
+            parts.append("?????? ???????????? ???????????? ??? ???? ??? ??????????;")
+            return re.sub(r"\s{2,}", " ", " ".join(parts)).strip()
+
+        intro = "Thanks for waiting. I found your order."
+        if status == "completed":
+            status_phrase = "is completed"
+        elif status == "cancelled":
+            status_phrase = "was cancelled"
+        elif status:
+            status_phrase = f"is currently {status}"
         else:
-            intro = "Ευχαριστώ για την αναμονή. Βρήκα την παραγγελία σας."
-            followup = "Θέλετε περισσότερες λεπτομέρειες για αυτή την παραγγελία;"
+            status_phrase = "was found"
 
-        core = []
-        for c in keep_chunks:
-            lower = c.lower()
-            if "would you like more details" in lower or "θέλετε περισσότερες λεπτομέρειες" in lower:
-                continue
-            core.append(c)
-            if len(core) >= 3:
-                break
-
-        summary = " ".join([intro] + core + [followup]).strip()
-        summary = re.sub(r"\s{2,}", " ", summary)
-        return summary
+        parts = [intro]
+        if order_number:
+            parts.append(f"Order number {_digits_spaced(order_number)} {status_phrase}.")
+        else:
+            parts.append(f"Your order {status_phrase}.")
+        if spoken_date:
+            parts.append(f"Delivery is scheduled for {spoken_date}.")
+        if total_amount:
+            whole, _, decimals = total_amount.partition(".")
+            if decimals:
+                parts.append(f"The total is {int(whole)} euros and {int(decimals[:2]):02d} cents.")
+            else:
+                parts.append(f"The total is {int(whole)} euros.")
+        parts.append("Would you like more details about this order?")
+        return re.sub(r"\s{2,}", " ", " ".join(parts)).strip()
 
     def _english_switch_confident(text: str) -> bool:
         """
@@ -2735,6 +2815,10 @@ async def entrypoint(ctx: JobContext):
                             )
                             room_log("ORDER_LOOKUP_PREFETCH_SPEAKING", order_number=order_number)
                             await agent.say(spoken_result or result, allow_interruptions=True)
+                            # Reset silence baseline after agent finishes this forced prefetch response
+                            # so "Are you still there?" does not trigger immediately.
+                            mark_agent_speaking()
+                            _snooze_silence_prompts(10.0, reason="post_prefetch_spoken")
                             _current_session["prefetched_lookup_spoken_at"] = time.time()
                             _current_session["prefetched_lookup_spoken_order"] = order_number
                             room_log("ORDER_LOOKUP_PREFETCH_SPOKEN", order_number=order_number)
