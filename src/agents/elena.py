@@ -355,6 +355,12 @@ _current_session: dict = {
     "last_agent_text": "",
     "last_forced_lookup_order": None,
     "last_forced_lookup_at": 0.0,
+    "last_user_turn_id": 0,
+    "prefetched_lookup": None,
+    "last_lookup_tool_called_at": 0.0,
+    "last_lookup_tool_order": None,
+    "prefetched_lookup_spoken_at": 0.0,
+    "prefetched_lookup_spoken_order": None,
 }
 
 
@@ -1258,11 +1264,33 @@ class ElenaFunctionContext(llm.FunctionContext):
         order_number: Annotated[str, llm.TypeInfo(description="The order number (4-5 digits)")],
     ) -> str:
         """Look up an order. Returns brief status first. Use get_order_details for more info."""
+        _current_session["last_lookup_tool_called_at"] = time.time()
+        _current_session["last_lookup_tool_order"] = str(order_number or "")
         room_log("TOOL_CALL", name="lookup_order", order_number=order_number)
-        result = await self._run_tool_with_silence_pause(
-            "lookup_order",
-            order_lookup.lookup_order(order_number),
-        )
+        requested_digits = re.sub(r"\D", "", str(order_number or ""))
+        prefetch = _current_session.get("prefetched_lookup")
+        if isinstance(prefetch, dict):
+            prefetched_digits = re.sub(r"\D", "", str(prefetch.get("order_number") or ""))
+            prefetched_result = str(prefetch.get("result") or "")
+            prefetched_at = float(prefetch.get("ts") or 0.0)
+            if (
+                requested_digits
+                and requested_digits == prefetched_digits
+                and prefetched_result
+                and (time.time() - prefetched_at) <= 180.0
+            ):
+                room_log("TOOL_PREFETCH_HIT", name="lookup_order", order_number=order_number)
+                result = prefetched_result
+            else:
+                result = await self._run_tool_with_silence_pause(
+                    "lookup_order",
+                    order_lookup.lookup_order(order_number),
+                )
+        else:
+            result = await self._run_tool_with_silence_pause(
+                "lookup_order",
+                order_lookup.lookup_order(order_number),
+            )
         room_log("TOOL_RESULT", name="lookup_order", result=_truncate(result))
         if _as_bool(get_agent_setting("order_lookup_wait_phrase_enabled", True), default=True):
             return f"{self._pick_lookup_wait_phrase()} {result}"
@@ -1482,6 +1510,12 @@ async def entrypoint(ctx: JobContext):
     _current_session["last_agent_text"] = ""
     _current_session["last_forced_lookup_order"] = None
     _current_session["last_forced_lookup_at"] = 0.0
+    _current_session["last_user_turn_id"] = 0
+    _current_session["prefetched_lookup"] = None
+    _current_session["last_lookup_tool_called_at"] = 0.0
+    _current_session["last_lookup_tool_order"] = None
+    _current_session["prefetched_lookup_spoken_at"] = 0.0
+    _current_session["prefetched_lookup_spoken_order"] = None
     
     # =========================================================================
     # PARALLEL STARTUP - Run ALL independent operations concurrently for speed
@@ -2469,6 +2503,8 @@ async def entrypoint(ctx: JobContext):
             room_log("LATE_EVENT_DROPPED", source="user_speech_committed")
             return
         user_text = message.content
+        current_turn_id = int(_current_session.get("last_user_turn_id") or 0) + 1
+        _current_session["last_user_turn_id"] = current_turn_id
 
         if auto_language_switch:
             explicit_lang = _explicit_language_request(user_text)
@@ -2570,14 +2606,82 @@ async def entrypoint(ctx: JobContext):
                     )
                     room_log("ORDER_LOOKUP_HINT_INJECTED", order_number=detected_order_number)
 
-                    async def _prefetch_lookup(order_number: str):
+                    async def _prefetch_lookup(order_number: str, turn_id: int, requested_at: float):
                         try:
                             result = await order_lookup.lookup_order(order_number)
+                            _current_session["prefetched_lookup"] = {
+                                "order_number": order_number,
+                                "result": result,
+                                "ts": time.time(),
+                                "turn_id": turn_id,
+                            }
                             room_log(
                                 "ORDER_LOOKUP_PREFETCH_DONE",
                                 order_number=order_number,
                                 result=_truncate(result),
                             )
+                            if call_ended["value"] or _current_session.get("should_end"):
+                                room_log(
+                                    "ORDER_LOOKUP_PREFETCH_SKIP",
+                                    order_number=order_number,
+                                    reason="call_ended",
+                                )
+                                return
+
+                            latest_turn = int(_current_session.get("last_user_turn_id") or 0)
+                            if latest_turn > turn_id:
+                                room_log(
+                                    "ORDER_LOOKUP_PREFETCH_SKIP",
+                                    order_number=order_number,
+                                    reason="newer_user_turn",
+                                    turn_id=turn_id,
+                                    latest_turn=latest_turn,
+                                )
+                                return
+
+                            tool_called_at = float(_current_session.get("last_lookup_tool_called_at") or 0.0)
+                            tool_called_order = re.sub(
+                                r"\D",
+                                "",
+                                str(_current_session.get("last_lookup_tool_order") or ""),
+                            )
+                            requested_digits = re.sub(r"\D", "", str(order_number or ""))
+                            if (
+                                tool_called_at >= requested_at
+                                and requested_digits
+                                and tool_called_order == requested_digits
+                            ):
+                                room_log(
+                                    "ORDER_LOOKUP_PREFETCH_SKIP",
+                                    order_number=order_number,
+                                    reason="tool_already_called",
+                                )
+                                return
+
+                            last_spoken_order = re.sub(
+                                r"\D",
+                                "",
+                                str(_current_session.get("prefetched_lookup_spoken_order") or ""),
+                            )
+                            last_spoken_at = float(_current_session.get("prefetched_lookup_spoken_at") or 0.0)
+                            if (
+                                requested_digits
+                                and last_spoken_order == requested_digits
+                                and (time.time() - last_spoken_at) <= 20.0
+                            ):
+                                room_log(
+                                    "ORDER_LOOKUP_PREFETCH_SKIP",
+                                    order_number=order_number,
+                                    reason="recently_spoken",
+                                )
+                                return
+
+                            _snooze_silence_prompts(12.0, reason="lookup_prefetch_ready")
+                            room_log("ORDER_LOOKUP_PREFETCH_SPEAKING", order_number=order_number)
+                            await agent.say(result, allow_interruptions=True)
+                            _current_session["prefetched_lookup_spoken_at"] = time.time()
+                            _current_session["prefetched_lookup_spoken_order"] = order_number
+                            room_log("ORDER_LOOKUP_PREFETCH_SPOKEN", order_number=order_number)
                         except Exception as e:
                             room_log(
                                 "ORDER_LOOKUP_PREFETCH_ERROR",
@@ -2585,7 +2689,13 @@ async def entrypoint(ctx: JobContext):
                                 error=_truncate(str(e), max_len=200),
                             )
 
-                    asyncio.create_task(_prefetch_lookup(detected_order_number))
+                    asyncio.create_task(
+                        _prefetch_lookup(
+                            detected_order_number,
+                            current_turn_id,
+                            now,
+                        )
+                    )
         except Exception as e:
             logger.debug(f"Order lookup forcing skipped: {e}")
 
@@ -2772,6 +2882,12 @@ async def entrypoint(ctx: JobContext):
             _current_session["last_agent_text"] = ""
             _current_session["last_forced_lookup_order"] = None
             _current_session["last_forced_lookup_at"] = 0.0
+            _current_session["last_user_turn_id"] = 0
+            _current_session["prefetched_lookup"] = None
+            _current_session["last_lookup_tool_called_at"] = 0.0
+            _current_session["last_lookup_tool_order"] = None
+            _current_session["prefetched_lookup_spoken_at"] = 0.0
+            _current_session["prefetched_lookup_spoken_order"] = None
             set_runtime_language(None)
     # Handle participant disconnection
     @ctx.room.on("participant_disconnected")
