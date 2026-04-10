@@ -1505,6 +1505,8 @@ async def entrypoint(ctx: JobContext):
     
     # Initialize transcript collection
     conversation_transcript = []
+    # Track if we already handled call end to avoid duplicate processing and late async sends.
+    call_ended = {"value": False}
     
     # Context creation was started earlier (line ~520) in parallel with room connection
     logger.info(f"⏱️ Context creation in progress ({time.time() - startup_time:.1f}s)")
@@ -1862,6 +1864,8 @@ async def entrypoint(ctx: JobContext):
     async def send_agent_transcript(text: str):
         """Send spoken agent text to frontend chat in realtime."""
         try:
+            if call_ended["value"] or _current_session.get("should_end"):
+                return
             cleaned = _strip_markup_for_output(text)
             if not cleaned:
                 return
@@ -1888,6 +1892,8 @@ async def entrypoint(ctx: JobContext):
     async def send_agent_info(text: str):
         """Extract and send important information cards without blocking audio."""
         try:
+            if call_ended["value"] or _current_session.get("should_end"):
+                return
             cleaned = (text or "").strip()
             if not cleaned:
                 return
@@ -2018,6 +2024,9 @@ async def entrypoint(ctx: JobContext):
     def before_tts_callback(agent_instance, text: str | llm.LLMStream):
         """Callback that fires BEFORE text is sent to TTS - apply prosody."""
         try:
+            if call_ended["value"] or _current_session.get("should_end"):
+                room_log("LATE_EVENT_DROPPED", source="before_tts_callback")
+                return ""
             # text can be a string or LLMStream - handle both
             if isinstance(text, str):
                 logger.info(f"before_tts_cb processing: {text[:50]}...")
@@ -2246,6 +2255,8 @@ async def entrypoint(ctx: JobContext):
     async def send_user_transcript(text: str, *, interim: bool = False):
         """Helper to send user transcript to frontend."""
         try:
+            if call_ended["value"] or _current_session.get("should_end"):
+                return
             cleaned = (text or "").strip()
             if not cleaned:
                 return
@@ -2286,6 +2297,9 @@ async def entrypoint(ctx: JobContext):
     @agent.on("user_speech_committed")
     def on_user_speech_committed(message):
         """Send user transcript to frontend and check for abuse."""
+        if call_ended["value"] or _current_session.get("should_end"):
+            room_log("LATE_EVENT_DROPPED", source="user_speech_committed")
+            return
         user_text = message.content
 
         if auto_language_switch:
@@ -2403,6 +2417,9 @@ async def entrypoint(ctx: JobContext):
     def on_agent_speech_committed(message):
         """Send committed agent speech to UI (transcript + info cards)."""
         try:
+            if call_ended["value"] or _current_session.get("should_end"):
+                room_log("LATE_EVENT_DROPPED", source="agent_speech_committed")
+                return
             text = message.content if hasattr(message, 'content') else None
             if text:
                 normalized_text = _enforce_locked_output_language(text)
@@ -2485,15 +2502,13 @@ async def entrypoint(ctx: JobContext):
     _current_session["agent"] = agent
     _current_session["room"] = ctx.room
     
-    # Track if we already handled the call end to avoid duplicate processing
-    call_ended = {"value": False}
-    
     async def handle_call_end(reason: str = "normal"):
         """Handle call ending - save transcript and clean up."""
         if call_ended["value"]:
             logger.debug("Call end already handled, skipping")
             return
         call_ended["value"] = True
+        _current_session["should_end"] = True
         
         try:
             # Calculate call duration
