@@ -352,6 +352,9 @@ _current_session: dict = {
     "last_lookup_wait_phrase": None,
     "pending_lookup_wait_phrase": None,
     "pending_lookup_wait_phrase_set_at": 0.0,
+    "last_agent_text": "",
+    "last_forced_lookup_order": None,
+    "last_forced_lookup_at": 0.0,
 }
 
 
@@ -1476,6 +1479,9 @@ async def entrypoint(ctx: JobContext):
     _current_session["last_lookup_wait_phrase"] = None
     _current_session["pending_lookup_wait_phrase"] = None
     _current_session["pending_lookup_wait_phrase_set_at"] = 0.0
+    _current_session["last_agent_text"] = ""
+    _current_session["last_forced_lookup_order"] = None
+    _current_session["last_forced_lookup_at"] = 0.0
     
     # =========================================================================
     # PARALLEL STARTUP - Run ALL independent operations concurrently for speed
@@ -1665,6 +1671,128 @@ async def entrypoint(ctx: JobContext):
         if greek_token and has_switch_verb:
             return "el"
         return None
+
+    _ORDER_WORD_TO_DIGIT = {
+        # English
+        "zero": "0",
+        "oh": "0",
+        "o": "0",
+        "one": "1",
+        "two": "2",
+        "three": "3",
+        "four": "4",
+        "five": "5",
+        "six": "6",
+        "seven": "7",
+        "eight": "8",
+        "nine": "9",
+        # Greek (with and without accents)
+        "μηδέν": "0",
+        "μηδεν": "0",
+        "ένα": "1",
+        "ενα": "1",
+        "δύο": "2",
+        "δυο": "2",
+        "τρία": "3",
+        "τρια": "3",
+        "τέσσερα": "4",
+        "τεσσερα": "4",
+        "πέντε": "5",
+        "πεντε": "5",
+        "έξι": "6",
+        "εξι": "6",
+        "επτά": "7",
+        "επτα": "7",
+        "εφτά": "7",
+        "εφτα": "7",
+        "οκτώ": "8",
+        "οκτω": "8",
+        "εννέα": "9",
+        "εννεα": "9",
+        # Common transliterations
+        "ena": "1",
+        "dyo": "2",
+        "tria": "3",
+        "tessera": "4",
+        "pente": "5",
+        "eksi": "6",
+        "epta": "7",
+        "okto": "8",
+        "ennea": "9",
+    }
+
+    def _digits_from_phrase(text: str) -> str:
+        """Convert mixed spoken-number tokens into a compact digits-only string."""
+        tokens = re.findall(r"[a-zA-Z\u0370-\u03FF0-9]+", (text or "").lower())
+        digits: list[str] = []
+        for token in tokens:
+            if token in _ORDER_WORD_TO_DIGIT:
+                digits.append(_ORDER_WORD_TO_DIGIT[token])
+                continue
+            if token.isdigit():
+                digits.append(token)
+                continue
+            embedded_digits = re.sub(r"\D", "", token)
+            if embedded_digits:
+                digits.append(embedded_digits)
+        return "".join(digits)
+
+    def _extract_order_number_candidate(text: str) -> Optional[str]:
+        """
+        Extract likely order number (3-6 digits) from mixed speech transcripts.
+        Prioritizes chunks near order-related keywords to avoid false captures.
+        """
+        normalized = (text or "").lower().strip()
+        if not normalized:
+            return None
+
+        explicit_runs = re.findall(r"\d{3,6}", normalized)
+        if explicit_runs:
+            return explicit_runs[-1]
+
+        windows = []
+        for match in re.finditer(r"(order(?:\s+number)?|παραγγε\w*|αριθμ\w*)", normalized, flags=re.IGNORECASE):
+            windows.append(normalized[match.start(): match.start() + 96])
+
+        if windows:
+            for segment in windows:
+                candidate = _digits_from_phrase(segment)
+                if 4 <= len(candidate) <= 5:
+                    return candidate
+            for segment in windows:
+                candidate = _digits_from_phrase(segment)
+                if 3 <= len(candidate) <= 6:
+                    return candidate
+
+        fallback = _digits_from_phrase(normalized)
+        if 4 <= len(fallback) <= 5:
+            return fallback
+
+        tokens = re.findall(r"[a-zA-Z\u0370-\u03FF0-9]+", normalized)
+        numeric_token_count = sum(
+            1 for token in tokens if token.isdigit() or token in _ORDER_WORD_TO_DIGIT
+        )
+        if 3 <= len(fallback) <= 6 and numeric_token_count >= 3:
+            return fallback
+        return None
+
+    def _should_force_order_lookup(user_text: str, order_number: Optional[str]) -> bool:
+        """Return True when we should force immediate lookup_order for this turn."""
+        if not order_number:
+            return False
+
+        normalized_user = _normalize_switch_text(user_text)
+        if re.search(r"(order|παραγγελ|αριθμ)", normalized_user, flags=re.IGNORECASE):
+            return True
+
+        last_agent = _normalize_switch_text(str(_current_session.get("last_agent_text") or ""))
+        return bool(
+            re.search(
+                r"(order number|number from your confirmation|παραγγελ|αριθμ)",
+                last_agent,
+                flags=re.IGNORECASE,
+            )
+        )
 
     def _english_switch_confident(text: str) -> bool:
         """
@@ -2418,6 +2546,49 @@ async def entrypoint(ctx: JobContext):
                     ),
                 )
 
+        try:
+            detected_order_number = _extract_order_number_candidate(user_text)
+            if _should_force_order_lookup(user_text, detected_order_number):
+                now = time.time()
+                last_forced_order = str(_current_session.get("last_forced_lookup_order") or "")
+                last_forced_at = float(_current_session.get("last_forced_lookup_at") or 0.0)
+                if (
+                    detected_order_number != last_forced_order
+                    or (now - last_forced_at) > 15.0
+                ):
+                    _current_session["last_forced_lookup_order"] = detected_order_number
+                    _current_session["last_forced_lookup_at"] = now
+                    agent.chat_ctx.append(
+                        role="system",
+                        text=(
+                            "ORDER LOOKUP PRIORITY:\n"
+                            f"- The caller already provided order number {detected_order_number}.\n"
+                            "- In your next response, call lookup_order with this exact number immediately.\n"
+                            "- Do not ask for the order number again unless lookup_order says invalid or not found.\n"
+                            "- After the tool returns, provide the status without extra delay."
+                        ),
+                    )
+                    room_log("ORDER_LOOKUP_HINT_INJECTED", order_number=detected_order_number)
+
+                    async def _prefetch_lookup(order_number: str):
+                        try:
+                            result = await order_lookup.lookup_order(order_number)
+                            room_log(
+                                "ORDER_LOOKUP_PREFETCH_DONE",
+                                order_number=order_number,
+                                result=_truncate(result),
+                            )
+                        except Exception as e:
+                            room_log(
+                                "ORDER_LOOKUP_PREFETCH_ERROR",
+                                order_number=order_number,
+                                error=_truncate(str(e), max_len=200),
+                            )
+
+                    asyncio.create_task(_prefetch_lookup(detected_order_number))
+        except Exception as e:
+            logger.debug(f"Order lookup forcing skipped: {e}")
+
         asyncio.create_task(send_user_transcript(user_text))
 
         # Reset silence timer - user is responding
@@ -2467,6 +2638,7 @@ async def entrypoint(ctx: JobContext):
                 asyncio.create_task(send_agent_transcript(display_text or text))
                 asyncio.create_task(send_agent_info(display_text or text))
                 conversation_transcript.append(f"Agent: {display_text or text}")
+                _current_session["last_agent_text"] = (display_text or text)
                 logger.info(f"agent_speech_committed: {(display_text or text)[:50]}...")
                 room_log("AGENT_TEXT", text=_truncate(display_text or text))
         except Exception as e:
@@ -2597,6 +2769,9 @@ async def entrypoint(ctx: JobContext):
             _current_session["last_lookup_wait_phrase"] = None
             _current_session["pending_lookup_wait_phrase"] = None
             _current_session["pending_lookup_wait_phrase_set_at"] = 0.0
+            _current_session["last_agent_text"] = ""
+            _current_session["last_forced_lookup_order"] = None
+            _current_session["last_forced_lookup_at"] = 0.0
             set_runtime_language(None)
     # Handle participant disconnection
     @ctx.room.on("participant_disconnected")
