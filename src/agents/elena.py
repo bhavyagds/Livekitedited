@@ -459,6 +459,35 @@ def _resume_silence_for_tool(tool_name: str) -> None:
     room_log("SILENCE_RESUMED", reason=f"tool:{tool_name}", paused_s=round(now - started_at, 2))
 
 
+def _snooze_silence_prompts(seconds: float, reason: str) -> None:
+    """Temporarily prevent silence prompts to avoid overlap with pending tool replies."""
+    tracker = _current_session.get("silence_tracker")
+    if not isinstance(tracker, dict):
+        return
+    duration = max(0.0, float(seconds))
+    now = time.time()
+    until = now + duration
+    tracker["snooze_until"] = max(float(tracker.get("snooze_until") or 0.0), until)
+    room_log("SILENCE_SNOOZED", reason=reason, seconds=round(duration, 2))
+
+
+def _is_silence_prompt_text(text: str) -> bool:
+    """Return True when text is one of the stock silence prompts."""
+    if not text:
+        return False
+    normalized = re.sub(r"[^\w\s]", " ", text.lower(), flags=re.UNICODE)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    silence_prompts = {
+        "είστε εκεί",
+        "με ακούτε",
+        "φαίνεται ότι δεν είστε εκεί αντίο",
+        "are you still there",
+        "hello can you hear me",
+        "it seems like you re not there goodbye",
+    }
+    return normalized in silence_prompts
+
+
 def create_llm():
     """Create the LLM instance based on admin settings.
     
@@ -1181,6 +1210,12 @@ class ElenaFunctionContext(llm.FunctionContext):
     def _pick_lookup_wait_phrase(self) -> str:
         """Pick a natural, non-repeating wait phrase based on current language."""
         lang = get_agent_language()
+        silence_grace_s = _as_float(
+            get_agent_setting("order_lookup_silence_grace_seconds", 8.0),
+            8.0,
+            min_value=2.0,
+            max_value=20.0,
+        )
         if lang == "en":
             phrases = (
                 "Got it. Please give me a moment to check the details for you.",
@@ -1202,6 +1237,7 @@ class ElenaFunctionContext(llm.FunctionContext):
         _current_session["last_lookup_wait_phrase"] = phrase
         _current_session["pending_lookup_wait_phrase"] = phrase
         _current_session["pending_lookup_wait_phrase_set_at"] = time.time()
+        _snooze_silence_prompts(silence_grace_s, reason="lookup_wait_ack")
         room_log("TOOL_WAIT_ACK_SELECTED", language=lang, phrase=_truncate(phrase))
         return phrase
 
@@ -1785,6 +1821,7 @@ async def entrypoint(ctx: JobContext):
         "enabled": True,
         "paused_by_tool": False,
         "tool_pause_depth": 0,
+        "snooze_until": 0.0,
     }
     _current_session["silence_tracker"] = silence_tracker
     
@@ -2038,11 +2075,14 @@ async def entrypoint(ctx: JobContext):
                     pending_phrase = _current_session.get("pending_lookup_wait_phrase")
                     pending_set_at = float(_current_session.get("pending_lookup_wait_phrase_set_at") or 0.0)
                     if pending_phrase and (time.time() - pending_set_at) <= 20.0:
-                        if pending_phrase.lower() not in text.lower():
-                            text = f"{pending_phrase} {text}".strip()
-                            room_log("TOOL_WAIT_ACK_ENFORCED", phrase=_truncate(pending_phrase))
-                        _current_session["pending_lookup_wait_phrase"] = None
-                        _current_session["pending_lookup_wait_phrase_set_at"] = 0.0
+                        if _is_silence_prompt_text(text):
+                            room_log("TOOL_WAIT_ACK_SKIPPED", reason="silence_prompt")
+                        else:
+                            if pending_phrase.lower() not in text.lower():
+                                text = f"{pending_phrase} {text}".strip()
+                                room_log("TOOL_WAIT_ACK_ENFORCED", phrase=_truncate(pending_phrase))
+                            _current_session["pending_lookup_wait_phrase"] = None
+                            _current_session["pending_lookup_wait_phrase_set_at"] = 0.0
                     elif pending_phrase:
                         # Expire stale pending phrase to avoid polluting unrelated turns.
                         _current_session["pending_lookup_wait_phrase"] = None
@@ -2671,6 +2711,10 @@ async def entrypoint(ctx: JobContext):
 
                 # Pause silence prompts while tool calls are executing.
                 if silence_tracker.get("paused_by_tool"):
+                    continue
+
+                # Grace period after lookup wait-ack to avoid stitching with "Are you there?"
+                if time.time() < float(silence_tracker.get("snooze_until") or 0.0):
                     continue
                 
                 # Calculate time since last activity
