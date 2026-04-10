@@ -1691,6 +1691,31 @@ async def entrypoint(ctx: JobContext):
         )
         room_log("LANGUAGE_SWITCH", language=new_lang, reason=reason)
 
+    def _enforce_locked_output_language(text: str) -> str:
+        """
+        Keep agent output in the admin-selected language when auto switching is disabled.
+        This is a hard guardrail for noisy user requests like "reply in English".
+        """
+        if not text:
+            return text
+        if auto_language_switch:
+            return text
+
+        expected_lang = session_language["value"]
+        detected_lang = detect_language(text, default=expected_lang)
+        if detected_lang == expected_lang:
+            return text
+
+        room_log(
+            "LANGUAGE_OUTPUT_NORMALIZED",
+            expected=expected_lang,
+            detected=detected_lang,
+            reason="auto_switch_disabled",
+        )
+        if expected_lang == "el":
+            return "Συγγνώμη, συνεχίζω στα ελληνικά. Πείτε μου πώς μπορώ να σας βοηθήσω."
+        return "Sorry, I will continue in English. Please tell me how I can help."
+
     # Initialize abuse tracker for this session
     from src.utils.abuse_handler import AbuseTracker, check_and_respond_to_abuse
     _abuse_tracker = AbuseTracker()
@@ -1977,6 +2002,7 @@ async def entrypoint(ctx: JobContext):
                         # Expire stale pending phrase to avoid polluting unrelated turns.
                         _current_session["pending_lookup_wait_phrase"] = None
                         _current_session["pending_lookup_wait_phrase_set_at"] = 0.0
+                text = _enforce_locked_output_language(text)
 
                 from src.utils import (
                     apply_prosody,
@@ -2059,6 +2085,7 @@ async def entrypoint(ctx: JobContext):
                             continue
                         raw_buffer += chunk_text
                         updated = _enforce_order_status(raw_buffer)
+                        updated = _enforce_locked_output_language(updated)
                         updated = normalize_time_colons(updated)
                         updated = normalize_numeric_ids_for_tts(updated, language=agent_lang)
                         updated = normalize_punctuation_for_tts(updated)
@@ -2281,6 +2308,25 @@ async def entrypoint(ctx: JobContext):
                     language_switch_state["candidate"] = None
                     language_switch_state["count"] = 0
                     set_runtime_language(detected_lang)
+        else:
+            explicit_lang = _explicit_language_request(user_text)
+            if explicit_lang and explicit_lang != session_language["value"]:
+                room_log(
+                    "LANGUAGE_SWITCH_SUPPRESSED",
+                    current=session_language["value"],
+                    candidate=explicit_lang,
+                    reason="auto_switch_disabled",
+                )
+                locked_name = "Greek" if session_language["value"] == "el" else "English"
+                agent.chat_ctx.append(
+                    role="system",
+                    text=(
+                        "LANGUAGE LOCK:\n"
+                        "- Auto language switching is disabled for this call.\n"
+                        f"- Reply only in {locked_name}.\n"
+                        f"- If the caller requests another language, politely continue in {locked_name}."
+                    ),
+                )
 
         asyncio.create_task(send_user_transcript(user_text))
 
@@ -2323,7 +2369,8 @@ async def entrypoint(ctx: JobContext):
         try:
             text = message.content if hasattr(message, 'content') else None
             if text:
-                display_text = _strip_markup_for_output(text)
+                normalized_text = _enforce_locked_output_language(text)
+                display_text = _strip_markup_for_output(normalized_text)
                 asyncio.create_task(send_agent_transcript(display_text or text))
                 asyncio.create_task(send_agent_info(display_text or text))
                 conversation_transcript.append(f"Agent: {display_text or text}")
