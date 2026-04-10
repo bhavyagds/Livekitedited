@@ -1828,6 +1828,52 @@ async def entrypoint(ctx: JobContext):
             )
         )
 
+    def _build_prefetch_voice_summary(result_text: str, language: str) -> str:
+        """
+        Convert raw lookup text into a short, natural voice summary.
+        Keeps status/delivery/total, drops PII-heavy lines.
+        """
+        text = _strip_markup_for_output(result_text or "")
+        if not text:
+            return ""
+
+        # Split into sentence-ish chunks while preserving order.
+        chunks = [c.strip() for c in re.split(r"(?<=[.!?])\s+", text) if c.strip()]
+        if not chunks:
+            return text
+
+        pii_markers = (
+            "customer:",
+            "delivery address:",
+            "email:",
+            "phone:",
+            "πελάτης:",
+            "διεύθυνση",
+            "τηλέφωνο",
+            "email",
+        )
+        keep_chunks = [c for c in chunks if not any(m in c.lower() for m in pii_markers)]
+
+        if language == "en":
+            intro = "Thanks for waiting. I found your order."
+            followup = "Would you like more details about this order?"
+        else:
+            intro = "Ευχαριστώ για την αναμονή. Βρήκα την παραγγελία σας."
+            followup = "Θέλετε περισσότερες λεπτομέρειες για αυτή την παραγγελία;"
+
+        core = []
+        for c in keep_chunks:
+            lower = c.lower()
+            if "would you like more details" in lower or "θέλετε περισσότερες λεπτομέρειες" in lower:
+                continue
+            core.append(c)
+            if len(core) >= 3:
+                break
+
+        summary = " ".join([intro] + core + [followup]).strip()
+        summary = re.sub(r"\s{2,}", " ", summary)
+        return summary
+
     def _english_switch_confident(text: str) -> bool:
         """
         Return True only when transcript strongly looks like real English.
@@ -2607,6 +2653,7 @@ async def entrypoint(ctx: JobContext):
                     room_log("ORDER_LOOKUP_HINT_INJECTED", order_number=detected_order_number)
 
                     async def _prefetch_lookup(order_number: str, turn_id: int, requested_at: float):
+                        _pause_silence_for_tool("prefetch_lookup")
                         try:
                             result = await order_lookup.lookup_order(order_number)
                             _current_session["prefetched_lookup"] = {
@@ -2677,8 +2724,17 @@ async def entrypoint(ctx: JobContext):
                                 return
 
                             _snooze_silence_prompts(12.0, reason="lookup_prefetch_ready")
+                            spoken_result = _build_prefetch_voice_summary(
+                                result,
+                                get_agent_language(),
+                            )
+                            room_log(
+                                "ORDER_LOOKUP_PREFETCH_FORMATTED",
+                                order_number=order_number,
+                                result=_truncate(spoken_result),
+                            )
                             room_log("ORDER_LOOKUP_PREFETCH_SPEAKING", order_number=order_number)
-                            await agent.say(result, allow_interruptions=True)
+                            await agent.say(spoken_result or result, allow_interruptions=True)
                             _current_session["prefetched_lookup_spoken_at"] = time.time()
                             _current_session["prefetched_lookup_spoken_order"] = order_number
                             room_log("ORDER_LOOKUP_PREFETCH_SPOKEN", order_number=order_number)
@@ -2688,6 +2744,8 @@ async def entrypoint(ctx: JobContext):
                                 order_number=order_number,
                                 error=_truncate(str(e), max_len=200),
                             )
+                        finally:
+                            _resume_silence_for_tool("prefetch_lookup")
 
                     asyncio.create_task(
                         _prefetch_lookup(
