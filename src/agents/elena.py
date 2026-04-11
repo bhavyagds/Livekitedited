@@ -2106,6 +2106,7 @@ async def entrypoint(ctx: JobContext):
         "max_prompts": max_prompts,
         "silence_timeout": silence_timeout,
         "is_waiting_for_response": False,
+        "agent_is_speaking": False,
         "enabled": True,
         "paused_by_tool": False,
         "tool_pause_depth": 0,
@@ -2868,10 +2869,14 @@ async def entrypoint(ctx: JobContext):
         _latency_tracker.agent_started_speaking()
         cancel_thinking_task()
         logger.info("audio_publish_start: agent_started_speaking")
+        silence_tracker["agent_is_speaking"] = True
+        # Never fire silence prompts while the agent is actively speaking.
+        silence_tracker["is_waiting_for_response"] = False
         asyncio.create_task(send_state_update("speaking"))
     
     @agent.on("agent_stopped_speaking")
     def on_agent_stopped_speaking():
+        silence_tracker["agent_is_speaking"] = False
         asyncio.create_task(send_state_update("idle"))
         # Mark that agent finished speaking - now waiting for user response
         mark_agent_speaking()
@@ -3144,6 +3149,10 @@ async def entrypoint(ctx: JobContext):
 
                 # Pause silence prompts while tool calls are executing.
                 if silence_tracker.get("paused_by_tool"):
+                    continue
+
+                # Skip checks while agent audio is still being rendered.
+                if silence_tracker.get("agent_is_speaking"):
                     continue
 
                 # Grace period after lookup wait-ack to avoid stitching with "Are you there?"
