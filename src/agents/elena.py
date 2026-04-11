@@ -364,8 +364,18 @@ _current_session: dict = {
     "lookup_pending": False,
     "lookup_pending_started_at": 0.0,
     "lookup_pending_order": None,
+    "last_lookup_state": "unknown",
+    "last_lookup_order": None,
+    "details_confirmation_pending": False,
+    "details_confirmation_pending_until": 0.0,
     "full_order_details_allowed_until": 0.0,
     "last_more_details_prompt_at": 0.0,
+    "ticket_confirmation_pending": False,
+    "ticket_confirmation_pending_until": 0.0,
+    "ticket_create_allowed_until": 0.0,
+    "pending_ticket_payload": None,
+    "ticket_created": False,
+    "ticket_reference": None,
 }
 
 
@@ -396,6 +406,120 @@ def _strip_markup_for_output(text: str) -> str:
     cleaned = re.sub(r"[*_`~#]+", " ", cleaned)
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
     return cleaned.strip()
+
+
+def _normalize_intent_text(text: str) -> str:
+    """Normalize text for robust intent checks."""
+    lowered = (text or "").strip().lower()
+    if not lowered:
+        return ""
+    lowered = re.sub(r"[^\w\s]", " ", lowered, flags=re.UNICODE)
+    lowered = re.sub(r"\s+", " ", lowered).strip()
+    return lowered
+
+
+def _is_affirmative_utterance(text: str) -> bool:
+    """Return True for short positive confirmations like 'yes'."""
+    normalized = _normalize_intent_text(text)
+    if not normalized:
+        return False
+    yes_tokens = {
+        "yes", "yeah", "yep", "sure", "ok", "okay", "correct",
+        "ναι", "ενταξει", "εντάξει", "σωστα", "σωστά",
+    }
+    return normalized in yes_tokens
+
+
+def _is_negative_utterance(text: str) -> bool:
+    """Return True for short negative confirmations like 'no'."""
+    normalized = _normalize_intent_text(text)
+    if not normalized:
+        return False
+    no_tokens = {"no", "nope", "nah", "not now", "οχι", "όχι", "οχι ευχαριστω", "όχι ευχαριστώ"}
+    return normalized in no_tokens
+
+
+def _is_issue_confirmation_utterance(text: str) -> bool:
+    """Return True when user explicitly confirms the issue summary."""
+    normalized = _normalize_intent_text(text)
+    if not normalized:
+        return False
+    if _is_affirmative_utterance(normalized):
+        return True
+    confirmation_phrases = (
+        "that is correct",
+        "thats correct",
+        "correct issue",
+        "yes that is the issue",
+        "this is the issue",
+        "αυτό είναι το πρόβλημα",
+        "αυτο ειναι το προβλημα",
+        "σωστά",
+        "σωστα",
+    )
+    return any(phrase in normalized for phrase in confirmation_phrases)
+
+
+def _classify_lookup_result(result_text: str) -> str:
+    """
+    Classify lookup output into deterministic states.
+    Returns one of: found, not_found, unknown.
+    """
+    normalized = _normalize_intent_text(result_text)
+    if not normalized:
+        return "unknown"
+
+    not_found_markers = (
+        "couldn t find order",
+        "could not find order",
+        "couldn t find any details",
+        "could not find any details",
+        "cannot find order",
+        "doesn t look like a valid order number",
+        "does not look like a valid order number",
+        "double check the number",
+        "δεν μπορώ να βρω την παραγγελία",
+        "δεν μπορω να βρω την παραγγελια",
+        "δεν βρήκα την παραγγελία",
+        "δεν βρηκα την παραγγελια",
+        "δεν φαίνεται έγκυρος αριθμός παραγγελίας",
+        "δεν φαινεται εγκυρος αριθμος παραγγελιας",
+        "σωστό αριθμό παραγγελίας",
+        "σωστο αριθμο παραγγελιας",
+    )
+    if any(marker in normalized for marker in not_found_markers):
+        return "not_found"
+
+    if re.search(r"\border\s+\d{3,8}\s+(is|was)\s+\w+", normalized):
+        return "found"
+
+    found_markers = (
+        "would you like more details about this order",
+        "scheduled for delivery",
+        "θέλετε περισσότερες λεπτομέρειες",
+        "προγραμματισμένη παράδοση",
+        "συνολο",
+        "σύνολο",
+        "total ",
+        "status is",
+        "is completed",
+        "was cancelled",
+        "ολοκληρώθηκε",
+        "ακυρώθηκε",
+    )
+    if any(marker in normalized for marker in found_markers):
+        return "found"
+    return "unknown"
+
+
+def _extract_ticket_reference(text: str) -> Optional[str]:
+    """Extract support ticket reference from tool output."""
+    if not text:
+        return None
+    match = re.search(r"(?i)reference number is\s+([a-z0-9-]+)", text)
+    if match:
+        return match.group(1).strip()
+    return None
 
 
 def _create_room_logger(room_name: str, job_id: Optional[str]) -> tuple[logging.Logger, str]:
@@ -467,6 +591,18 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
         return ""
 
     lang = (language or "en").lower()
+    lookup_state = _classify_lookup_result(text)
+
+    if lookup_state == "not_found":
+        if lang == "el":
+            return (
+                "Δεν μπορώ να βρω αυτή την παραγγελία. "
+                "Μπορείτε να ελέγξετε ξανά τον αριθμό από την επιβεβαίωση παραγγελίας σας;"
+            )
+        return (
+            "I couldn't find that order. "
+            "Please double-check the order number from your confirmation."
+        )
 
     def _digits_spaced(raw: str) -> str:
         digits = re.sub(r"\D", "", raw or "")
@@ -1436,6 +1572,16 @@ class ElenaFunctionContext(llm.FunctionContext):
                 order_lookup.lookup_order(order_number),
             )
         room_log("TOOL_RESULT", name="lookup_order", result=_truncate(result))
+        lookup_state = _classify_lookup_result(result)
+        _current_session["last_lookup_state"] = lookup_state
+        _current_session["last_lookup_order"] = str(order_number or "")
+        if lookup_state == "found":
+            _current_session["details_confirmation_pending"] = True
+            _current_session["details_confirmation_pending_until"] = time.time() + 120.0
+        else:
+            _current_session["details_confirmation_pending"] = False
+            _current_session["details_confirmation_pending_until"] = 0.0
+            _current_session["full_order_details_allowed_until"] = 0.0
         summary = _build_order_voice_summary(result, get_agent_language()) or result
         if _as_bool(get_agent_setting("order_lookup_wait_phrase_enabled", True), default=True):
             return f"{self._pick_lookup_wait_phrase()} {summary}"
@@ -1453,10 +1599,12 @@ class ElenaFunctionContext(llm.FunctionContext):
             lang = get_agent_language()
             room_log("TOOL_RESULT_BLOCKED", name="get_order_details", reason="explicit_details_required")
             if lang == "el":
-                return "Μπορώ να δώσω αναλυτικά στοιχεία αν το ζητήσετε ρητά. Θέλετε να σας πω όλες τις λεπτομέρειες της παραγγελίας;"
-            return "I can share full order details once you explicitly ask for more details. Would you like the complete details now?"
+                return "Μπορώ να δώσω όλες τις λεπτομέρειες μόλις μου πείτε ναι. Θέλετε να συνεχίσουμε με πλήρη στοιχεία παραγγελίας;"
+            return "I can share full order details as soon as you say yes. Would you like the complete order details now?"
 
         _current_session["full_order_details_allowed_until"] = 0.0
+        _current_session["details_confirmation_pending"] = False
+        _current_session["details_confirmation_pending_until"] = 0.0
         room_log("TOOL_CALL", name="get_order_details", order_number=order_number)
         result = await self._run_tool_with_silence_pause(
             "get_order_details",
@@ -1476,21 +1624,88 @@ class ElenaFunctionContext(llm.FunctionContext):
         issue_description: Annotated[str, llm.TypeInfo(description="Description of the issue")],
     ) -> str:
         """Create a support ticket. Collect ALL 4 fields one by one before calling this."""
+        lang = get_agent_language()
+        existing_ref = str(_current_session.get("ticket_reference") or "").strip()
+        if _current_session.get("ticket_created"):
+            room_log("TOOL_RESULT_BLOCKED", name="create_support_ticket", reason="already_created")
+            if lang == "el":
+                if existing_ref:
+                    return (
+                        f"Έχουμε ήδη δημιουργήσει αίτημα υποστήριξης με αριθμό αναφοράς {existing_ref}. "
+                        "Ένας συνάδελφός μας θα επικοινωνήσει μαζί σας σύντομα."
+                    )
+                return "Έχουμε ήδη δημιουργήσει αίτημα υποστήριξης. Ένας συνάδελφός μας θα επικοινωνήσει μαζί σας σύντομα."
+            if existing_ref:
+                return (
+                    f"I already created your support request with reference number {existing_ref}. "
+                    "One of our colleagues will contact you soon."
+                )
+            return "I already created your support request. One of our colleagues will contact you soon."
+
+        now = time.time()
+        allowed_until = float(_current_session.get("ticket_create_allowed_until") or 0.0)
+        pending_payload = {
+            "customer_name": customer_name,
+            "customer_phone": customer_phone,
+            "customer_email": customer_email,
+            "issue_description": issue_description,
+        }
+        if now > allowed_until:
+            _current_session["pending_ticket_payload"] = pending_payload
+            _current_session["ticket_confirmation_pending"] = True
+            _current_session["ticket_confirmation_pending_until"] = now + 180.0
+            room_log("TOOL_RESULT_BLOCKED", name="create_support_ticket", reason="issue_confirmation_required")
+            if lang == "el":
+                return (
+                    "Πριν δημιουργήσω το αίτημα υποστήριξης, θέλω μια τελική επιβεβαίωση για το πρόβλημα που περιγράψατε. "
+                    "Αν είναι σωστό, πείτε ναι και προχωράω αμέσως."
+                )
+            return (
+                "Before I create the support request, I need one final confirmation of the issue you described. "
+                "If that's correct, say yes and I will submit it right away."
+            )
+
+        _current_session["ticket_create_allowed_until"] = 0.0
+        _current_session["ticket_confirmation_pending"] = False
+        _current_session["ticket_confirmation_pending_until"] = 0.0
+        payload = _current_session.get("pending_ticket_payload") or pending_payload
+        _current_session["pending_ticket_payload"] = None
         room_log(
             "TOOL_CALL",
             name="create_support_ticket",
-            customer_name=customer_name,
-            customer_phone=customer_phone,
-            customer_email=customer_email,
+            customer_name=payload.get("customer_name"),
+            customer_phone=payload.get("customer_phone"),
+            customer_email=payload.get("customer_email"),
         )
         result = await self._run_tool_with_silence_pause(
             "create_support_ticket",
             support_ticket.create_support_ticket(
-                customer_name, customer_phone, customer_email, issue_description
+                payload.get("customer_name"),
+                payload.get("customer_phone"),
+                payload.get("customer_email"),
+                payload.get("issue_description"),
             ),
         )
         room_log("TOOL_RESULT", name="create_support_ticket", result=_truncate(result))
-        return result
+        normalized_result = _normalize_intent_text(result)
+        if "cannot create ticket" in normalized_result or "couldn t create the support ticket" in normalized_result:
+            return result
+        reference = _extract_ticket_reference(result)
+        _current_session["ticket_created"] = True
+        _current_session["ticket_reference"] = reference
+        if lang == "el":
+            if reference:
+                return (
+                    f"Το αίτημα υποστήριξης δημιουργήθηκε με επιτυχία. Ο αριθμός αναφοράς σας είναι {reference}. "
+                    "Ένας συνάδελφός μας θα επικοινωνήσει μαζί σας σύντομα."
+                )
+            return "Το αίτημα υποστήριξης δημιουργήθηκε με επιτυχία. Ένας συνάδελφός μας θα επικοινωνήσει μαζί σας σύντομα."
+        if reference:
+            return (
+                f"Your support request has been created successfully. Your reference number is {reference}. "
+                "One of our colleagues will contact you soon."
+            )
+        return "Your support request has been created successfully. One of our colleagues will contact you soon."
 
     @llm.ai_callable()
     async def validate_ticket_field(
@@ -1674,8 +1889,18 @@ async def entrypoint(ctx: JobContext):
     _current_session["lookup_pending"] = False
     _current_session["lookup_pending_started_at"] = 0.0
     _current_session["lookup_pending_order"] = None
+    _current_session["last_lookup_state"] = "unknown"
+    _current_session["last_lookup_order"] = None
+    _current_session["details_confirmation_pending"] = False
+    _current_session["details_confirmation_pending_until"] = 0.0
     _current_session["full_order_details_allowed_until"] = 0.0
     _current_session["last_more_details_prompt_at"] = 0.0
+    _current_session["ticket_confirmation_pending"] = False
+    _current_session["ticket_confirmation_pending_until"] = 0.0
+    _current_session["ticket_create_allowed_until"] = 0.0
+    _current_session["pending_ticket_payload"] = None
+    _current_session["ticket_created"] = False
+    _current_session["ticket_reference"] = None
     
     # =========================================================================
     # PARALLEL STARTUP - Run ALL independent operations concurrently for speed
@@ -2830,9 +3055,61 @@ async def entrypoint(ctx: JobContext):
         current_turn_id = int(_current_session.get("last_user_turn_id") or 0) + 1
         _current_session["last_user_turn_id"] = current_turn_id
 
-        if _explicit_more_order_details_request(user_text):
-            _current_session["full_order_details_allowed_until"] = time.time() + 90.0
-            room_log("FULL_DETAILS_ALLOWED", ttl_s=90)
+        now = time.time()
+        explicit_details_request = _explicit_more_order_details_request(user_text)
+        is_affirmative = _is_affirmative_utterance(user_text)
+        is_negative = _is_negative_utterance(user_text)
+
+        details_pending = bool(_current_session.get("details_confirmation_pending"))
+        details_pending_until = float(_current_session.get("details_confirmation_pending_until") or 0.0)
+        if details_pending and now <= details_pending_until:
+            if explicit_details_request or is_affirmative:
+                _current_session["full_order_details_allowed_until"] = now + 120.0
+                _current_session["details_confirmation_pending"] = False
+                _current_session["details_confirmation_pending_until"] = 0.0
+                room_log("FULL_DETAILS_ALLOWED", ttl_s=120, reason="single_yes_unlock")
+                order_number_for_details = str(_current_session.get("last_lookup_order") or "last")
+                agent.chat_ctx.append(
+                    role="system",
+                    text=(
+                        "ORDER DETAILS CONFIRMED:\n"
+                        "- The user confirmed they want full order details.\n"
+                        f"- Call get_order_details immediately with order_number={order_number_for_details}.\n"
+                        "- Do not ask for confirmation again in this turn."
+                    ),
+                )
+            elif is_negative:
+                _current_session["details_confirmation_pending"] = False
+                _current_session["details_confirmation_pending_until"] = 0.0
+                _current_session["full_order_details_allowed_until"] = 0.0
+        elif explicit_details_request:
+            _current_session["full_order_details_allowed_until"] = now + 120.0
+            _current_session["details_confirmation_pending"] = False
+            _current_session["details_confirmation_pending_until"] = 0.0
+            room_log("FULL_DETAILS_ALLOWED", ttl_s=120, reason="explicit_request")
+
+        ticket_pending = bool(_current_session.get("ticket_confirmation_pending"))
+        ticket_pending_until = float(_current_session.get("ticket_confirmation_pending_until") or 0.0)
+        if ticket_pending and now <= ticket_pending_until:
+            if _is_issue_confirmation_utterance(user_text):
+                _current_session["ticket_create_allowed_until"] = now + 120.0
+                _current_session["ticket_confirmation_pending"] = False
+                _current_session["ticket_confirmation_pending_until"] = 0.0
+                room_log("TICKET_CREATE_ALLOWED", ttl_s=120, reason="issue_confirmed")
+                agent.chat_ctx.append(
+                    role="system",
+                    text=(
+                        "SUPPORT TICKET CONFIRMED:\n"
+                        "- The user gave final confirmation for the issue.\n"
+                        "- Call create_support_ticket now with the collected customer details.\n"
+                        "- Create the ticket only once."
+                    ),
+                )
+            elif is_negative:
+                _current_session["ticket_confirmation_pending"] = False
+                _current_session["ticket_confirmation_pending_until"] = 0.0
+                _current_session["ticket_create_allowed_until"] = 0.0
+                _current_session["pending_ticket_payload"] = None
 
         if auto_language_switch:
             explicit_lang = _explicit_language_request(user_text)
@@ -2950,6 +3227,16 @@ async def entrypoint(ctx: JobContext):
                                 order_number=order_number,
                                 result=_truncate(result),
                             )
+                            prefetch_state = _classify_lookup_result(result)
+                            _current_session["last_lookup_state"] = prefetch_state
+                            _current_session["last_lookup_order"] = str(order_number or "")
+                            if prefetch_state == "found":
+                                _current_session["details_confirmation_pending"] = True
+                                _current_session["details_confirmation_pending_until"] = time.time() + 120.0
+                            else:
+                                _current_session["details_confirmation_pending"] = False
+                                _current_session["details_confirmation_pending_until"] = 0.0
+                                _current_session["full_order_details_allowed_until"] = 0.0
                             if call_ended["value"] or _current_session.get("should_end"):
                                 room_log(
                                     "ORDER_LOOKUP_PREFETCH_SKIP",
@@ -3100,18 +3387,19 @@ async def entrypoint(ctx: JobContext):
                 conversation_transcript.append(f"Agent: {display_text or text}")
                 _current_session["last_agent_text"] = (display_text or text)
                 normalized_display = _normalize_switch_text(display_text or text)
-                if (
-                    "would you like more details about this order" in normalized_display
-                    or "θέλετε περισσότερες λεπτομέρειες για αυτή την παραγγελία" in normalized_display
-                ):
+                details_prompted = bool(
+                    re.search(
+                        r"(would you like .*details.*order|complete order details|more details about this order|θέλετε .*λεπτομέρειες.*παραγγελία)",
+                        normalized_display,
+                    )
+                )
+                if details_prompted:
                     _current_session["last_more_details_prompt_at"] = time.time()
+                    _current_session["details_confirmation_pending"] = True
+                    _current_session["details_confirmation_pending_until"] = time.time() + 120.0
                 if _current_session.get("lookup_pending"):
-                    if (
-                        "would you like more details about this order" in normalized_display
-                        or "θέλετε περισσότερες λεπτομέρειες για αυτή την παραγγελία" in normalized_display
-                        or "couldn't find order" in normalized_display
-                        or "δεν μπορώ να βρω την παραγγελία" in normalized_display
-                    ):
+                    lookup_state_in_text = _classify_lookup_result(display_text or text)
+                    if details_prompted or lookup_state_in_text == "not_found":
                         _clear_lookup_pending(reason="agent_committed_lookup_result")
                 logger.info(f"agent_speech_committed: {(display_text or text)[:50]}...")
                 room_log("AGENT_TEXT", text=_truncate(display_text or text))
@@ -3255,8 +3543,18 @@ async def entrypoint(ctx: JobContext):
             _current_session["lookup_pending"] = False
             _current_session["lookup_pending_started_at"] = 0.0
             _current_session["lookup_pending_order"] = None
+            _current_session["last_lookup_state"] = "unknown"
+            _current_session["last_lookup_order"] = None
+            _current_session["details_confirmation_pending"] = False
+            _current_session["details_confirmation_pending_until"] = 0.0
             _current_session["full_order_details_allowed_until"] = 0.0
             _current_session["last_more_details_prompt_at"] = 0.0
+            _current_session["ticket_confirmation_pending"] = False
+            _current_session["ticket_confirmation_pending_until"] = 0.0
+            _current_session["ticket_create_allowed_until"] = 0.0
+            _current_session["pending_ticket_payload"] = None
+            _current_session["ticket_created"] = False
+            _current_session["ticket_reference"] = None
             set_runtime_language(None)
     # Handle participant disconnection
     @ctx.room.on("participant_disconnected")
