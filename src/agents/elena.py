@@ -361,6 +361,11 @@ _current_session: dict = {
     "last_lookup_tool_order": None,
     "prefetched_lookup_spoken_at": 0.0,
     "prefetched_lookup_spoken_order": None,
+    "lookup_pending": False,
+    "lookup_pending_started_at": 0.0,
+    "lookup_pending_order": None,
+    "full_order_details_allowed_until": 0.0,
+    "last_more_details_prompt_at": 0.0,
 }
 
 
@@ -429,6 +434,144 @@ def room_log(event: str, **fields):
     }
     payload.update(fields)
     room_logger.info(json.dumps(payload, ensure_ascii=False))
+
+
+def _set_lookup_pending(order_number: Optional[str], reason: str) -> None:
+    """Mark lookup flow as pending to suppress silence prompts until resolved/timeout."""
+    _current_session["lookup_pending"] = True
+    _current_session["lookup_pending_started_at"] = time.time()
+    _current_session["lookup_pending_order"] = str(order_number or "")
+    room_log("LOOKUP_PENDING_SET", order_number=order_number, reason=reason)
+
+
+def _clear_lookup_pending(reason: str) -> None:
+    """Clear pending lookup state."""
+    if _current_session.get("lookup_pending"):
+        room_log(
+            "LOOKUP_PENDING_CLEARED",
+            order_number=_current_session.get("lookup_pending_order"),
+            reason=reason,
+        )
+    _current_session["lookup_pending"] = False
+    _current_session["lookup_pending_started_at"] = 0.0
+    _current_session["lookup_pending_order"] = None
+
+
+def _build_order_voice_summary(result_text: str, language: str) -> str:
+    """
+    Convert raw lookup output into concise voice-safe summary.
+    Keeps only status/date/total and formats order/date for speech.
+    """
+    text = _strip_markup_for_output(result_text or "")
+    if not text:
+        return ""
+
+    lang = (language or "en").lower()
+
+    def _digits_spaced(raw: str) -> str:
+        digits = re.sub(r"\D", "", raw or "")
+        return " ".join(list(digits)) if digits else ""
+
+    def _month_name(month: int) -> str:
+        if lang == "el":
+            names = {
+                1: "Ιανουαρίου", 2: "Φεβρουαρίου", 3: "Μαρτίου", 4: "Απριλίου",
+                5: "Μαΐου", 6: "Ιουνίου", 7: "Ιουλίου", 8: "Αυγούστου",
+                9: "Σεπτεμβρίου", 10: "Οκτωβρίου", 11: "Νοεμβρίου", 12: "Δεκεμβρίου",
+            }
+        else:
+            names = {
+                1: "January", 2: "February", 3: "March", 4: "April",
+                5: "May", 6: "June", 7: "July", 8: "August",
+                9: "September", 10: "October", 11: "November", 12: "December",
+            }
+        return names.get(month, "")
+
+    def _format_date(raw_date: str) -> str:
+        m = re.search(r"(\d{4})[/-](\d{2})[/-](\d{2})", raw_date or "")
+        if not m:
+            return raw_date
+        month = int(m.group(2))
+        day = int(m.group(3))
+        month_name = _month_name(month)
+        if not month_name:
+            return raw_date
+        return f"{day} {month_name}" if lang == "el" else f"{month_name} {day}"
+
+    order_match = re.search(r"(?i)\border\s*#?\s*(\d{3,8})\b", text)
+    if not order_match:
+        order_match = re.search(r"(?i)\bπαραγγε\w*\s*(\d{3,8})\b", text)
+    order_number = order_match.group(1) if order_match else ""
+
+    status_match = re.search(r"(?i)\bis\s+([a-z_]+)\b", text)
+    status = (status_match.group(1).lower() if status_match else "")
+    if not status:
+        if re.search(r"(?i)\bολοκληρ", text):
+            status = "completed"
+        elif re.search(r"(?i)\bακυρ", text):
+            status = "cancelled"
+
+    date_match = re.search(
+        r"(?i)(?:delivery(?:\s+on)?|scheduled for delivery on|παράδοση(?:\s+στις)?)\s*[:\-]?\s*(\d{4}[/-]\d{2}[/-]\d{2})",
+        text,
+    )
+    spoken_date = _format_date(date_match.group(1)) if date_match else ""
+
+    total_match = re.search(r"(?i)\btotal\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?)", text)
+    if not total_match:
+        total_match = re.search(r"(?i)\bσύνολο\s*[:\-]?\s*([0-9]+(?:[.,][0-9]+)?)", text)
+    amount = (total_match.group(1).replace(",", ".") if total_match else "")
+
+    if lang == "el":
+        intro = "Ευχαριστώ για την αναμονή. Βρήκα την παραγγελία σας."
+        if status == "completed":
+            status_phrase = "έχει ολοκληρωθεί"
+        elif status == "cancelled":
+            status_phrase = "έχει ακυρωθεί"
+        elif status:
+            status_phrase = f"είναι σε κατάσταση {status}"
+        else:
+            status_phrase = "βρέθηκε"
+        parts = [intro]
+        if order_number:
+            parts.append(f"Ο αριθμός παραγγελίας {_digits_spaced(order_number)} {status_phrase}.")
+        else:
+            parts.append(f"Η παραγγελία σας {status_phrase}.")
+        if spoken_date:
+            parts.append(f"Η παράδοση είναι προγραμματισμένη για {spoken_date}.")
+        if amount:
+            whole, _, frac = amount.partition(".")
+            if frac:
+                parts.append(f"Το σύνολο είναι {int(whole)} ευρώ και {int(frac[:2]):02d} λεπτά.")
+            else:
+                parts.append(f"Το σύνολο είναι {int(whole)} ευρώ.")
+        parts.append("Θέλετε περισσότερες λεπτομέρειες για αυτή την παραγγελία;")
+        return re.sub(r"\s{2,}", " ", " ".join(parts)).strip()
+
+    intro = "Thanks for waiting. I found your order."
+    if status == "completed":
+        status_phrase = "is completed"
+    elif status == "cancelled":
+        status_phrase = "was cancelled"
+    elif status:
+        status_phrase = f"is currently {status}"
+    else:
+        status_phrase = "was found"
+    parts = [intro]
+    if order_number:
+        parts.append(f"Order number {_digits_spaced(order_number)} {status_phrase}.")
+    else:
+        parts.append(f"Your order {status_phrase}.")
+    if spoken_date:
+        parts.append(f"Delivery is scheduled for {spoken_date}.")
+    if amount:
+        whole, _, frac = amount.partition(".")
+        if frac:
+            parts.append(f"The total is {int(whole)} euros and {int(frac[:2]):02d} cents.")
+        else:
+            parts.append(f"The total is {int(whole)} euros.")
+    parts.append("Would you like more details about this order?")
+    return re.sub(r"\s{2,}", " ", " ".join(parts)).strip()
 
 
 def _pause_silence_for_tool(tool_name: str) -> None:
@@ -1264,6 +1407,7 @@ class ElenaFunctionContext(llm.FunctionContext):
         order_number: Annotated[str, llm.TypeInfo(description="The order number (4-5 digits)")],
     ) -> str:
         """Look up an order. Returns brief status first. Use get_order_details for more info."""
+        _set_lookup_pending(order_number, reason="lookup_order_called")
         _current_session["last_lookup_tool_called_at"] = time.time()
         _current_session["last_lookup_tool_order"] = str(order_number or "")
         room_log("TOOL_CALL", name="lookup_order", order_number=order_number)
@@ -1292,9 +1436,10 @@ class ElenaFunctionContext(llm.FunctionContext):
                 order_lookup.lookup_order(order_number),
             )
         room_log("TOOL_RESULT", name="lookup_order", result=_truncate(result))
+        summary = _build_order_voice_summary(result, get_agent_language()) or result
         if _as_bool(get_agent_setting("order_lookup_wait_phrase_enabled", True), default=True):
-            return f"{self._pick_lookup_wait_phrase()} {result}"
-        return result
+            return f"{self._pick_lookup_wait_phrase()} {summary}"
+        return summary
 
     @llm.ai_callable()
     async def get_order_details(
@@ -1302,6 +1447,16 @@ class ElenaFunctionContext(llm.FunctionContext):
         order_number: Annotated[str, llm.TypeInfo(description="Order number or 'last' for most recent")] = "last",
     ) -> str:
         """Get FULL order details (items, prices, address). Use after lookup_order when customer wants more info."""
+        now = time.time()
+        allowed_until = float(_current_session.get("full_order_details_allowed_until") or 0.0)
+        if now > allowed_until:
+            lang = get_agent_language()
+            room_log("TOOL_RESULT_BLOCKED", name="get_order_details", reason="explicit_details_required")
+            if lang == "el":
+                return "Μπορώ να δώσω αναλυτικά στοιχεία αν το ζητήσετε ρητά. Θέλετε να σας πω όλες τις λεπτομέρειες της παραγγελίας;"
+            return "I can share full order details once you explicitly ask for more details. Would you like the complete details now?"
+
+        _current_session["full_order_details_allowed_until"] = 0.0
         room_log("TOOL_CALL", name="get_order_details", order_number=order_number)
         result = await self._run_tool_with_silence_pause(
             "get_order_details",
@@ -1516,6 +1671,11 @@ async def entrypoint(ctx: JobContext):
     _current_session["last_lookup_tool_order"] = None
     _current_session["prefetched_lookup_spoken_at"] = 0.0
     _current_session["prefetched_lookup_spoken_order"] = None
+    _current_session["lookup_pending"] = False
+    _current_session["lookup_pending_started_at"] = 0.0
+    _current_session["lookup_pending_order"] = None
+    _current_session["full_order_details_allowed_until"] = 0.0
+    _current_session["last_more_details_prompt_at"] = 0.0
     
     # =========================================================================
     # PARALLEL STARTUP - Run ALL independent operations concurrently for speed
@@ -1706,6 +1866,43 @@ async def entrypoint(ctx: JobContext):
             return "el"
         return None
 
+    def _explicit_more_order_details_request(text: str) -> bool:
+        """Detect when caller explicitly asks for full order details."""
+        lowered = _normalize_switch_text(text)
+        if not lowered:
+            return False
+
+        en_phrases = (
+            "more details",
+            "full details",
+            "complete details",
+            "show details",
+            "order details",
+            "item details",
+            "what are the items",
+            "what did i order",
+            "details please",
+        )
+        el_phrases = (
+            "περισσότερες λεπτομέρειες",
+            "όλες τις λεπτομέρειες",
+            "αναλυτικές λεπτομέρειες",
+            "λεπτομέρειες παραγγελίας",
+            "τι περιέχει η παραγγελία",
+            "ποια είδη",
+        )
+        if any(p in lowered for p in en_phrases):
+            return True
+        if any(p in lowered for p in el_phrases):
+            return True
+
+        yes_tokens = {"yes", "yeah", "yep", "sure", "ok", "okay", "ναι", "εντάξει"}
+        if lowered in yes_tokens:
+            prompted_at = float(_current_session.get("last_more_details_prompt_at") or 0.0)
+            if prompted_at and (time.time() - prompted_at) <= 25.0:
+                return True
+        return False
+
     _ORDER_WORD_TO_DIGIT = {
         # English
         "zero": "0",
@@ -1780,7 +1977,7 @@ async def entrypoint(ctx: JobContext):
         if not normalized:
             return None
 
-        explicit_runs = re.findall(r"\d{3,6}", normalized)
+        explicit_runs = re.findall(r"\d{4,6}", normalized)
         if explicit_runs:
             return explicit_runs[-1]
 
@@ -1795,7 +1992,7 @@ async def entrypoint(ctx: JobContext):
                     return candidate
             for segment in windows:
                 candidate = _digits_from_phrase(segment)
-                if 3 <= len(candidate) <= 6:
+                if 4 <= len(candidate) <= 6:
                     return candidate
 
         fallback = _digits_from_phrase(normalized)
@@ -1806,7 +2003,7 @@ async def entrypoint(ctx: JobContext):
         numeric_token_count = sum(
             1 for token in tokens if token.isdigit() or token in _ORDER_WORD_TO_DIGIT
         )
-        if 3 <= len(fallback) <= 6 and numeric_token_count >= 3:
+        if 4 <= len(fallback) <= 6 and numeric_token_count >= 4:
             return fallback
         return None
 
@@ -2633,6 +2830,10 @@ async def entrypoint(ctx: JobContext):
         current_turn_id = int(_current_session.get("last_user_turn_id") or 0) + 1
         _current_session["last_user_turn_id"] = current_turn_id
 
+        if _explicit_more_order_details_request(user_text):
+            _current_session["full_order_details_allowed_until"] = time.time() + 90.0
+            room_log("FULL_DETAILS_ALLOWED", ttl_s=90)
+
         if auto_language_switch:
             explicit_lang = _explicit_language_request(user_text)
             if explicit_lang and explicit_lang != session_language["value"]:
@@ -2712,6 +2913,7 @@ async def entrypoint(ctx: JobContext):
         try:
             detected_order_number = _extract_order_number_candidate(user_text)
             if _should_force_order_lookup(user_text, detected_order_number):
+                _set_lookup_pending(detected_order_number, reason="order_number_detected")
                 now = time.time()
                 last_forced_order = str(_current_session.get("last_forced_lookup_order") or "")
                 last_forced_at = float(_current_session.get("last_forced_lookup_at") or 0.0)
@@ -2805,7 +3007,7 @@ async def entrypoint(ctx: JobContext):
                                 return
 
                             _snooze_silence_prompts(12.0, reason="lookup_prefetch_ready")
-                            spoken_result = _build_prefetch_voice_summary(
+                            spoken_result = _build_order_voice_summary(
                                 result,
                                 get_agent_language(),
                             )
@@ -2820,6 +3022,7 @@ async def entrypoint(ctx: JobContext):
                             # so "Are you still there?" does not trigger immediately.
                             mark_agent_speaking()
                             _snooze_silence_prompts(10.0, reason="post_prefetch_spoken")
+                            _clear_lookup_pending(reason="prefetch_spoken")
                             _current_session["prefetched_lookup_spoken_at"] = time.time()
                             _current_session["prefetched_lookup_spoken_order"] = order_number
                             room_log("ORDER_LOOKUP_PREFETCH_SPOKEN", order_number=order_number)
@@ -2896,6 +3099,20 @@ async def entrypoint(ctx: JobContext):
                 asyncio.create_task(send_agent_info(display_text or text))
                 conversation_transcript.append(f"Agent: {display_text or text}")
                 _current_session["last_agent_text"] = (display_text or text)
+                normalized_display = _normalize_switch_text(display_text or text)
+                if (
+                    "would you like more details about this order" in normalized_display
+                    or "θέλετε περισσότερες λεπτομέρειες για αυτή την παραγγελία" in normalized_display
+                ):
+                    _current_session["last_more_details_prompt_at"] = time.time()
+                if _current_session.get("lookup_pending"):
+                    if (
+                        "would you like more details about this order" in normalized_display
+                        or "θέλετε περισσότερες λεπτομέρειες για αυτή την παραγγελία" in normalized_display
+                        or "couldn't find order" in normalized_display
+                        or "δεν μπορώ να βρω την παραγγελία" in normalized_display
+                    ):
+                        _clear_lookup_pending(reason="agent_committed_lookup_result")
                 logger.info(f"agent_speech_committed: {(display_text or text)[:50]}...")
                 room_log("AGENT_TEXT", text=_truncate(display_text or text))
         except Exception as e:
@@ -3035,6 +3252,11 @@ async def entrypoint(ctx: JobContext):
             _current_session["last_lookup_tool_order"] = None
             _current_session["prefetched_lookup_spoken_at"] = 0.0
             _current_session["prefetched_lookup_spoken_order"] = None
+            _current_session["lookup_pending"] = False
+            _current_session["lookup_pending_started_at"] = 0.0
+            _current_session["lookup_pending_order"] = None
+            _current_session["full_order_details_allowed_until"] = 0.0
+            _current_session["last_more_details_prompt_at"] = 0.0
             set_runtime_language(None)
     # Handle participant disconnection
     @ctx.room.on("participant_disconnected")
@@ -3154,6 +3376,19 @@ async def entrypoint(ctx: JobContext):
                 # Skip checks while agent audio is still being rendered.
                 if silence_tracker.get("agent_is_speaking"):
                     continue
+
+                # Hold silence prompts while an order lookup is pending.
+                if _current_session.get("lookup_pending"):
+                    pending_started = float(_current_session.get("lookup_pending_started_at") or 0.0)
+                    pending_timeout = _as_float(
+                        get_agent_setting("order_lookup_pending_timeout_seconds", 60.0),
+                        60.0,
+                        min_value=15.0,
+                        max_value=180.0,
+                    )
+                    if pending_started and (time.time() - pending_started) <= pending_timeout:
+                        continue
+                    _clear_lookup_pending(reason="pending_timeout")
 
                 # Grace period after lookup wait-ack to avoid stitching with "Are you there?"
                 if time.time() < float(silence_tracker.get("snooze_until") or 0.0):
