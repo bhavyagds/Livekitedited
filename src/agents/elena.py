@@ -724,6 +724,187 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
     return re.sub(r"\s{2,}", " ", " ".join(parts)).strip()
 
 
+def _build_order_details_voice_summary(result_text: str, language: str) -> str:
+    """
+    Convert raw get_order_details output into a concise, voice-safe response.
+    Never return raw multiline tool payload to avoid long or unstable speech.
+    """
+    raw = str(result_text or "").replace("\r", "")
+    cleaned = _strip_markup_for_output(raw)
+    if not cleaned:
+        return ""
+
+    lang = (language or "en").lower()
+    lookup_state = _classify_lookup_result(cleaned)
+    if lookup_state == "not_found":
+        return _build_order_voice_summary(cleaned, lang)
+
+    max_items = _as_int(
+        get_agent_setting("order_details_voice_max_items", 5),
+        5,
+        min_value=1,
+        max_value=8,
+    )
+
+    def _digits_spaced(raw_value: str) -> str:
+        digits = re.sub(r"\D", "", raw_value or "")
+        return " ".join(list(digits)) if digits else ""
+
+    def _month_name(month: int) -> str:
+        if lang == "el":
+            names = {
+                1: "Ιανουαρίου", 2: "Φεβρουαρίου", 3: "Μαρτίου", 4: "Απριλίου",
+                5: "Μαΐου", 6: "Ιουνίου", 7: "Ιουλίου", 8: "Αυγούστου",
+                9: "Σεπτεμβρίου", 10: "Οκτωβρίου", 11: "Νοεμβρίου", 12: "Δεκεμβρίου",
+            }
+        else:
+            names = {
+                1: "January", 2: "February", 3: "March", 4: "April",
+                5: "May", 6: "June", 7: "July", 8: "August",
+                9: "September", 10: "October", 11: "November", 12: "December",
+            }
+        return names.get(month, "")
+
+    def _format_date(raw_value: str) -> str:
+        m = re.search(r"(\d{4})[/-](\d{2})[/-](\d{2})", raw_value or "")
+        if not m:
+            return ""
+        month = int(m.group(2))
+        day = int(m.group(3))
+        month_name = _month_name(month)
+        if not month_name:
+            return ""
+        return f"{day} {month_name}" if lang == "el" else f"{month_name} {day}"
+
+    order_match = re.search(r"(?im)^ORDER DETAILS FOR\s*#?\s*(\d+)\s*:", raw)
+    if not order_match:
+        order_match = re.search(r"(?i)\border\s*number\s*(\d+)\b", raw)
+    order_number = order_match.group(1) if order_match else ""
+
+    status_match = re.search(r"(?im)^-\s*Status:\s*(.+)$", raw)
+    status = status_match.group(1).strip().lower() if status_match else ""
+
+    delivery_match = re.search(r"(?im)^-\s*Delivery Date:\s*(.+)$", raw)
+    delivery_raw = delivery_match.group(1).strip() if delivery_match else ""
+    delivery_spoken = _format_date(delivery_raw)
+
+    total_match = re.search(r"(?im)^-\s*Total:\s*([0-9]+(?:[.,][0-9]+)?)\s*([A-Za-z€]{1,4})?", raw)
+    amount = ""
+    currency = "EUR"
+    if total_match:
+        amount = (total_match.group(1) or "").replace(",", ".")
+        if total_match.group(2):
+            currency = total_match.group(2).upper()
+
+    item_lines: list[str] = []
+    lines = raw.splitlines()
+    items_start_idx = -1
+    for idx, line in enumerate(lines):
+        if re.search(r"(?i)^-\s*Items\s*\(\d+\)\s*:", line.strip()):
+            items_start_idx = idx + 1
+            break
+    if items_start_idx != -1:
+        for line in lines[items_start_idx:]:
+            stripped = line.strip()
+            if not stripped:
+                if item_lines:
+                    break
+                continue
+            if stripped.lower().startswith("use this information"):
+                break
+            if not stripped.startswith("-"):
+                continue
+            value = stripped[1:].strip()
+            if not value:
+                continue
+            value = re.sub(r",\s*[0-9]+(?:[.,][0-9]+)?\s*[A-Za-z€]{1,4}(?:\s+each)?\s*$", "", value).strip()
+            m_qty_en = re.match(r"^(\d+)\s+of\s+(.+)$", value, flags=re.IGNORECASE)
+            m_qty_el = re.match(r"^(\d+)\s+τεμάχια\s+(.+)$", value, flags=re.IGNORECASE)
+            if m_qty_en:
+                qty = int(m_qty_en.group(1))
+                name = m_qty_en.group(2).strip()
+            elif m_qty_el:
+                qty = int(m_qty_el.group(1))
+                name = m_qty_el.group(2).strip()
+            else:
+                qty = 1
+                name = value.strip()
+            name = re.sub(r"\s{2,}", " ", name).strip(" .,;:-")
+            if not name:
+                continue
+            if len(name) > 80:
+                name = name[:80].rstrip() + "..."
+            if lang == "el":
+                item_lines.append(f"{qty} x {name}" if qty > 1 else name)
+            else:
+                item_lines.append(f"{qty} x {name}" if qty > 1 else name)
+            if len(item_lines) >= max_items:
+                break
+
+    if lang == "el":
+        parts = []
+        if order_number:
+            parts.append(f"Ορίστε οι λεπτομέρειες για την παραγγελία {_digits_spaced(order_number)}.")
+        else:
+            parts.append("Ορίστε οι λεπτομέρειες της παραγγελίας σας.")
+
+        if status == "completed":
+            parts.append("Η κατάσταση είναι ολοκληρωμένη.")
+        elif status == "cancelled":
+            parts.append("Η κατάσταση είναι ακυρωμένη.")
+        elif status:
+            parts.append(f"Η κατάσταση είναι {status}.")
+
+        if delivery_spoken:
+            parts.append(f"Η παράδοση είναι προγραμματισμένη για {delivery_spoken}.")
+
+        if amount:
+            whole, _, frac = amount.partition(".")
+            if frac:
+                parts.append(f"Το σύνολο είναι {int(whole)} ευρώ και {int(frac[:2]):02d} λεπτά.")
+            else:
+                parts.append(f"Το σύνολο είναι {int(whole)} ευρώ.")
+
+        if item_lines:
+            items_text = ", ".join(item_lines)
+            parts.append(f"Τα βασικά προϊόντα είναι {items_text}.")
+
+        parts.append("Θέλετε κάτι άλλο για αυτή την παραγγελία;")
+        summary = " ".join(parts)
+    else:
+        parts = []
+        if order_number:
+            parts.append(f"Here are the details for order {_digits_spaced(order_number)}.")
+        else:
+            parts.append("Here are your order details.")
+
+        if status == "completed":
+            parts.append("The status is completed.")
+        elif status == "cancelled":
+            parts.append("The status is cancelled.")
+        elif status:
+            parts.append(f"The status is {status}.")
+
+        if delivery_spoken:
+            parts.append(f"Delivery is scheduled for {delivery_spoken}.")
+
+        if amount:
+            whole, _, frac = amount.partition(".")
+            if frac:
+                parts.append(f"The total is {int(whole)} euros and {int(frac[:2]):02d} cents.")
+            else:
+                parts.append(f"The total is {int(whole)} euros.")
+
+        if item_lines:
+            items_text = ", ".join(item_lines)
+            parts.append(f"The main items are {items_text}.")
+
+        parts.append("Would you like help with anything else on this order?")
+        summary = " ".join(parts)
+
+    return re.sub(r"\s{2,}", " ", summary).strip()
+
+
 def _pause_silence_for_tool(tool_name: str) -> None:
     """Temporarily pause silence prompts while a long-running tool executes."""
     tracker = _current_session.get("silence_tracker")
@@ -1625,9 +1806,17 @@ class ElenaFunctionContext(llm.FunctionContext):
             order_lookup.get_order_details(order_number),
         )
         room_log("TOOL_RESULT", name="get_order_details", result=_truncate(result))
+        spoken_summary = _build_order_details_voice_summary(result, get_agent_language())
+        if not spoken_summary:
+            spoken_summary = _build_order_voice_summary(result, get_agent_language()) or (
+                "Δεν βρήκα λεπτομέρειες για αυτή την παραγγελία."
+                if get_agent_language() == "el"
+                else "I could not find details for this order."
+            )
+        room_log("ORDER_DETAILS_FORMATTED", order_number=order_number, result=_truncate(spoken_summary))
         if _as_bool(get_agent_setting("order_lookup_wait_phrase_enabled", True), default=True):
-            return f"{self._pick_lookup_wait_phrase()} {result}"
-        return result
+            return f"{self._pick_lookup_wait_phrase()} {spoken_summary}"
+        return spoken_summary
 
     @llm.ai_callable()
     async def create_support_ticket(
