@@ -562,9 +562,23 @@ def room_log(event: str, **fields):
 
 def _set_lookup_pending(order_number: Optional[str], reason: str) -> None:
     """Mark lookup flow as pending to suppress silence prompts until resolved/timeout."""
+    now = time.time()
     _current_session["lookup_pending"] = True
-    _current_session["lookup_pending_started_at"] = time.time()
+    _current_session["lookup_pending_started_at"] = now
     _current_session["lookup_pending_order"] = str(order_number or "")
+    tracker = _current_session.get("silence_tracker")
+    if isinstance(tracker, dict):
+        # Immediate race guard: prevent stale silence prompts right after order capture.
+        capture_snooze = _as_float(
+            get_agent_setting("order_lookup_capture_snooze_seconds", 8.0),
+            8.0,
+            min_value=2.0,
+            max_value=25.0,
+        )
+        tracker["snooze_until"] = max(float(tracker.get("snooze_until") or 0.0), now + capture_snooze)
+        tracker["last_user_speech"] = now
+        tracker["prompt_count"] = 0
+        room_log("SILENCE_SNOOZED", reason=f"lookup_pending:{reason}", seconds=round(capture_snooze, 2))
     room_log("LOOKUP_PENDING_SET", order_number=order_number, reason=reason)
 
 
@@ -3707,6 +3721,13 @@ async def entrypoint(ctx: JobContext):
                     if prompt_count < silence_tracker["max_prompts"]:
                         # Prompt the user
                         prompt_text = prompts[min(prompt_count, len(prompts) - 1)]
+                        # Re-check race conditions right before speaking the silence prompt.
+                        if _current_session.get("lookup_pending"):
+                            room_log("SILENCE_PROMPT_SKIPPED", reason="lookup_pending_race")
+                            continue
+                        if time.time() < float(silence_tracker.get("snooze_until") or 0.0):
+                            room_log("SILENCE_PROMPT_SKIPPED", reason="snooze_race")
+                            continue
                         logger.info(f"🔇 Silence detected ({time_since_user:.1f}s), prompting user: {prompt_text}")
                         
                         silence_tracker["prompt_count"] += 1
