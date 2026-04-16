@@ -408,6 +408,40 @@ def _strip_markup_for_output(text: str) -> str:
     return cleaned.strip()
 
 
+def _strip_tts_style_leakage(text: str) -> str:
+    """
+    Remove style/prosody instruction leakage before sending text to TTS.
+    Prevents speech like "high pitch", "medium volume", "style 0.7", etc.
+    """
+    if not text:
+        return ""
+
+    cleaned = str(text)
+    # Remove common label-style fragments.
+    cleaned = re.sub(
+        r"(?i)\b(?:pitch|volume|rate|speed|tone|style|prosody|emotion|voice(?:\s*style)?)\s*[:=]\s*[a-z0-9_.-]+",
+        " ",
+        cleaned,
+    )
+    # Remove free-form sequences like "high pitch medium volume fast rate".
+    cleaned = re.sub(
+        r"(?i)\b(?:x-?low|low|medium|high|x-?high|soft|loud|x-?loud|slow|fast|x-?fast)\s+"
+        r"(?:pitch|volume|rate|speed|tone|style|prosody)\b",
+        " ",
+        cleaned,
+    )
+    # Remove SSML prosody self references that sometimes leak as plain text.
+    cleaned = re.sub(
+        r'(?i)\bprosody\s+pitch\s+"?[a-z-]+"?\s+rate\s+"?[a-z-]+"?\s+volume\s+"?[a-z-]+"?\b',
+        " ",
+        cleaned,
+    )
+    # Remove repeated horizontal separators.
+    cleaned = re.sub(r"\s*-{3,}\s*", " ", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    return cleaned
+
+
 def _normalize_intent_text(text: str) -> str:
     """Normalize text for robust intent checks."""
     lowered = (text or "").strip().lower()
@@ -3042,6 +3076,14 @@ async def entrypoint(ctx: JobContext):
                     use_ssml = False
 
                 tts_text = _enforce_order_status(text)
+                sanitized_tts_text = _strip_tts_style_leakage(tts_text)
+                if sanitized_tts_text != tts_text:
+                    room_log(
+                        "TTS_STYLE_TEXT_STRIPPED",
+                        before=_truncate(tts_text, max_len=200),
+                        after=_truncate(sanitized_tts_text, max_len=200),
+                    )
+                tts_text = sanitized_tts_text
                 tts_text = normalize_time_colons(tts_text)
                 tts_text = normalize_numeric_ids_for_tts(tts_text, language=agent_lang)
                 tts_text = normalize_punctuation_for_tts(tts_text)
@@ -3084,6 +3126,7 @@ async def entrypoint(ctx: JobContext):
                             continue
                         raw_buffer += chunk_text
                         updated = _enforce_order_status(raw_buffer)
+                        updated = _strip_tts_style_leakage(updated)
                         updated = _enforce_locked_output_language(updated)
                         updated = normalize_time_colons(updated)
                         updated = normalize_numeric_ids_for_tts(updated, language=agent_lang)
