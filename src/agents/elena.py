@@ -3089,7 +3089,6 @@ async def entrypoint(ctx: JobContext):
                 tts_text = normalize_punctuation_for_tts(tts_text)
                 cleaned_ui_text = _strip_markup_for_output(tts_text)
                 if cleaned_ui_text:
-                    asyncio.create_task(send_agent_transcript(cleaned_ui_text))
                     room_log(
                         "TTS_TEXT_FINAL",
                         provider=tts_provider,
