@@ -518,6 +518,10 @@ def _classify_lookup_result(result_text: str) -> str:
         "δεν βρηκα την παραγγελια",
         "δεν φαίνεται έγκυρος αριθμός παραγγελίας",
         "δεν φαινεται εγκυρος αριθμος παραγγελιας",
+        "δεν βρέθηκε καμία παραγγελία",
+        "δεν βρηκαμε παραγγελιες",
+        "no orders found for this phone",
+        "couldn't find any orders matching the phone",
         "σωστό αριθμό παραγγελίας",
         "σωστο αριθμο παραγγελιας",
     )
@@ -1867,6 +1871,40 @@ class ElenaFunctionContext(llm.FunctionContext):
         if _as_bool(get_agent_setting("order_lookup_wait_phrase_enabled", True), default=True):
             return f"{self._pick_lookup_wait_phrase()} {spoken_summary}"
         return spoken_summary
+
+    @llm.ai_callable()
+    async def lookup_order_by_phone(
+        self,
+        phone: Annotated[str, llm.TypeInfo(description="The customer's phone number")],
+    ) -> str:
+        """Look up orders by customer phone number. Use when order number is unknown."""
+        _set_lookup_pending(phone, reason="lookup_order_by_phone_called")
+        _current_session["last_lookup_tool_called_at"] = time.time()
+        _current_session["last_lookup_tool_order"] = str(phone or "")
+        room_log("TOOL_CALL", name="lookup_order_by_phone", phone=phone)
+        
+        result = await self._run_tool_with_silence_pause(
+            "lookup_order_by_phone",
+            order_lookup.lookup_order_by_phone(phone),
+        )
+        
+        room_log("TOOL_RESULT", name="lookup_order_by_phone", result=_truncate(result))
+        lookup_state = _classify_lookup_result(result)
+        _current_session["last_lookup_state"] = lookup_state
+        _current_session["last_lookup_order"] = str(phone or "")
+        
+        if lookup_state == "found":
+            _current_session["details_confirmation_pending"] = True
+            _current_session["details_confirmation_pending_until"] = time.time() + 120.0
+        else:
+            _current_session["details_confirmation_pending"] = False
+            _current_session["details_confirmation_pending_until"] = 0.0
+            _current_session["full_order_details_allowed_until"] = 0.0
+            
+        summary = _build_order_voice_summary(result, get_agent_language()) or result
+        if _as_bool(get_agent_setting("order_lookup_wait_phrase_enabled", True), default=True):
+            return f"{self._pick_lookup_wait_phrase()} {summary}"
+        return summary
 
     @llm.ai_callable()
     async def create_support_ticket(
