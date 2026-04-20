@@ -173,8 +173,9 @@ class ShopifyService:
 
         target_name = "English" if target_lang == "en" else "Greek"
         system_prompt = (
-            "You are a translation engine for customer support order data. "
+            "You are a translation engine for a female customer support assistant named Elena. "
             f"Translate every string into {target_name}. "
+            "Use feminine gender forms for self-references in Greek. "
             "Preserve numbers, order IDs, emails, phone numbers, and currency amounts exactly. "
             "For names/addresses, translate or transliterate into the target script. "
             "Keep brand names (e.g., Meallion) unchanged. "

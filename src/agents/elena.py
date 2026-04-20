@@ -654,7 +654,15 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
 
     def _digits_spaced(raw: str) -> str:
         digits = re.sub(r"\D", "", raw or "")
-        return " ".join(list(digits)) if digits else ""
+        if not digits:
+            return ""
+        if lang == "el":
+            try:
+                from src.utils.greek_numbers import number_to_greek
+                return number_to_greek(int(digits))
+            except Exception:
+                return digits
+        return digits
 
     def _month_name(month: int) -> str:
         if lang == "el":
@@ -782,7 +790,15 @@ def _build_order_details_voice_summary(result_text: str, language: str) -> str:
 
     def _digits_spaced(raw_value: str) -> str:
         digits = re.sub(r"\D", "", raw_value or "")
-        return " ".join(list(digits)) if digits else ""
+        if not digits:
+            return ""
+        if lang == "el":
+            try:
+                from src.utils.greek_numbers import number_to_greek
+                return number_to_greek(int(digits))
+            except Exception:
+                return digits
+        return digits
 
     def _month_name(month: int) -> str:
         if lang == "el":
@@ -1648,7 +1664,7 @@ def create_vad():
     vad_backend = str(get_agent_setting("vad_backend", "silero") or "").strip().lower()
     if vad_backend in {"energy", "rms", "simple"}:
         energy_threshold = _as_float(
-            get_agent_setting("energy_vad_threshold", 0.012),
+            get_agent_setting("energy_vad_threshold", 0.02),
             0.012,
             min_value=0.001,
             max_value=0.2,
@@ -1688,7 +1704,7 @@ def create_vad():
         max_value=16000,
     )
     vad_activation_threshold = _as_float(
-        get_agent_setting("vad_activation_threshold", 0.6),
+        get_agent_setting("vad_activation_threshold", 0.72),
         0.6,
         min_value=0.1,
         max_value=0.9,
@@ -2500,7 +2516,15 @@ async def entrypoint(ctx: JobContext):
 
         def _digits_spaced(raw: str) -> str:
             digits = re.sub(r"\D", "", raw or "")
-            return " ".join(list(digits)) if digits else ""
+            if not digits:
+                return ""
+            if lang == "el":
+                try:
+                    from src.utils.greek_numbers import number_to_greek
+                    return number_to_greek(int(digits))
+                except Exception:
+                    return digits
+            return digits
 
         def _month_name(month: int) -> str:
             if lang == "el":

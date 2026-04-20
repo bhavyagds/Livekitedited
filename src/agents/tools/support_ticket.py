@@ -293,8 +293,7 @@ async def validate_ticket_field(
         if not validate_phone(cleaned):
             return "The phone number doesn't seem correct. Can you repeat it?"
         # Format for reading back
-        formatted = "-".join([cleaned[i:i+3] for i in range(0, len(cleaned), 3)])
-        return f"I have phone number: {formatted}. Is that correct?"
+        return f"I have phone number: {cleaned}. Is that correct?"
     
     elif field_name == "email":
         cleaned = clean_email(field_value)

@@ -33,7 +33,7 @@ class EnergyVAD(lk_vad.VAD):
     def __init__(
         self,
         *,
-        threshold: float = 0.012,
+        threshold: float = 0.02,
         min_speech_duration: float = 0.15,
         min_silence_duration: float = 0.45,
         prefix_padding_duration: float = 0.15,

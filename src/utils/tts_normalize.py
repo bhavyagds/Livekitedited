@@ -96,8 +96,8 @@ def normalize_punctuation_for_tts(text: str) -> str:
     text = _SSML_TAG_RE.sub(" ", text)
     text = _MD_BULLET_RE.sub(" ", text)
     text = _MD_MARKER_RE.sub(" ", text)
-    text = _PUNCT_NO_NUM_RE.sub(" ", text)
-    text = _DOT_NO_NUM_RE.sub(" ", text)
+    text = _PUNCT_NO_NUM_RE.sub("", text)
+    text = _DOT_NO_NUM_RE.sub("", text)
     text = _BRACKETS_RE.sub(" ", text)
     text = _DASHES_RE.sub(" ", text)
     text = _MULTI_SPACE_RE.sub(" ", text).strip()
@@ -124,15 +124,19 @@ def normalize_numeric_ids_for_tts(text: str, language: str | None = None) -> str
     def _ctx_repl(match: re.Match) -> str:
         label = match.group(1)
         digits = match.group(2)
-        return f"{label} {_digits_to_greek_words(digits)}"
+        try:
+            from src.utils.greek_numbers import number_to_greek
+            return f"{label} {number_to_greek(int(digits))}"
+        except Exception:
+            return f"{label} {_digits_to_greek_words(digits)}"
 
     updated = _EL_ID_CONTEXT_RE.sub(_ctx_repl, text)
     updated = _EL_HASH_NUMBER_RE.sub(
-        lambda m: f"αριθμός {_digits_to_greek_words(m.group(1))}",
+        lambda m: f"αριθμός {number_to_greek(int(m.group(1)))}",
         updated,
     )
     updated = _EL_LONG_DIGITS_RE.sub(
-        lambda m: _digits_to_greek_words(m.group(1)),
+        lambda m: number_to_greek(int(m.group(1))),
         updated,
     )
     return updated
