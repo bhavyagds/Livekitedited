@@ -17,6 +17,7 @@ from openai import AsyncOpenAI
 
 from src.config import settings
 from src.utils.greek_numbers import number_to_greek, format_price_greek, format_order_number_greek
+from src.utils.numbers import extract_digits
 
 logger = logging.getLogger(__name__)
 
@@ -173,8 +174,9 @@ class ShopifyService:
 
         target_name = "English" if target_lang == "en" else "Greek"
         system_prompt = (
-            "You are a translation engine for customer support order data. "
+            "You are a translation engine for a female customer support assistant named Elena. "
             f"Translate every string into {target_name}. "
+            "Use feminine gender forms for self-references in Greek. "
             "Preserve numbers, order IDs, emails, phone numbers, and currency amounts exactly. "
             "For names/addresses, translate or transliterate into the target script. "
             "Keep brand names (e.g., Meallion) unchanged. "
@@ -352,45 +354,14 @@ class ShopifyService:
 
     @staticmethod
     def clean_order_number(raw_input: str) -> str:
-        """
-        Clean order number from voice input artifacts.
-        
-        Handles:
-        - Spaces: "1 2 3 4 5" -> "12345"
-        - Dashes: "1-2-3-4-5" -> "12345"
-        - Words: "one two three four five" -> "12345"
-        - Prefixes: "order 12345" -> "12345"
-        - Hash: "#12345" -> "12345"
-        """
-        # Convert word numbers to digits
-        word_to_digit = {
-            "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
-            "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
-            "oh": "0", "o": "0",
-        }
-        
-        cleaned = raw_input.lower().strip()
-        
-        # Replace word numbers
-        for word, digit in word_to_digit.items():
-            cleaned = re.sub(rf'\b{word}\b', digit, cleaned)
-        
-        # Remove common prefixes
-        prefixes = ["order", "number", "order number", "#", "no", "no."]
-        for prefix in prefixes:
-            cleaned = cleaned.replace(prefix, "")
-        
-        # Keep only digits
-        cleaned = re.sub(r'[^0-9]', '', cleaned)
-        
+        """Clean order number from voice input artifacts using robust extraction."""
+        cleaned = extract_digits(raw_input)
         return cleaned
 
     @staticmethod
     def clean_phone_number(raw_input: str) -> str:
-        """Clean phone number from voice input."""
-        # Remove all non-digits except + for country code
-        cleaned = re.sub(r'[^0-9+]', '', raw_input)
-        return cleaned
+        """Clean phone number from voice input using robust digit extraction."""
+        return extract_digits(raw_input)
 
     @staticmethod
     def clean_email(raw_input: str) -> str:

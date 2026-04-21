@@ -35,6 +35,7 @@ class OrderLookupTool:
         """Get the list of function tools for this module."""
         return [
             lookup_order,
+            lookup_order_by_phone,
             get_order_details,
         ]
 
@@ -141,6 +142,57 @@ async def get_order_details(
     # Return FULL details in the configured language
     response = shopify.format_order_for_voice(order, include_details=True, language=agent_lang)
     return response
+
+
+async def lookup_order_by_phone(
+    phone: Annotated[str, "The customer's phone number to look up orders for"],
+) -> str:
+    """
+    Look up orders by customer phone number.
+    Use this when the customer doesn't have their order number.
+    
+    Args:
+        phone: The phone number to search for
+        
+    Returns:
+        Summary of orders found for this phone number
+    """
+    shopify = get_shopify_service()
+    agent_lang = get_agent_language()
+    
+    cleaned = shopify.clean_phone_number(phone)
+    if not cleaned or len(cleaned) < 8:
+        return f"I'm sorry, I couldn't understand that phone number. Could you please say it again?"
+        
+    logger.info(f"Looking up orders for phone: {cleaned}")
+    orders = await shopify.lookup_order_by_phone(cleaned)
+    
+    if not orders:
+        if agent_lang == "el":
+            return f"Δεν βρέθηκε καμία παραγγελία για τον αριθμό {phone}. Μήπως έχετε τον 5-ψήφιο αριθμό παραγγελίας από το email σας;"
+        return f"I couldn't find any orders matching the phone number {phone}. Do you have your 5-digit order number from your confirmation email?"
+    
+    # Store the first/most recent order as "last" for potential detailed lookup
+    _last_order_cache["last"] = orders[0]
+    _last_order_cache["number"] = orders[0].order_number
+    
+    # Localize first order
+    await shopify.localize_order(orders[0], agent_lang)
+    
+    # Format response
+    if len(orders) == 1:
+        summary = shopify.format_order_brief(orders[0], language=agent_lang)
+        if agent_lang == "el":
+            return f"Βρήκα μία παραγγελία για εσάς. {summary}"
+        return f"I found one order for you. {summary}"
+    else:
+        # Multiple orders
+        count = len(orders)
+        most_recent = orders[0]
+        status = most_recent.status
+        if agent_lang == "el":
+            return f"Βρήκα {count} παραγγελίες για αυτόν τον αριθμό τηλεφώνου. Η πιο πρόσφατη παραγγελία σας με αριθμό {most_recent.order_number} είναι σε κατάσταση {status}. Θέλετε περισσότερες λεπτομέρειες;"
+        return f"I found {count} orders for this phone number. Your most recent order {most_recent.order_number} is currently {status}. Would you like more details?"
 
 
 def get_last_order_snapshot() -> dict | None:

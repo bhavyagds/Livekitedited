@@ -66,13 +66,15 @@ def _get_response_language_instruction(language: str) -> str:
     if lang == "el":
         return (
             "RESPONSE LANGUAGE REQUIREMENT:\n"
-            "- You must reply in Greek (??????????????) for all normal responses.\n"
+            "- You must reply in Greek (Ελληνικά) for all normal responses.\n"
+            "- GENDER IDENTITY: You are a female assistant named Elena. ALWAYS use feminine gender forms when referring to yourself in Greek (e.g., 'είμαι έτοιμη', 'ευχαριστημένη').\n"
             "- Do not switch to English.\n"
             "- If the caller speaks another language, politely ask them to continue in Greek."
         )
     return (
         "RESPONSE LANGUAGE REQUIREMENT:\n"
         "- You must reply in English for all normal responses.\n"
+        "- GENDER IDENTITY: You are a female assistant named Elena.\n"
         "- Do not switch to Greek.\n"
         "- If the caller speaks another language, politely ask them to continue in English."
     )
@@ -277,7 +279,8 @@ def get_agent_setting(key: str, default: any = None) -> any:
 # ============================================================================
 # MINIMAL FALLBACK - Only used if DB is completely empty
 # ============================================================================
-MINIMAL_FALLBACK_PROMPT = """You are Elena, a customer service assistant.
+MINIMAL_FALLBACK_PROMPT = """You are Elena, a female customer service assistant. 
+Always use feminine gender forms when referring to yourself in Greek (e.g., 'είμαι έτοιμη').
 Keep responses short and helpful.
 Available tools: lookup_order, get_order_details, create_support_ticket, search_knowledge_base, end_session.
 When user says goodbye, call end_session."""
