@@ -374,6 +374,9 @@ _current_session: dict = {
     "last_lookup_state": "unknown",
     "last_lookup_order": None,
     "customer_no_order_number": False,
+    "pending_phone_candidate": None,
+    "phone_lookup_inflight": False,
+    "phone_forced_turn_id": 0,
     "details_lookup_inflight": False,
     "details_forced_turn_id": 0,
     "details_last_spoken_order": None,
@@ -2272,6 +2275,9 @@ async def entrypoint(ctx: JobContext):
     _current_session["last_lookup_state"] = "unknown"
     _current_session["last_lookup_order"] = None
     _current_session["customer_no_order_number"] = False
+    _current_session["pending_phone_candidate"] = None
+    _current_session["phone_lookup_inflight"] = False
+    _current_session["phone_forced_turn_id"] = 0
     _current_session["details_lookup_inflight"] = False
     _current_session["details_forced_turn_id"] = 0
     _current_session["details_last_spoken_order"] = None
@@ -3768,6 +3774,110 @@ async def entrypoint(ctx: JobContext):
             _current_session["details_lookup_inflight"] = False
             _resume_silence_for_tool("forced_get_order_details")
 
+    async def _force_lookup_by_phone(turn_id: int, phone: str, trigger_reason: str) -> None:
+        """Deterministically run lookup_order_by_phone and speak the result."""
+        if call_ended["value"] or _current_session.get("should_end"):
+            room_log("PHONE_LOOKUP_FORCED_SKIP", reason="call_ended", turn_id=turn_id)
+            return
+
+        normalized_phone = _normalize_phone_for_lookup(phone or "")
+        if not normalized_phone:
+            room_log(
+                "PHONE_LOOKUP_FORCED_SKIP",
+                reason="invalid_phone_pattern",
+                turn_id=turn_id,
+                phone=_truncate(phone, max_len=64),
+            )
+            return
+
+        if bool(_current_session.get("phone_lookup_inflight")):
+            room_log("PHONE_LOOKUP_FORCED_SKIP", reason="already_inflight", turn_id=turn_id)
+            return
+
+        last_forced_turn = int(_current_session.get("phone_forced_turn_id") or 0)
+        if turn_id <= last_forced_turn:
+            room_log(
+                "PHONE_LOOKUP_FORCED_SKIP",
+                reason="duplicate_turn",
+                turn_id=turn_id,
+                last_forced_turn=last_forced_turn,
+            )
+            return
+
+        forced_suppress_s = _as_float(
+            get_agent_setting("forced_phone_llm_suppress_seconds", 90.0),
+            90.0,
+            min_value=15.0,
+            max_value=300.0,
+        )
+        _current_session["phone_lookup_inflight"] = True
+        _current_session["phone_forced_turn_id"] = turn_id
+        _current_session["prefetch_spoken_turn_id"] = turn_id
+        _current_session["prefetch_suppress_llm_until"] = time.time() + forced_suppress_s
+        _set_lookup_pending(normalized_phone, reason="forced_lookup_order_by_phone")
+        _pause_silence_for_tool("forced_lookup_order_by_phone")
+
+        try:
+            room_log(
+                "TOOL_CALL",
+                name="lookup_order_by_phone",
+                phone=normalized_phone,
+                forced=True,
+                trigger=trigger_reason,
+            )
+            result = await order_lookup.lookup_order_by_phone(normalized_phone)
+            room_log(
+                "TOOL_RESULT",
+                name="lookup_order_by_phone",
+                result=_truncate(result),
+                forced=True,
+                trigger=trigger_reason,
+            )
+
+            lookup_state = _classify_lookup_result(result)
+            _current_session["last_lookup_state"] = lookup_state
+            snapshot = order_lookup.get_last_order_snapshot() or {}
+            snapshot_order = str(snapshot.get("order_number") or "")
+            strict_snapshot_order = _normalize_order_id_strict(snapshot_order) if snapshot_order else None
+            _current_session["last_lookup_order"] = (
+                strict_snapshot_order if (lookup_state == "found" and strict_snapshot_order) else ""
+            )
+            if lookup_state == "found":
+                _current_session["details_confirmation_pending"] = True
+                _current_session["details_confirmation_pending_until"] = time.time() + 120.0
+            else:
+                _current_session["details_confirmation_pending"] = False
+                _current_session["details_confirmation_pending_until"] = 0.0
+                _current_session["full_order_details_allowed_until"] = 0.0
+
+            spoken_summary = _build_order_voice_summary(result, get_agent_language()) or result
+            room_log(
+                "PHONE_LOOKUP_FORCED_FORMATTED",
+                phone=normalized_phone,
+                result=_truncate(spoken_summary),
+            )
+            room_log("PHONE_LOOKUP_FORCED_SPEAKING", phone=normalized_phone, turn_id=turn_id)
+            _current_session["prefetch_manual_say_active"] = True
+            _current_session["prefetch_spoken_text"] = spoken_summary
+            await agent.say(spoken_summary, allow_interruptions=True)
+            _current_session["prefetch_suppress_llm_until"] = time.time() + forced_suppress_s
+            mark_agent_speaking()
+            _snooze_silence_prompts(10.0, reason="post_forced_phone_lookup_spoken")
+            _clear_lookup_pending(reason="forced_phone_lookup_spoken")
+            room_log("PHONE_LOOKUP_FORCED_SPOKEN", phone=normalized_phone, turn_id=turn_id)
+        except Exception as e:
+            room_log(
+                "PHONE_LOOKUP_FORCED_ERROR",
+                phone=normalized_phone,
+                trigger=trigger_reason,
+                error=_truncate(str(e), max_len=200),
+            )
+            _clear_lookup_pending(reason="forced_phone_lookup_error")
+        finally:
+            _current_session["prefetch_manual_say_active"] = False
+            _current_session["phone_lookup_inflight"] = False
+            _resume_silence_for_tool("forced_lookup_order_by_phone")
+
     @agent.on("user_speech_committed")
     def on_user_speech_committed(message):
         """Send user transcript to frontend and check for abuse."""
@@ -3781,6 +3891,7 @@ async def entrypoint(ctx: JobContext):
         elif _normalize_order_id_strict(user_text):
             # Caller provided a valid order id, so clear sticky phone preference.
             _current_session["customer_no_order_number"] = False
+            _current_session["pending_phone_candidate"] = None
         current_turn_id = int(_current_session.get("last_user_turn_id") or 0) + 1
         _current_session["last_user_turn_id"] = current_turn_id
         # New user turn cancels stale prefetch suppression window.
@@ -3807,6 +3918,24 @@ async def entrypoint(ctx: JobContext):
         explicit_details_request = _explicit_more_order_details_request(user_text)
         is_affirmative = _is_affirmative_utterance(user_text)
         is_negative = _is_negative_utterance(user_text)
+
+        if str(_current_session.get("number_mode_lock") or "") == "phone":
+            phone_candidate = _normalize_phone_for_lookup(user_text or "")
+            if phone_candidate:
+                _current_session["pending_phone_candidate"] = phone_candidate
+                room_log("PHONE_CANDIDATE_CAPTURED", phone=phone_candidate, turn_id=current_turn_id)
+            elif is_negative:
+                # Caller rejected previously repeated number; clear candidate.
+                _current_session["pending_phone_candidate"] = None
+
+            pending_phone = str(_current_session.get("pending_phone_candidate") or "")
+            if pending_phone and is_affirmative:
+                _current_session["prefetch_spoken_turn_id"] = current_turn_id
+                _current_session["prefetch_suppress_llm_until"] = time.time() + 30.0
+                asyncio.create_task(
+                    _force_lookup_by_phone(current_turn_id, pending_phone, "phone_confirmation_yes")
+                )
+                room_log("PHONE_LOOKUP_FORCED_TRIGGERED", phone=pending_phone, turn_id=current_turn_id)
 
         details_pending = bool(_current_session.get("details_confirmation_pending"))
         details_pending_until = float(_current_session.get("details_confirmation_pending_until") or 0.0)
@@ -4349,6 +4478,9 @@ async def entrypoint(ctx: JobContext):
             _current_session["last_lookup_state"] = "unknown"
             _current_session["last_lookup_order"] = None
             _current_session["customer_no_order_number"] = False
+            _current_session["pending_phone_candidate"] = None
+            _current_session["phone_lookup_inflight"] = False
+            _current_session["phone_forced_turn_id"] = 0
             _current_session["details_lookup_inflight"] = False
             _current_session["details_forced_turn_id"] = 0
             _current_session["details_last_spoken_order"] = None
