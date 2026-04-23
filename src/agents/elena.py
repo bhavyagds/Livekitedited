@@ -373,9 +373,11 @@ _current_session: dict = {
     "lookup_pending_order": None,
     "last_lookup_state": "unknown",
     "last_lookup_order": None,
+    "customer_no_order_number": False,
     "details_confirmation_pending": False,
     "details_confirmation_pending_until": 0.0,
     "full_order_details_allowed_until": 0.0,
+    "full_details_unlocked_once": False,
     "last_more_details_prompt_at": 0.0,
     "ticket_confirmation_pending": False,
     "ticket_confirmation_pending_until": 0.0,
@@ -1828,6 +1830,8 @@ class ElenaFunctionContext(llm.FunctionContext):
                 return f"Ο αριθμός παραγγελίας πρέπει να είναι ακριβώς {expected} ψηφία. Μπορείτε να τον πείτε ξανά ψηφίο προς ψηφίο;"
             return f"The order number must be exactly {expected} digits. Could you say it again digit by digit?"
 
+        # We now have a valid order id, so do not keep forcing phone mode.
+        _current_session["customer_no_order_number"] = False
         _set_lookup_pending(strict_order, reason="lookup_order_called")
         _current_session["last_lookup_tool_called_at"] = time.time()
         _current_session["last_lookup_tool_order"] = strict_order
@@ -2263,9 +2267,11 @@ async def entrypoint(ctx: JobContext):
     _current_session["lookup_pending_order"] = None
     _current_session["last_lookup_state"] = "unknown"
     _current_session["last_lookup_order"] = None
+    _current_session["customer_no_order_number"] = False
     _current_session["details_confirmation_pending"] = False
     _current_session["details_confirmation_pending_until"] = 0.0
     _current_session["full_order_details_allowed_until"] = 0.0
+    _current_session["full_details_unlocked_once"] = False
     _current_session["last_more_details_prompt_at"] = 0.0
     _current_session["ticket_confirmation_pending"] = False
     _current_session["ticket_confirmation_pending_until"] = 0.0
@@ -2619,6 +2625,19 @@ async def entrypoint(ctx: JobContext):
             return digits
         return None
 
+    def _mentions_no_order_number(text: str) -> bool:
+        """Detect caller intent that they do not have an order number."""
+        lowered = _normalize_switch_text(text)
+        if not lowered:
+            return False
+        return bool(
+            re.search(
+                r"(no order number|don t have (an )?order number|do not have (an )?order number|δεν έχω .*παραγγελ|δεν εχω .*παραγγελ)",
+                lowered,
+                flags=re.IGNORECASE,
+            )
+        )
+
     def _infer_number_mode(user_text: str, last_agent_text: str) -> Optional[str]:
         """
         Infer whether current numeric capture should be treated as order id or phone.
@@ -2629,7 +2648,8 @@ async def entrypoint(ctx: JobContext):
         if not lowered:
             return None
 
-        if re.search(r"(δεν έχω αριθμό παραγγελ|no order number|don't have order number)", lowered):
+        force_phone_context = bool(_current_session.get("customer_no_order_number"))
+        if _mentions_no_order_number(lowered):
             return "phone"
 
         order_hint = bool(re.search(r"(order|παραγγελ|αριθμ.*παραγγελ)", lowered))
@@ -2638,10 +2658,16 @@ async def entrypoint(ctx: JobContext):
         asked_for_order = bool(re.search(r"(order number|παραγγελ|αριθμ.*παραγγελ)", last_lowered))
         asked_for_phone = bool(re.search(r"(phone|mobile|τηλέφων|τηλεφων|κινητ)", last_lowered))
 
+        if force_phone_context and not order_hint:
+            if phone_hint or asked_for_phone or bool(_extract_digit_parts(lowered)):
+                return "phone"
+
         if phone_hint and not order_hint:
             return "phone"
         if order_hint and not phone_hint:
             return "order"
+        if asked_for_phone and asked_for_order and bool(_extract_digit_parts(lowered)):
+            return "phone"
         if asked_for_phone and not asked_for_order:
             return "phone"
         if asked_for_order and not asked_for_phone:
@@ -2666,6 +2692,8 @@ async def entrypoint(ctx: JobContext):
 
     def _can_unlock_full_details(user_text: str) -> tuple[bool, str]:
         """Allow full details only when we have a found lookup for the same order."""
+        if bool(_current_session.get("full_details_unlocked_once")):
+            return False, "already_unlocked_once"
         state = str(_current_session.get("last_lookup_state") or "unknown")
         if state != "found":
             return False, "lookup_not_found"
@@ -2677,6 +2705,19 @@ async def entrypoint(ctx: JobContext):
         if mentioned and mentioned != anchor:
             return False, "order_mismatch"
         return True, "ok"
+
+    def _is_clarification_prompt_text(text: str) -> bool:
+        """Detect clarification/repair prompts so silence grace can be extended."""
+        lowered = _normalize_switch_text(text)
+        if not lowered:
+            return False
+        return bool(
+            re.search(
+                r"(repeat|say it again|digit by digit|not clear|couldn t hear|didn t hear|did not hear|could not hear|δεν .*άκουσα|δεν .*κατάλαβ|επαναλάβ|ξανά|ψηφίο προς ψηφίο)",
+                lowered,
+                flags=re.IGNORECASE,
+            )
+        )
 
     def _extract_order_number_candidate(text: str) -> Optional[str]:
         """
@@ -3555,6 +3596,12 @@ async def entrypoint(ctx: JobContext):
             room_log("LATE_EVENT_DROPPED", source="user_speech_committed")
             return
         user_text = message.content
+        if _mentions_no_order_number(user_text):
+            _current_session["customer_no_order_number"] = True
+            room_log("NUMBER_MODE_HINT", mode="phone", reason="no_order_number")
+        elif _normalize_order_id_strict(user_text):
+            # Caller provided a valid order id, so clear sticky phone preference.
+            _current_session["customer_no_order_number"] = False
         current_turn_id = int(_current_session.get("last_user_turn_id") or 0) + 1
         _current_session["last_user_turn_id"] = current_turn_id
         # New user turn cancels stale prefetch suppression window.
@@ -3566,6 +3613,12 @@ async def entrypoint(ctx: JobContext):
         _current_session["number_mode_lock"] = None
         _current_session["number_mode_turn_id"] = 0
         inferred_mode = _infer_number_mode(user_text, str(_current_session.get("last_agent_text") or ""))
+        if (
+            inferred_mode is None
+            and bool(_current_session.get("customer_no_order_number"))
+            and bool(_extract_digit_parts(user_text))
+        ):
+            inferred_mode = "phone"
         if inferred_mode in {"order", "phone"}:
             _current_session["number_mode_lock"] = inferred_mode
             _current_session["number_mode_turn_id"] = current_turn_id
@@ -3583,6 +3636,7 @@ async def entrypoint(ctx: JobContext):
                 can_unlock, unlock_reason = _can_unlock_full_details(user_text)
                 if can_unlock:
                     _current_session["full_order_details_allowed_until"] = now + 120.0
+                    _current_session["full_details_unlocked_once"] = True
                     _current_session["details_confirmation_pending"] = False
                     _current_session["details_confirmation_pending_until"] = 0.0
                     room_log("FULL_DETAILS_ALLOWED", ttl_s=120, reason="single_yes_unlock")
@@ -3609,6 +3663,7 @@ async def entrypoint(ctx: JobContext):
             can_unlock, unlock_reason = _can_unlock_full_details(user_text)
             if can_unlock:
                 _current_session["full_order_details_allowed_until"] = now + 120.0
+                _current_session["full_details_unlocked_once"] = True
                 _current_session["details_confirmation_pending"] = False
                 _current_session["details_confirmation_pending_until"] = 0.0
                 room_log("FULL_DETAILS_ALLOWED", ttl_s=120, reason="explicit_request")
@@ -3944,8 +3999,20 @@ async def entrypoint(ctx: JobContext):
                 )
                 if details_prompted:
                     _current_session["last_more_details_prompt_at"] = time.time()
-                    _current_session["details_confirmation_pending"] = True
-                    _current_session["details_confirmation_pending_until"] = time.time() + 120.0
+                    if not bool(_current_session.get("full_details_unlocked_once")):
+                        _current_session["details_confirmation_pending"] = True
+                        _current_session["details_confirmation_pending_until"] = time.time() + 120.0
+                    else:
+                        _current_session["details_confirmation_pending"] = False
+                        _current_session["details_confirmation_pending_until"] = 0.0
+                if _is_clarification_prompt_text(display_text or text):
+                    clarification_grace = _as_float(
+                        get_agent_setting("clarification_silence_grace_seconds", 12.0),
+                        12.0,
+                        min_value=4.0,
+                        max_value=40.0,
+                    )
+                    _snooze_silence_prompts(clarification_grace, reason="clarification_prompt")
                 if _current_session.get("lookup_pending"):
                     lookup_state_in_text = _classify_lookup_result(display_text or text)
                     if details_prompted or lookup_state_in_text == "not_found":
@@ -4101,9 +4168,11 @@ async def entrypoint(ctx: JobContext):
             _current_session["lookup_pending_order"] = None
             _current_session["last_lookup_state"] = "unknown"
             _current_session["last_lookup_order"] = None
+            _current_session["customer_no_order_number"] = False
             _current_session["details_confirmation_pending"] = False
             _current_session["details_confirmation_pending_until"] = 0.0
             _current_session["full_order_details_allowed_until"] = 0.0
+            _current_session["full_details_unlocked_once"] = False
             _current_session["last_more_details_prompt_at"] = 0.0
             _current_session["ticket_confirmation_pending"] = False
             _current_session["ticket_confirmation_pending_until"] = 0.0
