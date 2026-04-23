@@ -3315,13 +3315,14 @@ async def entrypoint(ctx: JobContext):
                     suppress_turn = int(_current_session.get("prefetch_spoken_turn_id") or 0)
                     latest_turn = int(_current_session.get("last_user_turn_id") or 0)
                     if suppress_until and time.time() <= suppress_until and suppress_turn == latest_turn:
-                        room_log(
-                            "TTS_SUPPRESSED",
-                            reason="prefetch_mutual_exclusion",
-                            turn_id=latest_turn,
-                            text=_truncate(text),
-                        )
-                        return ""
+                        if not _is_silence_prompt_text(text):
+                            room_log(
+                                "TTS_SUPPRESSED",
+                                reason="prefetch_mutual_exclusion",
+                                turn_id=latest_turn,
+                                text=_truncate(text),
+                            )
+                            return ""
                 strict_wait_phrase = _as_bool(
                     get_agent_setting("order_lookup_wait_phrase_strict", True),
                     default=True,
@@ -3643,10 +3644,16 @@ async def entrypoint(ctx: JobContext):
             )
             return
 
+        forced_suppress_s = _as_float(
+            get_agent_setting("forced_details_llm_suppress_seconds", 120.0),
+            120.0,
+            min_value=20.0,
+            max_value=300.0,
+        )
         _current_session["details_lookup_inflight"] = True
         _current_session["details_forced_turn_id"] = turn_id
         _current_session["prefetch_spoken_turn_id"] = turn_id
-        _current_session["prefetch_suppress_llm_until"] = time.time() + 20.0
+        _current_session["prefetch_suppress_llm_until"] = time.time() + forced_suppress_s
         _set_lookup_pending(order_number, reason="forced_get_order_details")
         _pause_silence_for_tool("forced_get_order_details")
 
@@ -3688,7 +3695,9 @@ async def entrypoint(ctx: JobContext):
             )
             room_log("ORDER_DETAILS_FORCED_SPEAKING", order_number=order_number, turn_id=turn_id)
             _current_session["prefetch_manual_say_active"] = True
+            _current_session["prefetch_spoken_text"] = final_text
             await agent.say(final_text, allow_interruptions=True)
+            _current_session["prefetch_suppress_llm_until"] = time.time() + forced_suppress_s
             mark_agent_speaking()
             _snooze_silence_prompts(10.0, reason="post_forced_order_details_spoken")
             _clear_lookup_pending(reason="forced_order_details_spoken")
