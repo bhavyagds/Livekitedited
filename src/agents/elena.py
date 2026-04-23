@@ -3301,6 +3301,52 @@ async def entrypoint(ctx: JobContext):
             return status_sentence
         return " ".join(p for p in new_parts if p).strip()
 
+    def _is_details_retry_fallback_text(text: str) -> bool:
+        """Detect generic retry/failure filler that appears after details were already spoken."""
+        normalized = _normalize_switch_text(text)
+        if not normalized:
+            return False
+        return bool(
+            re.search(
+                r"(issue retrieving the details|trouble getting the detailed information|let me try again|let me try that again|πρόβλημα .*λεπτομέρει|δυσκολ.*λεπτομέρει|ας το ξαναδοκιμάσω)",
+                normalized,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    def _should_suppress_tts_text(candidate_text: str) -> tuple[bool, str]:
+        """Shared suppression guard for both string and streaming TTS paths."""
+        text_value = (candidate_text or "").strip()
+        if not text_value:
+            return False, ""
+
+        # Never suppress stock silence prompts with this guard.
+        if _is_silence_prompt_text(text_value):
+            return False, ""
+
+        if not _current_session.get("prefetch_manual_say_active"):
+            suppress_until = float(_current_session.get("prefetch_suppress_llm_until") or 0.0)
+            suppress_turn = int(_current_session.get("prefetch_spoken_turn_id") or 0)
+            latest_turn = int(_current_session.get("last_user_turn_id") or 0)
+            if suppress_until and time.time() <= suppress_until and suppress_turn == latest_turn:
+                return True, "prefetch_mutual_exclusion"
+
+        retry_guard_s = _as_float(
+            get_agent_setting("forced_details_retry_guard_seconds", 120.0),
+            120.0,
+            min_value=20.0,
+            max_value=300.0,
+        )
+        last_details_spoken_at = float(_current_session.get("details_last_spoken_at") or 0.0)
+        if (
+            last_details_spoken_at
+            and (time.time() - last_details_spoken_at) <= retry_guard_s
+            and _is_details_retry_fallback_text(text_value)
+        ):
+            return True, "forced_details_retry_guard"
+
+        return False, ""
+
     def before_tts_callback(agent_instance, text: str | llm.LLMStream):
         """Callback that fires BEFORE text is sent to TTS - apply prosody."""
         try:
@@ -3310,19 +3356,15 @@ async def entrypoint(ctx: JobContext):
             # text can be a string or LLMStream - handle both
             if isinstance(text, str):
                 logger.info(f"before_tts_cb processing: {text[:50]}...")
-                if not _current_session.get("prefetch_manual_say_active"):
-                    suppress_until = float(_current_session.get("prefetch_suppress_llm_until") or 0.0)
-                    suppress_turn = int(_current_session.get("prefetch_spoken_turn_id") or 0)
-                    latest_turn = int(_current_session.get("last_user_turn_id") or 0)
-                    if suppress_until and time.time() <= suppress_until and suppress_turn == latest_turn:
-                        if not _is_silence_prompt_text(text):
-                            room_log(
-                                "TTS_SUPPRESSED",
-                                reason="prefetch_mutual_exclusion",
-                                turn_id=latest_turn,
-                                text=_truncate(text),
-                            )
-                            return ""
+                suppress, suppress_reason = _should_suppress_tts_text(text)
+                if suppress:
+                    room_log(
+                        "TTS_SUPPRESSED",
+                        reason=suppress_reason,
+                        turn_id=int(_current_session.get("last_user_turn_id") or 0),
+                        text=_truncate(text),
+                    )
+                    return ""
                 strict_wait_phrase = _as_bool(
                     get_agent_setting("order_lookup_wait_phrase_strict", True),
                     default=True,
@@ -3438,6 +3480,15 @@ async def entrypoint(ctx: JobContext):
                         updated = normalize_time_colons(updated)
                         updated = normalize_numeric_ids_for_tts(updated, language=agent_lang)
                         updated = normalize_punctuation_for_tts(updated)
+                        suppress, suppress_reason = _should_suppress_tts_text(updated)
+                        if suppress:
+                            room_log(
+                                "TTS_SUPPRESSED",
+                                reason=suppress_reason,
+                                turn_id=int(_current_session.get("last_user_turn_id") or 0),
+                                text=_truncate(updated),
+                            )
+                            return
                         if updated.startswith(normalized_buffer):
                             delta = updated[len(normalized_buffer):]
                         else:
