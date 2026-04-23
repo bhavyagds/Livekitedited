@@ -374,6 +374,10 @@ _current_session: dict = {
     "last_lookup_state": "unknown",
     "last_lookup_order": None,
     "customer_no_order_number": False,
+    "details_lookup_inflight": False,
+    "details_forced_turn_id": 0,
+    "details_last_spoken_order": None,
+    "details_last_spoken_at": 0.0,
     "details_confirmation_pending": False,
     "details_confirmation_pending_until": 0.0,
     "full_order_details_allowed_until": 0.0,
@@ -2268,6 +2272,10 @@ async def entrypoint(ctx: JobContext):
     _current_session["last_lookup_state"] = "unknown"
     _current_session["last_lookup_order"] = None
     _current_session["customer_no_order_number"] = False
+    _current_session["details_lookup_inflight"] = False
+    _current_session["details_forced_turn_id"] = 0
+    _current_session["details_last_spoken_order"] = None
+    _current_session["details_last_spoken_at"] = 0.0
     _current_session["details_confirmation_pending"] = False
     _current_session["details_confirmation_pending_until"] = 0.0
     _current_session["full_order_details_allowed_until"] = 0.0
@@ -3589,6 +3597,117 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.error(f"Failed to send user transcript: {e}")
 
+    async def _force_get_order_details(turn_id: int, trigger_reason: str) -> None:
+        """Deterministically fetch and speak order details after explicit unlock."""
+        if call_ended["value"] or _current_session.get("should_end"):
+            room_log("ORDER_DETAILS_FORCED_SKIP", reason="call_ended", turn_id=turn_id)
+            return
+
+        if bool(_current_session.get("details_lookup_inflight")):
+            room_log("ORDER_DETAILS_FORCED_SKIP", reason="already_inflight", turn_id=turn_id)
+            return
+
+        last_forced_turn = int(_current_session.get("details_forced_turn_id") or 0)
+        if turn_id <= last_forced_turn:
+            room_log(
+                "ORDER_DETAILS_FORCED_SKIP",
+                reason="duplicate_turn",
+                turn_id=turn_id,
+                last_forced_turn=last_forced_turn,
+            )
+            return
+
+        expected = _expected_order_digits()
+        order_number = re.sub(r"\D", "", str(_current_session.get("last_lookup_order") or ""))
+        if not re.fullmatch(rf"\d{{{expected}}}", order_number):
+            room_log(
+                "ORDER_DETAILS_FORCED_SKIP",
+                reason="missing_anchor_order",
+                order_number=order_number,
+                turn_id=turn_id,
+            )
+            return
+
+        last_spoken_order = re.sub(r"\D", "", str(_current_session.get("details_last_spoken_order") or ""))
+        last_spoken_at = float(_current_session.get("details_last_spoken_at") or 0.0)
+        if (
+            order_number
+            and last_spoken_order == order_number
+            and (time.time() - last_spoken_at) <= 20.0
+        ):
+            room_log(
+                "ORDER_DETAILS_FORCED_SKIP",
+                reason="recently_spoken",
+                order_number=order_number,
+                turn_id=turn_id,
+            )
+            return
+
+        _current_session["details_lookup_inflight"] = True
+        _current_session["details_forced_turn_id"] = turn_id
+        _current_session["prefetch_spoken_turn_id"] = turn_id
+        _current_session["prefetch_suppress_llm_until"] = time.time() + 20.0
+        _set_lookup_pending(order_number, reason="forced_get_order_details")
+        _pause_silence_for_tool("forced_get_order_details")
+
+        try:
+            room_log(
+                "TOOL_CALL",
+                name="get_order_details",
+                order_number=order_number,
+                forced=True,
+                trigger=trigger_reason,
+            )
+            result = await order_lookup.get_order_details(order_number)
+            room_log(
+                "TOOL_RESULT",
+                name="get_order_details",
+                result=_truncate(result),
+                forced=True,
+                trigger=trigger_reason,
+            )
+
+            spoken_summary = _build_order_details_voice_summary(result, get_agent_language())
+            if not spoken_summary:
+                spoken_summary = _build_order_voice_summary(result, get_agent_language()) or (
+                    "I could not find details for this order."
+                    if get_agent_language() == "en"
+                    else "Δεν μπόρεσα να βρω λεπτομέρειες για αυτή την παραγγελία."
+                )
+
+            prefix = (
+                "Thanks for waiting."
+                if get_agent_language() == "en"
+                else "Ευχαριστώ για την αναμονή."
+            )
+            final_text = f"{prefix} {spoken_summary}".strip()
+            room_log(
+                "ORDER_DETAILS_FORCED_FORMATTED",
+                order_number=order_number,
+                result=_truncate(final_text),
+            )
+            room_log("ORDER_DETAILS_FORCED_SPEAKING", order_number=order_number, turn_id=turn_id)
+            _current_session["prefetch_manual_say_active"] = True
+            await agent.say(final_text, allow_interruptions=True)
+            mark_agent_speaking()
+            _snooze_silence_prompts(10.0, reason="post_forced_order_details_spoken")
+            _clear_lookup_pending(reason="forced_order_details_spoken")
+            _current_session["details_last_spoken_order"] = order_number
+            _current_session["details_last_spoken_at"] = time.time()
+            room_log("ORDER_DETAILS_FORCED_SPOKEN", order_number=order_number, turn_id=turn_id)
+        except Exception as e:
+            room_log(
+                "ORDER_DETAILS_FORCED_ERROR",
+                order_number=order_number,
+                trigger=trigger_reason,
+                error=_truncate(str(e), max_len=200),
+            )
+            _clear_lookup_pending(reason="forced_order_details_error")
+        finally:
+            _current_session["prefetch_manual_say_active"] = False
+            _current_session["details_lookup_inflight"] = False
+            _resume_silence_for_tool("forced_get_order_details")
+
     @agent.on("user_speech_committed")
     def on_user_speech_committed(message):
         """Send user transcript to frontend and check for abuse."""
@@ -3640,15 +3759,11 @@ async def entrypoint(ctx: JobContext):
                     _current_session["details_confirmation_pending"] = False
                     _current_session["details_confirmation_pending_until"] = 0.0
                     room_log("FULL_DETAILS_ALLOWED", ttl_s=120, reason="single_yes_unlock")
-                    order_number_for_details = str(_current_session.get("last_lookup_order") or "last")
-                    agent.chat_ctx.append(
-                        role="system",
-                        text=(
-                            "ORDER DETAILS CONFIRMED:\n"
-                            "- The user confirmed they want full order details.\n"
-                            f"- Call get_order_details immediately with order_number={order_number_for_details}.\n"
-                            "- Do not ask for confirmation again in this turn."
-                        ),
+                    # Deterministic path: suppress generic LLM chatter and force details tool fetch.
+                    _current_session["prefetch_spoken_turn_id"] = current_turn_id
+                    _current_session["prefetch_suppress_llm_until"] = time.time() + 20.0
+                    asyncio.create_task(
+                        _force_get_order_details(current_turn_id, "single_yes_unlock")
                     )
                 else:
                     room_log("FULL_DETAILS_BLOCKED", reason=unlock_reason)
@@ -3667,6 +3782,11 @@ async def entrypoint(ctx: JobContext):
                 _current_session["details_confirmation_pending"] = False
                 _current_session["details_confirmation_pending_until"] = 0.0
                 room_log("FULL_DETAILS_ALLOWED", ttl_s=120, reason="explicit_request")
+                _current_session["prefetch_spoken_turn_id"] = current_turn_id
+                _current_session["prefetch_suppress_llm_until"] = time.time() + 20.0
+                asyncio.create_task(
+                    _force_get_order_details(current_turn_id, "explicit_request")
+                )
             else:
                 room_log("FULL_DETAILS_BLOCKED", reason=unlock_reason)
 
@@ -4169,6 +4289,10 @@ async def entrypoint(ctx: JobContext):
             _current_session["last_lookup_state"] = "unknown"
             _current_session["last_lookup_order"] = None
             _current_session["customer_no_order_number"] = False
+            _current_session["details_lookup_inflight"] = False
+            _current_session["details_forced_turn_id"] = 0
+            _current_session["details_last_spoken_order"] = None
+            _current_session["details_last_spoken_at"] = 0.0
             _current_session["details_confirmation_pending"] = False
             _current_session["details_confirmation_pending_until"] = 0.0
             _current_session["full_order_details_allowed_until"] = 0.0
