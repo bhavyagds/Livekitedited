@@ -725,7 +725,8 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
         order_match = re.search(r"(?i)\bπαραγγε\w*\s*(\d{3,8})\b", text)
     order_number = order_match.group(1) if order_match else ""
 
-    status_match = re.search(r"(?i)\bis\s+([a-z_]+)\b", text)
+    # Handle both "is completed" and "is currently completed" forms.
+    status_match = re.search(r"(?i)\bis(?:\s+currently)?\s+([a-z_]+)\b", text)
     status = (status_match.group(1).lower() if status_match else "")
     if not status:
         if re.search(r"(?i)\bολοκληρ", text):
@@ -2849,7 +2850,8 @@ async def entrypoint(ctx: JobContext):
             order_match = re.search(r"(?i)\b???????\w*\s*(\d{3,8})\b", text)
         order_number = order_match.group(1) if order_match else ""
 
-        status_match = re.search(r"(?i)\bis\s+([a-z_]+)\b", text)
+        # Handle both "is completed" and "is currently completed" forms.
+        status_match = re.search(r"(?i)\bis(?:\s+currently)?\s+([a-z_]+)\b", text)
         status = (status_match.group(1).lower() if status_match else "")
         if not status:
             if re.search(r"(?i)\b???????", text):
