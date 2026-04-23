@@ -359,6 +359,13 @@ _current_session: dict = {
     "prefetched_lookup": None,
     "last_lookup_tool_called_at": 0.0,
     "last_lookup_tool_order": None,
+    "lookup_progress_prompt_until": 0.0,
+    "number_mode_lock": None,
+    "number_mode_turn_id": 0,
+    "prefetch_manual_say_active": False,
+    "prefetch_spoken_turn_id": 0,
+    "prefetch_spoken_text": "",
+    "prefetch_suppress_llm_until": 0.0,
     "prefetched_lookup_spoken_at": 0.0,
     "prefetched_lookup_spoken_order": None,
     "lookup_pending": False,
@@ -604,6 +611,16 @@ def _set_lookup_pending(order_number: Optional[str], reason: str) -> None:
     _current_session["lookup_pending"] = True
     _current_session["lookup_pending_started_at"] = now
     _current_session["lookup_pending_order"] = str(order_number or "")
+    progress_window_s = _as_float(
+        get_agent_setting("lookup_progress_prompt_window_seconds", 30.0),
+        30.0,
+        min_value=5.0,
+        max_value=120.0,
+    )
+    _current_session["lookup_progress_prompt_until"] = max(
+        float(_current_session.get("lookup_progress_prompt_until") or 0.0),
+        now + progress_window_s,
+    )
     tracker = _current_session.get("silence_tracker")
     if isinstance(tracker, dict):
         # Immediate race guard: prevent stale silence prompts right after order capture.
@@ -1792,11 +1809,30 @@ class ElenaFunctionContext(llm.FunctionContext):
         order_number: Annotated[str, llm.TypeInfo(description="The order number (4-5 digits)")],
     ) -> str:
         """Look up an order. Returns brief status first. Use get_order_details for more info."""
-        _set_lookup_pending(order_number, reason="lookup_order_called")
+        lang = get_agent_language()
+        lock_mode = str(_current_session.get("number_mode_lock") or "")
+        lock_turn = int(_current_session.get("number_mode_turn_id") or 0)
+        latest_turn = int(_current_session.get("last_user_turn_id") or 0)
+        if lock_mode == "phone" and lock_turn == latest_turn:
+            room_log("TOOL_RESULT_BLOCKED", name="lookup_order", reason="number_mode_mismatch")
+            expected = _expected_order_digits()
+            if lang == "el":
+                return f"Αυτό μοιάζει με αριθμό τηλεφώνου. Δώστε μου τον {expected}-ψήφιο αριθμό παραγγελίας από την επιβεβαίωσή σας."
+            return f"That looks like a phone number. Please share your {expected}-digit order number from the confirmation."
+
+        strict_order = _normalize_order_id_strict(order_number)
+        if not strict_order:
+            expected = _expected_order_digits()
+            room_log("TOOL_RESULT_BLOCKED", name="lookup_order", reason="invalid_order_id_format")
+            if lang == "el":
+                return f"Ο αριθμός παραγγελίας πρέπει να είναι ακριβώς {expected} ψηφία. Μπορείτε να τον πείτε ξανά ψηφίο προς ψηφίο;"
+            return f"The order number must be exactly {expected} digits. Could you say it again digit by digit?"
+
+        _set_lookup_pending(strict_order, reason="lookup_order_called")
         _current_session["last_lookup_tool_called_at"] = time.time()
-        _current_session["last_lookup_tool_order"] = str(order_number or "")
-        room_log("TOOL_CALL", name="lookup_order", order_number=order_number)
-        requested_digits = re.sub(r"\D", "", str(order_number or ""))
+        _current_session["last_lookup_tool_order"] = strict_order
+        room_log("TOOL_CALL", name="lookup_order", order_number=strict_order)
+        requested_digits = strict_order
         prefetch = _current_session.get("prefetched_lookup")
         if isinstance(prefetch, dict):
             prefetched_digits = re.sub(r"\D", "", str(prefetch.get("order_number") or ""))
@@ -1813,17 +1849,17 @@ class ElenaFunctionContext(llm.FunctionContext):
             else:
                 result = await self._run_tool_with_silence_pause(
                     "lookup_order",
-                    order_lookup.lookup_order(order_number),
+                    order_lookup.lookup_order(strict_order),
                 )
         else:
             result = await self._run_tool_with_silence_pause(
                 "lookup_order",
-                order_lookup.lookup_order(order_number),
+                order_lookup.lookup_order(strict_order),
             )
         room_log("TOOL_RESULT", name="lookup_order", result=_truncate(result))
         lookup_state = _classify_lookup_result(result)
         _current_session["last_lookup_state"] = lookup_state
-        _current_session["last_lookup_order"] = str(order_number or "")
+        _current_session["last_lookup_order"] = strict_order if lookup_state == "found" else ""
         if lookup_state == "found":
             _current_session["details_confirmation_pending"] = True
             _current_session["details_confirmation_pending_until"] = time.time() + 120.0
@@ -1842,22 +1878,40 @@ class ElenaFunctionContext(llm.FunctionContext):
         order_number: Annotated[str, llm.TypeInfo(description="Order number or 'last' for most recent")] = "last",
     ) -> str:
         """Get FULL order details (items, prices, address). Use after lookup_order when customer wants more info."""
+        lang = get_agent_language()
         now = time.time()
         allowed_until = float(_current_session.get("full_order_details_allowed_until") or 0.0)
         if now > allowed_until:
-            lang = get_agent_language()
             room_log("TOOL_RESULT_BLOCKED", name="get_order_details", reason="explicit_details_required")
             if lang == "el":
                 return "Μπορώ να δώσω όλες τις λεπτομέρειες μόλις μου πείτε ναι. Θέλετε να συνεχίσουμε με πλήρη στοιχεία παραγγελίας;"
             return "I can share full order details as soon as you say yes. Would you like the complete order details now?"
 
+        last_state = str(_current_session.get("last_lookup_state") or "unknown")
+        anchor_order = re.sub(r"\D", "", str(_current_session.get("last_lookup_order") or ""))
+        expected = _expected_order_digits()
+        if last_state != "found" or not re.fullmatch(rf"\d{{{expected}}}", anchor_order):
+            room_log("TOOL_RESULT_BLOCKED", name="get_order_details", reason="missing_found_lookup_anchor")
+            if lang == "el":
+                return "Χρειάζομαι πρώτα μια έγκυρη παραγγελία που να έχει βρεθεί για να δώσω πλήρεις λεπτομέρειες."
+            return "I first need a valid found order before I can share full details."
+
+        requested_order = anchor_order if str(order_number or "").lower() == "last" else (
+            _normalize_order_id_strict(order_number or "") or ""
+        )
+        if requested_order != anchor_order:
+            room_log("TOOL_RESULT_BLOCKED", name="get_order_details", reason="order_anchor_mismatch")
+            if lang == "el":
+                return "Μπορώ να δώσω λεπτομέρειες μόνο για την τελευταία παραγγελία που βρέθηκε. Δώστε ξανά τον ίδιο αριθμό παραγγελίας."
+            return "I can only share details for the last found order. Please provide that same order number again."
+
         _current_session["full_order_details_allowed_until"] = 0.0
         _current_session["details_confirmation_pending"] = False
         _current_session["details_confirmation_pending_until"] = 0.0
-        room_log("TOOL_CALL", name="get_order_details", order_number=order_number)
+        room_log("TOOL_CALL", name="get_order_details", order_number=requested_order)
         result = await self._run_tool_with_silence_pause(
             "get_order_details",
-            order_lookup.get_order_details(order_number),
+            order_lookup.get_order_details(requested_order),
         )
         room_log("TOOL_RESULT", name="get_order_details", result=_truncate(result))
         spoken_summary = _build_order_details_voice_summary(result, get_agent_language())
@@ -1878,20 +1932,40 @@ class ElenaFunctionContext(llm.FunctionContext):
         phone: Annotated[str, llm.TypeInfo(description="The customer's phone number")],
     ) -> str:
         """Look up orders by customer phone number. Use when order number is unknown."""
-        _set_lookup_pending(phone, reason="lookup_order_by_phone_called")
+        lang = get_agent_language()
+        lock_mode = str(_current_session.get("number_mode_lock") or "")
+        lock_turn = int(_current_session.get("number_mode_turn_id") or 0)
+        latest_turn = int(_current_session.get("last_user_turn_id") or 0)
+        if lock_mode == "order" and lock_turn == latest_turn:
+            room_log("TOOL_RESULT_BLOCKED", name="lookup_order_by_phone", reason="number_mode_mismatch")
+            if lang == "el":
+                return "Αυτό μοιάζει με αριθμό παραγγελίας. Δώστε μου το τηλέφωνό σας σε 10 ψηφία που ξεκινά από 69."
+            return "That looks like an order number. Please share your phone number as 10 digits starting with 69."
+
+        normalized_phone = _normalize_phone_for_lookup(phone)
+        if not normalized_phone:
+            room_log("TOOL_RESULT_BLOCKED", name="lookup_order_by_phone", reason="invalid_phone_pattern")
+            if lang == "el":
+                return "Το τηλέφωνο πρέπει να είναι έγκυρος ελληνικός κινητός αριθμός με 10 ψηφία που ξεκινά από 69. Μπορείτε να το πείτε ξανά ψηφίο προς ψηφίο;"
+            return "The phone must be a valid Greek mobile number with 10 digits starting with 69. Could you say it again digit by digit?"
+
+        _set_lookup_pending(normalized_phone, reason="lookup_order_by_phone_called")
         _current_session["last_lookup_tool_called_at"] = time.time()
-        _current_session["last_lookup_tool_order"] = str(phone or "")
-        room_log("TOOL_CALL", name="lookup_order_by_phone", phone=phone)
+        _current_session["last_lookup_tool_order"] = normalized_phone
+        room_log("TOOL_CALL", name="lookup_order_by_phone", phone=normalized_phone)
         
         result = await self._run_tool_with_silence_pause(
             "lookup_order_by_phone",
-            order_lookup.lookup_order_by_phone(phone),
+            order_lookup.lookup_order_by_phone(normalized_phone),
         )
         
         room_log("TOOL_RESULT", name="lookup_order_by_phone", result=_truncate(result))
         lookup_state = _classify_lookup_result(result)
         _current_session["last_lookup_state"] = lookup_state
-        _current_session["last_lookup_order"] = str(phone or "")
+        snapshot = order_lookup.get_last_order_snapshot() or {}
+        snapshot_order = str(snapshot.get("order_number") or "")
+        strict_snapshot_order = _normalize_order_id_strict(snapshot_order) if snapshot_order else None
+        _current_session["last_lookup_order"] = strict_snapshot_order if (lookup_state == "found" and strict_snapshot_order) else ""
         
         if lookup_state == "found":
             _current_session["details_confirmation_pending"] = True
@@ -2175,6 +2249,13 @@ async def entrypoint(ctx: JobContext):
     _current_session["prefetched_lookup"] = None
     _current_session["last_lookup_tool_called_at"] = 0.0
     _current_session["last_lookup_tool_order"] = None
+    _current_session["lookup_progress_prompt_until"] = 0.0
+    _current_session["number_mode_lock"] = None
+    _current_session["number_mode_turn_id"] = 0
+    _current_session["prefetch_manual_say_active"] = False
+    _current_session["prefetch_spoken_turn_id"] = 0
+    _current_session["prefetch_spoken_text"] = ""
+    _current_session["prefetch_suppress_llm_until"] = 0.0
     _current_session["prefetched_lookup_spoken_at"] = 0.0
     _current_session["prefetched_lookup_spoken_order"] = None
     _current_session["lookup_pending"] = False
@@ -2484,16 +2565,130 @@ async def entrypoint(ctx: JobContext):
                 digits.append(embedded_digits)
         return "".join(digits)
 
+    def _expected_order_digits() -> int:
+        return _as_int(
+            get_agent_setting("order_id_exact_digits", 5),
+            5,
+            min_value=4,
+            max_value=8,
+        )
+
+    def _extract_digit_parts(text: str) -> list[str]:
+        tokens = re.findall(r"[a-zA-Z\u0370-\u03FF0-9]+", (text or "").lower())
+        parts: list[str] = []
+        for token in tokens:
+            if token in _ORDER_WORD_TO_DIGIT:
+                parts.append(_ORDER_WORD_TO_DIGIT[token])
+                continue
+            if token.isdigit():
+                parts.append(token)
+                continue
+            embedded_digits = re.sub(r"\D", "", token)
+            if embedded_digits:
+                parts.append(embedded_digits)
+        return parts
+
+    def _normalize_order_id_strict(raw_text: str) -> Optional[str]:
+        """Return strict order id candidate with exact configured length."""
+        expected = _expected_order_digits()
+        normalized = (raw_text or "").strip().lower()
+        if not normalized:
+            return None
+
+        explicit_runs = re.findall(rf"\d{{{expected}}}", normalized)
+        if explicit_runs:
+            return explicit_runs[-1]
+
+        parts = _extract_digit_parts(normalized)
+        joined = "".join(parts)
+        if len(joined) == expected and len(parts) >= 2:
+            return joined
+        return None
+
+    def _normalize_phone_for_lookup(raw_text: str) -> Optional[str]:
+        """Normalize and validate Greek mobile phone numbers (69XXXXXXXX)."""
+        normalized = (raw_text or "").strip().lower()
+        if not normalized:
+            return None
+        digits = _digits_from_phrase(normalized)
+        if digits.startswith("0030"):
+            digits = digits[4:]
+        elif digits.startswith("30") and len(digits) > 10:
+            digits = digits[2:]
+        if re.fullmatch(r"69\d{8}", digits):
+            return digits
+        return None
+
+    def _infer_number_mode(user_text: str, last_agent_text: str) -> Optional[str]:
+        """
+        Infer whether current numeric capture should be treated as order id or phone.
+        Returns 'order', 'phone', or None.
+        """
+        lowered = _normalize_switch_text(user_text)
+        last_lowered = _normalize_switch_text(last_agent_text)
+        if not lowered:
+            return None
+
+        if re.search(r"(δεν έχω αριθμό παραγγελ|no order number|don't have order number)", lowered):
+            return "phone"
+
+        order_hint = bool(re.search(r"(order|παραγγελ|αριθμ.*παραγγελ)", lowered))
+        phone_hint = bool(re.search(r"(phone|mobile|τηλέφων|τηλεφων|κινητ)", lowered))
+
+        asked_for_order = bool(re.search(r"(order number|παραγγελ|αριθμ.*παραγγελ)", last_lowered))
+        asked_for_phone = bool(re.search(r"(phone|mobile|τηλέφων|τηλεφων|κινητ)", last_lowered))
+
+        if phone_hint and not order_hint:
+            return "phone"
+        if order_hint and not phone_hint:
+            return "order"
+        if asked_for_phone and not asked_for_order:
+            return "phone"
+        if asked_for_order and not asked_for_phone:
+            return "order"
+        return None
+
+    def _is_digit_collection_utterance(text: str) -> bool:
+        lowered = (text or "").lower().strip()
+        if not lowered:
+            return False
+        parts = _extract_digit_parts(lowered)
+        if len(parts) >= 3:
+            return True
+        return bool(re.search(r"(digit by digit|ψηφίο προς ψηφίο|ένα, δύο|one two)", lowered))
+
+    def _is_short_utterance(text: str) -> bool:
+        lowered = _normalize_switch_text(text)
+        if not lowered:
+            return True
+        words = [w for w in lowered.split() if w]
+        return len(words) <= 2
+
+    def _can_unlock_full_details(user_text: str) -> tuple[bool, str]:
+        """Allow full details only when we have a found lookup for the same order."""
+        state = str(_current_session.get("last_lookup_state") or "unknown")
+        if state != "found":
+            return False, "lookup_not_found"
+        anchor = re.sub(r"\D", "", str(_current_session.get("last_lookup_order") or ""))
+        expected = _expected_order_digits()
+        if not re.fullmatch(rf"\d{{{expected}}}", anchor):
+            return False, "missing_anchor_order"
+        mentioned = _normalize_order_id_strict(user_text)
+        if mentioned and mentioned != anchor:
+            return False, "order_mismatch"
+        return True, "ok"
+
     def _extract_order_number_candidate(text: str) -> Optional[str]:
         """
-        Extract likely order number (3-6 digits) from mixed speech transcripts.
+        Extract likely order number with strict exact configured digit length.
         Prioritizes chunks near order-related keywords to avoid false captures.
         """
         normalized = (text or "").lower().strip()
         if not normalized:
             return None
+        expected = _expected_order_digits()
 
-        explicit_runs = re.findall(r"\d{4,6}", normalized)
+        explicit_runs = re.findall(rf"\d{{{expected}}}", normalized)
         if explicit_runs:
             return explicit_runs[-1]
 
@@ -2503,23 +2698,12 @@ async def entrypoint(ctx: JobContext):
 
         if windows:
             for segment in windows:
-                candidate = _digits_from_phrase(segment)
-                if 4 <= len(candidate) <= 5:
-                    return candidate
-            for segment in windows:
-                candidate = _digits_from_phrase(segment)
-                if 4 <= len(candidate) <= 6:
+                candidate = _normalize_order_id_strict(segment)
+                if candidate and len(candidate) == expected:
                     return candidate
 
-        fallback = _digits_from_phrase(normalized)
-        if 4 <= len(fallback) <= 5:
-            return fallback
-
-        tokens = re.findall(r"[a-zA-Z\u0370-\u03FF0-9]+", normalized)
-        numeric_token_count = sum(
-            1 for token in tokens if token.isdigit() or token in _ORDER_WORD_TO_DIGIT
-        )
-        if 4 <= len(fallback) <= 6 and numeric_token_count >= 4:
+        fallback = _normalize_order_id_strict(normalized)
+        if fallback and len(fallback) == expected:
             return fallback
         return None
 
@@ -3077,6 +3261,18 @@ async def entrypoint(ctx: JobContext):
             # text can be a string or LLMStream - handle both
             if isinstance(text, str):
                 logger.info(f"before_tts_cb processing: {text[:50]}...")
+                if not _current_session.get("prefetch_manual_say_active"):
+                    suppress_until = float(_current_session.get("prefetch_suppress_llm_until") or 0.0)
+                    suppress_turn = int(_current_session.get("prefetch_spoken_turn_id") or 0)
+                    latest_turn = int(_current_session.get("last_user_turn_id") or 0)
+                    if suppress_until and time.time() <= suppress_until and suppress_turn == latest_turn:
+                        room_log(
+                            "TTS_SUPPRESSED",
+                            reason="prefetch_mutual_exclusion",
+                            turn_id=latest_turn,
+                            text=_truncate(text),
+                        )
+                        return ""
                 strict_wait_phrase = _as_bool(
                     get_agent_setting("order_lookup_wait_phrase_strict", True),
                     default=True,
@@ -3361,6 +3557,19 @@ async def entrypoint(ctx: JobContext):
         user_text = message.content
         current_turn_id = int(_current_session.get("last_user_turn_id") or 0) + 1
         _current_session["last_user_turn_id"] = current_turn_id
+        # New user turn cancels stale prefetch suppression window.
+        last_prefetch_turn = int(_current_session.get("prefetch_spoken_turn_id") or 0)
+        if current_turn_id > last_prefetch_turn:
+            _current_session["prefetch_suppress_llm_until"] = 0.0
+            _current_session["prefetch_spoken_text"] = ""
+
+        _current_session["number_mode_lock"] = None
+        _current_session["number_mode_turn_id"] = 0
+        inferred_mode = _infer_number_mode(user_text, str(_current_session.get("last_agent_text") or ""))
+        if inferred_mode in {"order", "phone"}:
+            _current_session["number_mode_lock"] = inferred_mode
+            _current_session["number_mode_turn_id"] = current_turn_id
+            room_log("NUMBER_MODE_LOCKED", mode=inferred_mode, turn_id=current_turn_id)
 
         now = time.time()
         explicit_details_request = _explicit_more_order_details_request(user_text)
@@ -3371,29 +3580,40 @@ async def entrypoint(ctx: JobContext):
         details_pending_until = float(_current_session.get("details_confirmation_pending_until") or 0.0)
         if details_pending and now <= details_pending_until:
             if explicit_details_request or is_affirmative:
-                _current_session["full_order_details_allowed_until"] = now + 120.0
-                _current_session["details_confirmation_pending"] = False
-                _current_session["details_confirmation_pending_until"] = 0.0
-                room_log("FULL_DETAILS_ALLOWED", ttl_s=120, reason="single_yes_unlock")
-                order_number_for_details = str(_current_session.get("last_lookup_order") or "last")
-                agent.chat_ctx.append(
-                    role="system",
-                    text=(
-                        "ORDER DETAILS CONFIRMED:\n"
-                        "- The user confirmed they want full order details.\n"
-                        f"- Call get_order_details immediately with order_number={order_number_for_details}.\n"
-                        "- Do not ask for confirmation again in this turn."
-                    ),
-                )
+                can_unlock, unlock_reason = _can_unlock_full_details(user_text)
+                if can_unlock:
+                    _current_session["full_order_details_allowed_until"] = now + 120.0
+                    _current_session["details_confirmation_pending"] = False
+                    _current_session["details_confirmation_pending_until"] = 0.0
+                    room_log("FULL_DETAILS_ALLOWED", ttl_s=120, reason="single_yes_unlock")
+                    order_number_for_details = str(_current_session.get("last_lookup_order") or "last")
+                    agent.chat_ctx.append(
+                        role="system",
+                        text=(
+                            "ORDER DETAILS CONFIRMED:\n"
+                            "- The user confirmed they want full order details.\n"
+                            f"- Call get_order_details immediately with order_number={order_number_for_details}.\n"
+                            "- Do not ask for confirmation again in this turn."
+                        ),
+                    )
+                else:
+                    room_log("FULL_DETAILS_BLOCKED", reason=unlock_reason)
+                    _current_session["full_order_details_allowed_until"] = 0.0
+                    _current_session["details_confirmation_pending"] = False
+                    _current_session["details_confirmation_pending_until"] = 0.0
             elif is_negative:
                 _current_session["details_confirmation_pending"] = False
                 _current_session["details_confirmation_pending_until"] = 0.0
                 _current_session["full_order_details_allowed_until"] = 0.0
         elif explicit_details_request:
-            _current_session["full_order_details_allowed_until"] = now + 120.0
-            _current_session["details_confirmation_pending"] = False
-            _current_session["details_confirmation_pending_until"] = 0.0
-            room_log("FULL_DETAILS_ALLOWED", ttl_s=120, reason="explicit_request")
+            can_unlock, unlock_reason = _can_unlock_full_details(user_text)
+            if can_unlock:
+                _current_session["full_order_details_allowed_until"] = now + 120.0
+                _current_session["details_confirmation_pending"] = False
+                _current_session["details_confirmation_pending_until"] = 0.0
+                room_log("FULL_DETAILS_ALLOWED", ttl_s=120, reason="explicit_request")
+            else:
+                room_log("FULL_DETAILS_BLOCKED", reason=unlock_reason)
 
         ticket_pending = bool(_current_session.get("ticket_confirmation_pending"))
         ticket_pending_until = float(_current_session.get("ticket_confirmation_pending_until") or 0.0)
@@ -3496,7 +3716,8 @@ async def entrypoint(ctx: JobContext):
 
         try:
             detected_order_number = _extract_order_number_candidate(user_text)
-            if _should_force_order_lookup(user_text, detected_order_number):
+            number_mode = str(_current_session.get("number_mode_lock") or "")
+            if _should_force_order_lookup(user_text, detected_order_number) and number_mode != "phone":
                 _set_lookup_pending(detected_order_number, reason="order_number_detected")
                 now = time.time()
                 last_forced_order = str(_current_session.get("last_forced_lookup_order") or "")
@@ -3611,6 +3832,10 @@ async def entrypoint(ctx: JobContext):
                                 result=_truncate(spoken_result),
                             )
                             room_log("ORDER_LOOKUP_PREFETCH_SPEAKING", order_number=order_number)
+                            _current_session["prefetch_manual_say_active"] = True
+                            _current_session["prefetch_spoken_turn_id"] = turn_id
+                            _current_session["prefetch_spoken_text"] = spoken_result or result
+                            _current_session["prefetch_suppress_llm_until"] = time.time() + 10.0
                             await agent.say(spoken_result or result, allow_interruptions=True)
                             # Reset silence baseline after agent finishes this forced prefetch response
                             # so "Are you still there?" does not trigger immediately.
@@ -3627,6 +3852,7 @@ async def entrypoint(ctx: JobContext):
                                 error=_truncate(str(e), max_len=200),
                             )
                         finally:
+                            _current_session["prefetch_manual_say_active"] = False
                             _resume_silence_for_tool("prefetch_lookup")
 
                     asyncio.create_task(
@@ -3643,6 +3869,22 @@ async def entrypoint(ctx: JobContext):
 
         # Reset silence timer - user is responding
         reset_silence_timer()
+        if _is_digit_collection_utterance(user_text):
+            digit_grace = _as_float(
+                get_agent_setting("digit_collection_silence_grace_seconds", 14.0),
+                14.0,
+                min_value=4.0,
+                max_value=40.0,
+            )
+            _snooze_silence_prompts(digit_grace, reason="digit_collection")
+        elif _is_short_utterance(user_text):
+            short_grace = _as_float(
+                get_agent_setting("short_utterance_silence_grace_seconds", 6.0),
+                6.0,
+                min_value=2.0,
+                max_value=20.0,
+            )
+            _snooze_silence_prompts(short_grace, reason="short_utterance")
 
         # Add to transcript
         conversation_transcript.append(f"User: {user_text}")
@@ -3845,6 +4087,13 @@ async def entrypoint(ctx: JobContext):
             _current_session["prefetched_lookup"] = None
             _current_session["last_lookup_tool_called_at"] = 0.0
             _current_session["last_lookup_tool_order"] = None
+            _current_session["lookup_progress_prompt_until"] = 0.0
+            _current_session["number_mode_lock"] = None
+            _current_session["number_mode_turn_id"] = 0
+            _current_session["prefetch_manual_say_active"] = False
+            _current_session["prefetch_spoken_turn_id"] = 0
+            _current_session["prefetch_spoken_text"] = ""
+            _current_session["prefetch_suppress_llm_until"] = 0.0
             _current_session["prefetched_lookup_spoken_at"] = 0.0
             _current_session["prefetched_lookup_spoken_order"] = None
             _current_session["lookup_pending"] = False
@@ -3959,12 +4208,20 @@ async def entrypoint(ctx: JobContext):
                 "Με ακούτε;",
                 "Φαίνεται ότι δεν είστε εκεί. Αντίο!",
             ]
+            lookup_progress_prompt = "Συλλέγω τώρα τα στοιχεία της παραγγελίας σας. Ένα λεπτό ακόμη."
         else:
             prompts = [
                 "Are you still there?",
                 "Hello? Can you hear me?",
                 "It seems like you're not there. Goodbye!",
             ]
+            lookup_progress_prompt = "I am getting your order information now. One more moment please."
+        lookup_progress_window_s = _as_float(
+            get_agent_setting("lookup_progress_prompt_window_seconds", 30.0),
+            30.0,
+            min_value=5.0,
+            max_value=120.0,
+        )
         
         try:
             while not _current_session["should_end"] and silence_tracker["enabled"]:
@@ -4013,7 +4270,16 @@ async def entrypoint(ctx: JobContext):
                     
                     if prompt_count < silence_tracker["max_prompts"]:
                         # Prompt the user
-                        prompt_text = prompts[min(prompt_count, len(prompts) - 1)]
+                        now = time.time()
+                        lookup_called_at = float(_current_session.get("last_lookup_tool_called_at") or 0.0)
+                        lookup_progress_until = float(_current_session.get("lookup_progress_prompt_until") or 0.0)
+                        recently_lookup = lookup_called_at and (now - lookup_called_at) <= lookup_progress_window_s
+                        progress_active = lookup_progress_until and now <= lookup_progress_until
+                        if (recently_lookup or progress_active) and prompt_count < (silence_tracker["max_prompts"] - 1):
+                            prompt_text = lookup_progress_prompt
+                            room_log("SILENCE_PROMPT_REPLACED", reason="lookup_in_progress", text=_truncate(prompt_text))
+                        else:
+                            prompt_text = prompts[min(prompt_count, len(prompts) - 1)]
                         # Re-check race conditions right before speaking the silence prompt.
                         if _current_session.get("lookup_pending"):
                             room_log("SILENCE_PROMPT_SKIPPED", reason="lookup_pending_race")
