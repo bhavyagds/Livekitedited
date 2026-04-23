@@ -2704,6 +2704,19 @@ async def entrypoint(ctx: JobContext):
         words = [w for w in lowered.split() if w]
         return len(words) <= 2
 
+    def _is_phone_confirmation_prompt(text: str) -> bool:
+        """Detect prompts that ask the caller to confirm a captured phone number."""
+        lowered = _normalize_switch_text(text)
+        if not lowered:
+            return False
+        return bool(
+            re.search(
+                r"(just to confirm|is that correct|right|repeat the mobile number|confirm.*mobile|επιβεβαιώσ|σωστό|τηλέφωνο .*σωστό|ξανά το κινητό)",
+                lowered,
+                flags=re.IGNORECASE,
+            )
+        )
+
     def _can_unlock_full_details(user_text: str) -> tuple[bool, str]:
         """Allow full details only when we have a found lookup for the same order."""
         if bool(_current_session.get("full_details_unlocked_once")):
@@ -3919,7 +3932,15 @@ async def entrypoint(ctx: JobContext):
         is_affirmative = _is_affirmative_utterance(user_text)
         is_negative = _is_negative_utterance(user_text)
 
-        if str(_current_session.get("number_mode_lock") or "") == "phone":
+        last_agent_text = str(_current_session.get("last_agent_text") or "")
+        phone_mode_locked = str(_current_session.get("number_mode_lock") or "") == "phone"
+        phone_confirmation_context = _is_phone_confirmation_prompt(last_agent_text)
+
+        # Drop stale phone candidate if this turn is clearly back to order-id flow.
+        if inferred_mode == "order":
+            _current_session["pending_phone_candidate"] = None
+
+        if phone_mode_locked or phone_confirmation_context:
             phone_candidate = _normalize_phone_for_lookup(user_text or "")
             if phone_candidate:
                 _current_session["pending_phone_candidate"] = phone_candidate
@@ -3929,7 +3950,9 @@ async def entrypoint(ctx: JobContext):
                 _current_session["pending_phone_candidate"] = None
 
             pending_phone = str(_current_session.get("pending_phone_candidate") or "")
-            if pending_phone and is_affirmative:
+            if pending_phone and is_affirmative and (phone_mode_locked or phone_confirmation_context):
+                # Consume candidate immediately to avoid duplicate triggers on repeated "yes".
+                _current_session["pending_phone_candidate"] = None
                 _current_session["prefetch_spoken_turn_id"] = current_turn_id
                 _current_session["prefetch_suppress_llm_until"] = time.time() + 30.0
                 asyncio.create_task(
