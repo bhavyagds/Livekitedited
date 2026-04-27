@@ -24,8 +24,7 @@ _MD_BULLET_RE = re.compile(r"^\s*(?:[-*]|\u2022)\s+", re.MULTILINE)
 _MD_MARKER_RE = re.compile(r"[*_`~#]+")
 _MULTI_SPACE_RE = re.compile(r"\s{2,}")
 
-# Read common Greek-call identifiers digit-by-digit for better clarity:
-# order ids, postal codes, phones, and long digit runs.
+# Read common Greek-call identifiers for better clarity.
 _EL_ID_CONTEXT_RE = re.compile(
     r"(?i)\b("
     r"ταχυδρομ(?:ικ(?:ός|ο)?\s*κώδικ(?:ας|α)|ικός\s*κώδικας|ος\s*κώδικας)|"
@@ -34,11 +33,22 @@ _EL_ID_CONTEXT_RE = re.compile(
     r"order(?:\s*number)?|"
     r"αριθμ(?:ός|ο)?(?:\s*παραγγελ(?:ίας|ιας))?|"
     r"παραγγελ(?:ία|ια)|"
-    r"τηλέφων(?:ο|ου)|κινητ(?:ό|ο)|phone"
+    r"τηλέφων(?:ο|ου)|κινητ(?:ό|ο)|phone|mobile"
     r")\s*[:#]?\s*(\d{4,16})\b"
 )
 _EL_HASH_NUMBER_RE = re.compile(r"#\s*(\d{4,16})\b")
 _EL_LONG_DIGITS_RE = re.compile(r"(?<![\d.,])(\d{5,16})(?![\d.,])")
+
+# Read common English-call identifiers digit by digit.
+_EN_ID_CONTEXT_RE = re.compile(
+    r"(?i)\b("
+    r"order(?:\s*(?:number|id|no\.?))?|"
+    r"phone(?:\s*number)?|mobile(?:\s*number)?|"
+    r"zip(?:\s*code)?|postal(?:\s*code)?|"
+    r"confirmation(?:\s*number)?|reference(?:\s*number)?|tracking(?:\s*number)?"
+    r")\s*[:#]?\s*(\+?\d(?:[\s-]*\d){3,20})\b"
+)
+_EN_HASH_NUMBER_RE = re.compile(r"#\s*(\d{4,16})\b")
 
 _EL_DIGIT_WORDS = {
     "0": "μηδέν",
@@ -51,6 +61,19 @@ _EL_DIGIT_WORDS = {
     "7": "επτά",
     "8": "οκτώ",
     "9": "εννέα",
+}
+
+_EN_DIGIT_WORDS = {
+    "0": "zero",
+    "1": "one",
+    "2": "two",
+    "3": "three",
+    "4": "four",
+    "5": "five",
+    "6": "six",
+    "7": "seven",
+    "8": "eight",
+    "9": "nine",
 }
 
 
@@ -108,6 +131,22 @@ def _digits_to_greek_words(raw_digits: str) -> str:
     return " ".join(_EL_DIGIT_WORDS.get(ch, ch) for ch in raw_digits)
 
 
+def _digits_to_english_words(raw_digits: str) -> str:
+    return " ".join(_EN_DIGIT_WORDS.get(ch, ch) for ch in raw_digits)
+
+
+def _english_spoken_id_from_raw(raw_value: str) -> str:
+    value = (raw_value or "").strip()
+    has_plus = value.startswith("+")
+    digits = re.sub(r"\D", "", value)
+    if not (4 <= len(digits) <= 16):
+        return value
+    spoken = _digits_to_english_words(digits)
+    if has_plus:
+        spoken = f"plus {spoken}"
+    return spoken
+
+
 def normalize_numeric_ids_for_tts(text: str, language: str | None = None) -> str:
     """
     Normalize numeric IDs for clearer TTS pronunciation.
@@ -115,28 +154,54 @@ def normalize_numeric_ids_for_tts(text: str, language: str | None = None) -> str
     Greek behavior:
     - Reads ZIP/order/phone-like numbers digit-by-digit.
     - Reads standalone long digit runs (5-16) digit-by-digit.
+
+    English behavior:
+    - Reads order/phone/zip/reference-like IDs digit-by-digit.
+    - Reads hash-prefixed IDs (#12345) digit-by-digit.
     """
     if not text:
         return text
-    if (language or "").lower() != "el":
+
+    lang = (language or "").lower()
+
+    if lang.startswith("en"):
+
+        def _en_ctx_repl(match: re.Match) -> str:
+            label = match.group(1)
+            raw_value = match.group(2)
+            spoken = _english_spoken_id_from_raw(raw_value)
+            return f"{label} {spoken}"
+
+        updated = _EN_ID_CONTEXT_RE.sub(_en_ctx_repl, text)
+        updated = _EN_HASH_NUMBER_RE.sub(
+            lambda m: f"number {_digits_to_english_words(m.group(1))}",
+            updated,
+        )
+        return updated
+
+    if not lang.startswith("el"):
         return text
+
+    def _to_greek_number_words(raw_digits: str) -> str:
+        try:
+            from src.utils.greek_numbers import number_to_greek
+
+            return number_to_greek(int(raw_digits))
+        except Exception:
+            return _digits_to_greek_words(raw_digits)
 
     def _ctx_repl(match: re.Match) -> str:
         label = match.group(1)
         digits = match.group(2)
-        try:
-            from src.utils.greek_numbers import number_to_greek
-            return f"{label} {number_to_greek(int(digits))}"
-        except Exception:
-            return f"{label} {_digits_to_greek_words(digits)}"
+        return f"{label} {_to_greek_number_words(digits)}"
 
     updated = _EL_ID_CONTEXT_RE.sub(_ctx_repl, text)
     updated = _EL_HASH_NUMBER_RE.sub(
-        lambda m: f"αριθμός {number_to_greek(int(m.group(1)))}",
+        lambda m: f"αριθμός {_to_greek_number_words(m.group(1))}",
         updated,
     )
     updated = _EL_LONG_DIGITS_RE.sub(
-        lambda m: number_to_greek(int(m.group(1))),
+        lambda m: _to_greek_number_words(m.group(1)),
         updated,
     )
     return updated
