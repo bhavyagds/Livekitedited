@@ -503,8 +503,10 @@ _current_session: dict = {
     "pending_phone_candidate": None,
     "phone_lookup_inflight": False,
     "phone_forced_turn_id": 0,
+    "phone_forced_pending_turn_id": 0,
     "details_lookup_inflight": False,
     "details_forced_turn_id": 0,
+    "details_forced_pending_turn_id": 0,
     "details_last_spoken_order": None,
     "details_last_spoken_at": 0.0,
     "details_confirmation_pending": False,
@@ -2017,6 +2019,17 @@ class ElenaFunctionContext(llm.FunctionContext):
     ) -> str:
         """Get FULL order details (items, prices, address). Use after lookup_order when customer wants more info."""
         lang = get_agent_language()
+        current_turn = int(_current_session.get("last_user_turn_id") or 0)
+        forced_turn = int(_current_session.get("details_forced_turn_id") or 0)
+        forced_pending_turn = int(_current_session.get("details_forced_pending_turn_id") or 0)
+        if current_turn and (forced_turn == current_turn or forced_pending_turn == current_turn):
+            room_log("TOOL_RESULT_BLOCKED", name="get_order_details", reason="forced_turn_in_progress")
+            in_flight_text = _strip_markup_for_output(str(_current_session.get("prefetch_spoken_text") or ""))
+            if in_flight_text:
+                return in_flight_text
+            if lang == "el":
+                return "Το ελέγχω ήδη και θα σας πω αμέσως τις λεπτομέρειες."
+            return "I am already fetching those details and will share them in a moment."
         if bool(_current_session.get("details_lookup_inflight")):
             room_log("TOOL_RESULT_BLOCKED", name="get_order_details", reason="forced_lookup_inflight")
             in_flight_text = _strip_markup_for_output(str(_current_session.get("prefetch_spoken_text") or ""))
@@ -2079,6 +2092,17 @@ class ElenaFunctionContext(llm.FunctionContext):
     ) -> str:
         """Look up orders by customer phone number. Use when order number is unknown."""
         lang = get_agent_language()
+        current_turn = int(_current_session.get("last_user_turn_id") or 0)
+        forced_turn = int(_current_session.get("phone_forced_turn_id") or 0)
+        forced_pending_turn = int(_current_session.get("phone_forced_pending_turn_id") or 0)
+        if current_turn and (forced_turn == current_turn or forced_pending_turn == current_turn):
+            room_log("TOOL_RESULT_BLOCKED", name="lookup_order_by_phone", reason="forced_turn_in_progress")
+            in_flight_text = _strip_markup_for_output(str(_current_session.get("prefetch_spoken_text") or ""))
+            if in_flight_text:
+                return in_flight_text
+            if lang == "el":
+                return "Το ελέγχω ήδη και θα σας απαντήσω αμέσως."
+            return "I am already checking that phone number and will respond in a moment."
         if bool(_current_session.get("phone_lookup_inflight")):
             room_log("TOOL_RESULT_BLOCKED", name="lookup_order_by_phone", reason="forced_lookup_inflight")
             in_flight_text = _strip_markup_for_output(str(_current_session.get("prefetch_spoken_text") or ""))
@@ -2421,8 +2445,10 @@ async def entrypoint(ctx: JobContext):
     _current_session["pending_phone_candidate"] = None
     _current_session["phone_lookup_inflight"] = False
     _current_session["phone_forced_turn_id"] = 0
+    _current_session["phone_forced_pending_turn_id"] = 0
     _current_session["details_lookup_inflight"] = False
     _current_session["details_forced_turn_id"] = 0
+    _current_session["details_forced_pending_turn_id"] = 0
     _current_session["details_last_spoken_order"] = None
     _current_session["details_last_spoken_at"] = 0.0
     _current_session["details_confirmation_pending"] = False
@@ -3856,6 +3882,7 @@ async def entrypoint(ctx: JobContext):
             min_value=20.0,
             max_value=300.0,
         )
+        _current_session["details_forced_pending_turn_id"] = turn_id
         _current_session["details_lookup_inflight"] = True
         _current_session["details_forced_turn_id"] = turn_id
         _current_session["prefetch_spoken_turn_id"] = turn_id
@@ -3921,6 +3948,8 @@ async def entrypoint(ctx: JobContext):
         finally:
             _current_session["prefetch_manual_say_active"] = False
             _current_session["details_lookup_inflight"] = False
+            if int(_current_session.get("details_forced_pending_turn_id") or 0) == turn_id:
+                _current_session["details_forced_pending_turn_id"] = 0
             _resume_silence_for_tool("forced_get_order_details")
 
     async def _force_lookup_by_phone(turn_id: int, phone: str, trigger_reason: str) -> None:
@@ -3959,6 +3988,7 @@ async def entrypoint(ctx: JobContext):
             min_value=15.0,
             max_value=300.0,
         )
+        _current_session["phone_forced_pending_turn_id"] = turn_id
         _current_session["phone_lookup_inflight"] = True
         _current_session["phone_forced_turn_id"] = turn_id
         _current_session["prefetch_spoken_turn_id"] = turn_id
@@ -4025,6 +4055,8 @@ async def entrypoint(ctx: JobContext):
         finally:
             _current_session["prefetch_manual_say_active"] = False
             _current_session["phone_lookup_inflight"] = False
+            if int(_current_session.get("phone_forced_pending_turn_id") or 0) == turn_id:
+                _current_session["phone_forced_pending_turn_id"] = 0
             _resume_silence_for_tool("forced_lookup_order_by_phone")
 
     @agent.on("user_speech_committed")
@@ -4043,6 +4075,17 @@ async def entrypoint(ctx: JobContext):
             _current_session["pending_phone_candidate"] = None
         current_turn_id = int(_current_session.get("last_user_turn_id") or 0) + 1
         _current_session["last_user_turn_id"] = current_turn_id
+        # Clear stale pending forced-turn markers from previous turns.
+        if (
+            int(_current_session.get("phone_forced_pending_turn_id") or 0) < current_turn_id
+            and not bool(_current_session.get("phone_lookup_inflight"))
+        ):
+            _current_session["phone_forced_pending_turn_id"] = 0
+        if (
+            int(_current_session.get("details_forced_pending_turn_id") or 0) < current_turn_id
+            and not bool(_current_session.get("details_lookup_inflight"))
+        ):
+            _current_session["details_forced_pending_turn_id"] = 0
         # New user turn cancels stale prefetch suppression window.
         last_prefetch_turn = int(_current_session.get("prefetch_spoken_turn_id") or 0)
         if current_turn_id > last_prefetch_turn:
@@ -4087,6 +4130,7 @@ async def entrypoint(ctx: JobContext):
                     _current_session["pending_phone_candidate"] = None
                     _current_session["prefetch_spoken_turn_id"] = current_turn_id
                     _current_session["prefetch_suppress_llm_until"] = time.time() + 30.0
+                    _current_session["phone_forced_pending_turn_id"] = current_turn_id
                     asyncio.create_task(
                         _force_lookup_by_phone(current_turn_id, phone_candidate, "phone_number_captured")
                     )
@@ -4101,6 +4145,7 @@ async def entrypoint(ctx: JobContext):
                 _current_session["pending_phone_candidate"] = None
                 _current_session["prefetch_spoken_turn_id"] = current_turn_id
                 _current_session["prefetch_suppress_llm_until"] = time.time() + 30.0
+                _current_session["phone_forced_pending_turn_id"] = current_turn_id
                 asyncio.create_task(
                     _force_lookup_by_phone(current_turn_id, pending_phone, "phone_confirmation_yes")
                 )
@@ -4120,6 +4165,7 @@ async def entrypoint(ctx: JobContext):
                     # Deterministic path: suppress generic LLM chatter and force details tool fetch.
                     _current_session["prefetch_spoken_turn_id"] = current_turn_id
                     _current_session["prefetch_suppress_llm_until"] = time.time() + 20.0
+                    _current_session["details_forced_pending_turn_id"] = current_turn_id
                     asyncio.create_task(
                         _force_get_order_details(current_turn_id, "single_yes_unlock")
                     )
@@ -4142,6 +4188,7 @@ async def entrypoint(ctx: JobContext):
                 room_log("FULL_DETAILS_ALLOWED", ttl_s=120, reason="explicit_request")
                 _current_session["prefetch_spoken_turn_id"] = current_turn_id
                 _current_session["prefetch_suppress_llm_until"] = time.time() + 20.0
+                _current_session["details_forced_pending_turn_id"] = current_turn_id
                 asyncio.create_task(
                     _force_get_order_details(current_turn_id, "explicit_request")
                 )
@@ -4673,8 +4720,10 @@ async def entrypoint(ctx: JobContext):
             _current_session["pending_phone_candidate"] = None
             _current_session["phone_lookup_inflight"] = False
             _current_session["phone_forced_turn_id"] = 0
+            _current_session["phone_forced_pending_turn_id"] = 0
             _current_session["details_lookup_inflight"] = False
             _current_session["details_forced_turn_id"] = 0
+            _current_session["details_forced_pending_turn_id"] = 0
             _current_session["details_last_spoken_order"] = None
             _current_session["details_last_spoken_at"] = 0.0
             _current_session["details_confirmation_pending"] = False
