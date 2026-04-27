@@ -95,6 +95,16 @@ def _as_int(
     return result
 
 
+def _expected_order_digits() -> int:
+    """Configured strict order-id length used across lookups/validation."""
+    return _as_int(
+        get_agent_setting("order_id_exact_digits", 5),
+        5,
+        min_value=4,
+        max_value=8,
+    )
+
+
 def _require_setting(key: str, *, allow_empty: bool = False):
     """Fetch a required setting from DB. Raises if missing or empty."""
     value = get_agent_setting(key)
@@ -2585,14 +2595,6 @@ async def entrypoint(ctx: JobContext):
             if embedded_digits:
                 digits.append(embedded_digits)
         return "".join(digits)
-
-    def _expected_order_digits() -> int:
-        return _as_int(
-            get_agent_setting("order_id_exact_digits", 5),
-            5,
-            min_value=4,
-            max_value=8,
-        )
 
     def _extract_digit_parts(text: str) -> list[str]:
         tokens = re.findall(r"[a-zA-Z\u0370-\u03FF0-9]+", (text or "").lower())
