@@ -3947,6 +3947,16 @@ async def entrypoint(ctx: JobContext):
             if phone_candidate:
                 _current_session["pending_phone_candidate"] = phone_candidate
                 room_log("PHONE_CANDIDATE_CAPTURED", phone=phone_candidate, turn_id=current_turn_id)
+                # If we already have a full valid phone number in phone flow, lookup immediately.
+                # This avoids waiting for an extra "yes" turn and prevents premature silence prompts.
+                if phone_mode_locked:
+                    _current_session["pending_phone_candidate"] = None
+                    _current_session["prefetch_spoken_turn_id"] = current_turn_id
+                    _current_session["prefetch_suppress_llm_until"] = time.time() + 30.0
+                    asyncio.create_task(
+                        _force_lookup_by_phone(current_turn_id, phone_candidate, "phone_number_captured")
+                    )
+                    room_log("PHONE_LOOKUP_FORCED_TRIGGERED", phone=phone_candidate, turn_id=current_turn_id)
             elif is_negative:
                 # Caller rejected previously repeated number; clear candidate.
                 _current_session["pending_phone_candidate"] = None
@@ -4320,6 +4330,29 @@ async def entrypoint(ctx: JobContext):
             if text:
                 normalized_text = _enforce_locked_output_language(text)
                 display_text = _strip_markup_for_output(normalized_text)
+                suppress_commit, suppress_reason = _should_suppress_tts_text(display_text or text)
+                if suppress_commit:
+                    # Keep the deterministic prefetch/forced summary in transcript even inside suppression windows.
+                    expected_prefetch_text = str(_current_session.get("prefetch_spoken_text") or "")
+                    expected_norm = _normalize_switch_text(expected_prefetch_text)
+                    candidate_norm = _normalize_switch_text(display_text or text)
+                    same_as_prefetch = bool(
+                        expected_norm
+                        and candidate_norm
+                        and (
+                            candidate_norm == expected_norm
+                            or candidate_norm in expected_norm
+                            or expected_norm in candidate_norm
+                        )
+                    )
+                    if not same_as_prefetch:
+                        room_log(
+                            "AGENT_TEXT_SUPPRESSED",
+                            reason=suppress_reason,
+                            turn_id=int(_current_session.get("last_user_turn_id") or 0),
+                            text=_truncate(display_text or text),
+                        )
+                        return
                 asyncio.create_task(send_agent_transcript(display_text or text))
                 asyncio.create_task(send_agent_info(display_text or text))
                 conversation_transcript.append(f"Agent: {display_text or text}")
