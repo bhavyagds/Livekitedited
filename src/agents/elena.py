@@ -2017,6 +2017,14 @@ class ElenaFunctionContext(llm.FunctionContext):
     ) -> str:
         """Get FULL order details (items, prices, address). Use after lookup_order when customer wants more info."""
         lang = get_agent_language()
+        if bool(_current_session.get("details_lookup_inflight")):
+            room_log("TOOL_RESULT_BLOCKED", name="get_order_details", reason="forced_lookup_inflight")
+            in_flight_text = _strip_markup_for_output(str(_current_session.get("prefetch_spoken_text") or ""))
+            if in_flight_text:
+                return in_flight_text
+            if lang == "el":
+                return "Το ελέγχω ήδη και θα σας πω αμέσως τις λεπτομέρειες."
+            return "I am already fetching those details and will share them in a moment."
         now = time.time()
         allowed_until = float(_current_session.get("full_order_details_allowed_until") or 0.0)
         if now > allowed_until:
@@ -2071,6 +2079,14 @@ class ElenaFunctionContext(llm.FunctionContext):
     ) -> str:
         """Look up orders by customer phone number. Use when order number is unknown."""
         lang = get_agent_language()
+        if bool(_current_session.get("phone_lookup_inflight")):
+            room_log("TOOL_RESULT_BLOCKED", name="lookup_order_by_phone", reason="forced_lookup_inflight")
+            in_flight_text = _strip_markup_for_output(str(_current_session.get("prefetch_spoken_text") or ""))
+            if in_flight_text:
+                return in_flight_text
+            if lang == "el":
+                return "Το ελέγχω ήδη και θα σας απαντήσω αμέσως."
+            return "I am already checking that phone number and will respond in a moment."
         lock_mode = str(_current_session.get("number_mode_lock") or "")
         lock_turn = int(_current_session.get("number_mode_turn_id") or 0)
         latest_turn = int(_current_session.get("last_user_turn_id") or 0)
