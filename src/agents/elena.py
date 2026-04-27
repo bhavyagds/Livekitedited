@@ -1180,6 +1180,49 @@ def _is_silence_prompt_text(text: str) -> bool:
     return normalized in silence_prompts
 
 
+def _is_lookup_wait_ack_only_text(text: str) -> bool:
+    """Return True for short 'one moment while I check' style messages."""
+    if not text:
+        return False
+    normalized = re.sub(r"\s+", " ", text.lower()).strip()
+    if not normalized or len(normalized) > 180:
+        return False
+
+    has_wait_ack = bool(
+        re.search(
+            r"(one moment|give me a moment|while i check|let me check|i ll check|thanks[, ]+got it|"
+            r"μια στιγμή|περιμένετε|το ελέγχω|να το ελέγξω)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+    )
+    if not has_wait_ack:
+        return False
+
+    # Not an ack-only phrase if it already contains concrete lookup results.
+    has_results = bool(
+        re.search(
+            r"(i found your order|order number\s*\d+|here are the details|delivery is scheduled|the total is|"
+            r"would you like more details|status is)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+    )
+    return not has_results
+
+
+def _repeat_number_prompt_for_mode(mode: str, lang: str) -> str:
+    """Recovery prompt when number capture/validation is unclear."""
+    is_phone = (mode or "").lower() == "phone"
+    if lang == "el":
+        if is_phone:
+            return "Μπορείτε να επαναλάβετε το κινητό σας ψηφίο προς ψηφίο, παρακαλώ;"
+        return "Μπορείτε να επαναλάβετε τον αριθμό παραγγελίας ψηφίο προς ψηφίο, παρακαλώ;"
+    if is_phone:
+        return "Could you please repeat your mobile number digit by digit?"
+    return "Could you please repeat your order number digit by digit?"
+
+
 def create_llm():
     """Create the LLM instance based on admin settings.
     
@@ -2123,9 +2166,17 @@ class ElenaFunctionContext(llm.FunctionContext):
         normalized_phone = _normalize_phone_for_lookup(phone)
         if not normalized_phone:
             room_log("TOOL_RESULT_BLOCKED", name="lookup_order_by_phone", reason="invalid_phone_pattern")
-            if lang == "el":
-                return "Το τηλέφωνο πρέπει να είναι έγκυρος ελληνικός κινητός αριθμός με 10 ψηφία που ξεκινά από 69. Μπορείτε να το πείτε ξανά ψηφίο προς ψηφίο;"
-            return "The phone must be a valid Greek mobile number with 10 digits starting with 69. Could you say it again digit by digit?"
+            _current_session["pending_lookup_wait_phrase"] = None
+            _current_session["pending_lookup_wait_phrase_set_at"] = 0.0
+            _current_session["pending_phone_candidate"] = None
+            invalid_recovery_grace = _as_float(
+                get_agent_setting("invalid_number_recovery_silence_grace_seconds", 12.0),
+                12.0,
+                min_value=4.0,
+                max_value=40.0,
+            )
+            _snooze_silence_prompts(invalid_recovery_grace, reason="invalid_phone_recovery")
+            return _repeat_number_prompt_for_mode("phone", lang)
 
         _set_lookup_pending(normalized_phone, reason="lookup_order_by_phone_called")
         _current_session["last_lookup_tool_called_at"] = time.time()
@@ -3546,6 +3597,40 @@ async def entrypoint(ctx: JobContext):
                         text=_truncate(text),
                     )
                     return ""
+                if _is_lookup_wait_ack_only_text(text):
+                    lookup_recent_s = _as_float(
+                        get_agent_setting("lookup_wait_ack_require_tool_window_seconds", 4.0),
+                        4.0,
+                        min_value=1.0,
+                        max_value=20.0,
+                    )
+                    last_lookup_called_at = float(_current_session.get("last_lookup_tool_called_at") or 0.0)
+                    lookup_started = bool(
+                        _current_session.get("lookup_pending")
+                        or _current_session.get("phone_lookup_inflight")
+                        or _current_session.get("details_lookup_inflight")
+                    ) or (
+                        last_lookup_called_at and (time.time() - last_lookup_called_at) <= lookup_recent_s
+                    )
+                    if not lookup_started:
+                        mode = str(_current_session.get("number_mode_lock") or "phone")
+                        replacement = _repeat_number_prompt_for_mode(mode, get_agent_language())
+                        _current_session["pending_lookup_wait_phrase"] = None
+                        _current_session["pending_lookup_wait_phrase_set_at"] = 0.0
+                        invalid_recovery_grace = _as_float(
+                            get_agent_setting("invalid_number_recovery_silence_grace_seconds", 12.0),
+                            12.0,
+                            min_value=4.0,
+                            max_value=40.0,
+                        )
+                        _snooze_silence_prompts(invalid_recovery_grace, reason="invalid_number_recovery")
+                        room_log(
+                            "LOOKUP_WAIT_ACK_REPLACED",
+                            reason="lookup_not_started",
+                            original=_truncate(text),
+                            replacement=_truncate(replacement),
+                        )
+                        text = replacement
                 strict_wait_phrase = _as_bool(
                     get_agent_setting("order_lookup_wait_phrase_strict", True),
                     default=True,
