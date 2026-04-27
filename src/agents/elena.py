@@ -105,6 +105,122 @@ def _expected_order_digits() -> int:
     )
 
 
+_ORDER_WORD_TO_DIGIT: dict[str, str] = {
+    # English
+    "zero": "0",
+    "oh": "0",
+    "o": "0",
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+    # Greek
+    "\u03bc\u03b7\u03b4\u03ad\u03bd": "0",
+    "\u03bc\u03b7\u03b4\u03b5\u03bd": "0",
+    "\u03ad\u03bd\u03b1": "1",
+    "\u03b5\u03bd\u03b1": "1",
+    "\u03b4\u03cd\u03bf": "2",
+    "\u03b4\u03c5\u03bf": "2",
+    "\u03c4\u03c1\u03af\u03b1": "3",
+    "\u03c4\u03c1\u03b9\u03b1": "3",
+    "\u03c4\u03ad\u03c3\u03c3\u03b5\u03c1\u03b1": "4",
+    "\u03c4\u03b5\u03c3\u03c3\u03b5\u03c1\u03b1": "4",
+    "\u03c0\u03ad\u03bd\u03c4\u03b5": "5",
+    "\u03c0\u03b5\u03bd\u03c4\u03b5": "5",
+    "\u03ad\u03be\u03b9": "6",
+    "\u03b5\u03be\u03b9": "6",
+    "\u03b5\u03c0\u03c4\u03ac": "7",
+    "\u03b5\u03c0\u03c4\u03b1": "7",
+    "\u03b5\u03c6\u03c4\u03ac": "7",
+    "\u03b5\u03c6\u03c4\u03b1": "7",
+    "\u03bf\u03ba\u03c4\u03ce": "8",
+    "\u03bf\u03ba\u03c4\u03c9": "8",
+    "\u03b5\u03bd\u03bd\u03ad\u03b1": "9",
+    "\u03b5\u03bd\u03bd\u03b5\u03b1": "9",
+    # Common transliterations
+    "ena": "1",
+    "dyo": "2",
+    "tria": "3",
+    "tessera": "4",
+    "pente": "5",
+    "eksi": "6",
+    "epta": "7",
+    "okto": "8",
+    "ennea": "9",
+}
+
+
+def _digits_from_phrase(text: str) -> str:
+    """Convert mixed spoken-number tokens into a compact digits-only string."""
+    tokens = re.findall(r"[a-zA-Z\u0370-\u03FF0-9]+", (text or "").lower())
+    digits: list[str] = []
+    for token in tokens:
+        if token in _ORDER_WORD_TO_DIGIT:
+            digits.append(_ORDER_WORD_TO_DIGIT[token])
+            continue
+        if token.isdigit():
+            digits.append(token)
+            continue
+        embedded_digits = re.sub(r"\D", "", token)
+        if embedded_digits:
+            digits.append(embedded_digits)
+    return "".join(digits)
+
+
+def _extract_digit_parts(text: str) -> list[str]:
+    tokens = re.findall(r"[a-zA-Z\u0370-\u03FF0-9]+", (text or "").lower())
+    parts: list[str] = []
+    for token in tokens:
+        if token in _ORDER_WORD_TO_DIGIT:
+            parts.append(_ORDER_WORD_TO_DIGIT[token])
+            continue
+        if token.isdigit():
+            parts.append(token)
+            continue
+        embedded_digits = re.sub(r"\D", "", token)
+        if embedded_digits:
+            parts.append(embedded_digits)
+    return parts
+
+
+def _normalize_order_id_strict(raw_text: str) -> Optional[str]:
+    """Return strict order id candidate with exact configured length."""
+    expected = _expected_order_digits()
+    normalized = (raw_text or "").strip().lower()
+    if not normalized:
+        return None
+
+    explicit_runs = re.findall(rf"\d{{{expected}}}", normalized)
+    if explicit_runs:
+        return explicit_runs[-1]
+
+    parts = _extract_digit_parts(normalized)
+    joined = "".join(parts)
+    if len(joined) == expected and len(parts) >= 2:
+        return joined
+    return None
+
+
+def _normalize_phone_for_lookup(raw_text: str) -> Optional[str]:
+    """Normalize and validate Greek mobile phone numbers (69XXXXXXXX)."""
+    normalized = (raw_text or "").strip().lower()
+    if not normalized:
+        return None
+    digits = _digits_from_phrase(normalized)
+    if digits.startswith("0030"):
+        digits = digits[4:]
+    elif digits.startswith("30") and len(digits) > 10:
+        digits = digits[2:]
+    if re.fullmatch(r"69\d{8}", digits):
+        return digits
+    return None
+
+
 def _require_setting(key: str, *, allow_empty: bool = False):
     """Fetch a required setting from DB. Raises if missing or empty."""
     value = get_agent_setting(key)
