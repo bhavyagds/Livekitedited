@@ -315,8 +315,8 @@ class TestElenaRegressions(unittest.TestCase):
             result = asyncio.run(ctx.lookup_order("12345"))
 
         pending_phrase = str(self.elena._current_session.get("pending_lookup_wait_phrase") or "")
-        self.assertTrue(pending_phrase)
-        self.assertNotIn(pending_phrase, result)
+        self.assertEqual(pending_phrase, "")
+        self.assertNotIn("one moment", result.lower())
 
 
 if __name__ == "__main__":

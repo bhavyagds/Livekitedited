@@ -631,6 +631,8 @@ _current_session: dict = {
     "last_lookup_state": "unknown",
     "last_lookup_order": None,
     "pending_phone_candidate": None,
+    "phone_digit_buffer": "",
+    "phone_digit_buffer_updated_at": 0.0,
     "phone_lookup_inflight": False,
     "phone_forced_turn_id": 0,
     "phone_forced_pending_turn_id": 0,
@@ -1006,6 +1008,54 @@ def _clear_pending_lookup_wait_phrase(reason: str) -> None:
         room_log("TOOL_WAIT_ACK_CLEARED", reason=reason)
     _current_session["pending_lookup_wait_phrase"] = None
     _current_session["pending_lookup_wait_phrase_set_at"] = 0.0
+
+
+def _reset_phone_digit_buffer(reason: str = "") -> None:
+    """Reset phone digit buffer used for chunked phone-number capture."""
+    buffered = str(_current_session.get("phone_digit_buffer") or "")
+    if buffered:
+        room_log(
+            "PHONE_DIGIT_BUFFER_RESET",
+            reason=reason,
+            buffer=buffered,
+        )
+    _current_session["phone_digit_buffer"] = ""
+    _current_session["phone_digit_buffer_updated_at"] = 0.0
+
+
+def _append_phone_digits_from_turn(user_text: str) -> str:
+    """Append digits from this turn into session buffer for chunked phone capture."""
+    raw_digits = "".join(_extract_digit_parts(user_text or ""))
+    if not raw_digits:
+        return ""
+
+    now = time.time()
+    last_updated = float(_current_session.get("phone_digit_buffer_updated_at") or 0.0)
+    buffer_timeout = _as_float(
+        get_agent_setting("phone_digit_buffer_timeout_seconds", 20.0),
+        20.0,
+        min_value=5.0,
+        max_value=60.0,
+    )
+    if last_updated and (now - last_updated) > buffer_timeout:
+        _reset_phone_digit_buffer("timeout")
+
+    current = str(_current_session.get("phone_digit_buffer") or "")
+    combined = current + raw_digits
+    max_digits = _as_int(
+        get_agent_setting("phone_lookup_max_digits", 15),
+        15,
+        min_value=10,
+        max_value=15,
+    )
+    if len(combined) > max_digits:
+        # Caller likely restarted with a fresh number chunk.
+        combined = raw_digits
+
+    _current_session["phone_digit_buffer"] = combined
+    _current_session["phone_digit_buffer_updated_at"] = now
+    room_log("PHONE_DIGIT_BUFFER_UPDATED", raw_digits=raw_digits, buffer=combined)
+    return combined
 
 
 def _should_block_silence_prompt(reason: str = "") -> bool:
@@ -2378,6 +2428,7 @@ class ElenaFunctionContext(llm.FunctionContext):
                 _current_session["full_order_details_allowed_until"] = 0.0
                 _current_session["number_mode_lock"] = "order"
                 _current_session["pending_phone_candidate"] = None
+                _reset_phone_digit_buffer("back_to_order_flow")
 
             summary = _build_order_voice_summary(result, get_agent_language()) or result
             return summary
@@ -2505,6 +2556,7 @@ class ElenaFunctionContext(llm.FunctionContext):
             _clear_lookup_pending("invalid_phone_pattern")
             _current_session["phone_lookup_inflight"] = False
             _current_session["pending_phone_candidate"] = None
+            _reset_phone_digit_buffer("invalid_phone_pattern")
             _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="invalid_phone_pattern")
             invalid_recovery_grace = _as_float(
                 get_agent_setting("invalid_number_recovery_silence_grace_seconds", 12.0),
@@ -2606,6 +2658,7 @@ class ElenaFunctionContext(llm.FunctionContext):
             _current_session["phone_lookup_inflight"] = False
             _clear_lookup_pending("phone_lookup_finished")
             _clear_pending_lookup_wait_phrase("phone_lookup_finished")
+            _reset_phone_digit_buffer("phone_lookup_finished")
             _snooze_silence_prompts(5.0, reason="phone_lookup_finished")
 
     @llm.ai_callable()
@@ -2891,6 +2944,8 @@ async def entrypoint(ctx: JobContext):
     _current_session["last_lookup_state"] = "unknown"
     _current_session["last_lookup_order"] = None
     _current_session["pending_phone_candidate"] = None
+    _current_session["phone_digit_buffer"] = ""
+    _current_session["phone_digit_buffer_updated_at"] = 0.0
     _current_session["phone_lookup_inflight"] = False
     _current_session["phone_forced_turn_id"] = 0
     _current_session["phone_forced_pending_turn_id"] = 0
@@ -4377,6 +4432,7 @@ async def entrypoint(ctx: JobContext):
             _current_session["phone_lookup_inflight"] = False
             _clear_lookup_pending(reason="phone_lookup_finished")
             _clear_pending_lookup_wait_phrase("phone_lookup_finished")
+            _reset_phone_digit_buffer("phone_lookup_finished")
             _snooze_silence_prompts(5.0, reason="phone_lookup_finished")
             if int(_current_session.get("phone_forced_pending_turn_id") or 0) == turn_id:
                 _current_session["phone_forced_pending_turn_id"] = 0
@@ -4490,7 +4546,250 @@ async def entrypoint(ctx: JobContext):
         current_turn_id = int(_current_session.get("last_user_turn_id") or 0) + 1
         _current_session["last_user_turn_id"] = current_turn_id
         flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
-        normalized_order_candidate = _normalize_order_id_strict(user_text)
+        phone_flow_active = flow_state in PHONE_FLOW_STATES
+        is_affirmative = _is_affirmative_utterance(user_text)
+        is_negative = _is_negative_utterance(user_text)
+        normalized_order_candidate = (
+            _normalize_order_id_strict(user_text)
+            if flow_state == FLOW_AWAITING_ORDER_NUMBER
+            else None
+        )
+
+        phone_lookup_schedule_snooze = _as_float(
+            get_agent_setting("phone_lookup_schedule_snooze_seconds", 20.0),
+            20.0,
+            min_value=5.0,
+            max_value=90.0,
+        )
+
+        # Clear stale pending forced-turn markers from previous turns.
+        if (
+            int(_current_session.get("phone_forced_pending_turn_id") or 0) < current_turn_id
+            and not bool(_current_session.get("phone_lookup_inflight"))
+        ):
+            _current_session["phone_forced_pending_turn_id"] = 0
+        if (
+            int(_current_session.get("details_forced_pending_turn_id") or 0) < current_turn_id
+            and not bool(_current_session.get("details_lookup_inflight"))
+        ):
+            _current_session["details_forced_pending_turn_id"] = 0
+        # New user turn cancels stale forced-response suppression window.
+        last_forced_response_turn = int(_current_session.get("forced_response_spoken_turn_id") or 0)
+        if current_turn_id > last_forced_response_turn:
+            _current_session["forced_response_suppress_llm_until"] = 0.0
+            _current_session["forced_response_spoken_text"] = ""
+
+        def _handle_phone_flow_turn(
+            *,
+            user_text: str,
+            current_turn_id: int,
+            is_affirmative: bool,
+            is_negative: bool,
+        ) -> bool:
+            """Deterministic phone-flow state machine. Returns True when turn is fully handled."""
+            local_flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
+            if local_flow_state not in PHONE_FLOW_STATES:
+                return False
+
+            raw_digits = "".join(_extract_digit_parts(user_text or ""))
+            pending_phone = str(_current_session.get("pending_phone_candidate") or "")
+
+            def _schedule_manual_prompt(
+                message_text: str,
+                *,
+                reason: str,
+                suppress_s: float = 8.0,
+                snooze_s: float = 8.0,
+            ) -> None:
+                _current_session["forced_response_manual_say_active"] = True
+                _current_session["forced_response_spoken_turn_id"] = current_turn_id
+                _current_session["forced_response_suppress_llm_until"] = time.time() + suppress_s
+                _current_session["forced_response_spoken_text"] = message_text
+                _clear_pending_lookup_wait_phrase(reason)
+                _clear_lookup_pending(reason)
+                _current_session["phone_lookup_inflight"] = False
+                _snooze_silence_prompts(snooze_s, reason=reason)
+
+                async def _say_prompt() -> None:
+                    try:
+                        await agent.say(message_text, allow_interruptions=True)
+                        _current_session["forced_response_suppress_llm_until"] = time.time() + suppress_s
+                        mark_agent_speaking()
+                    finally:
+                        _current_session["forced_response_manual_say_active"] = False
+
+                asyncio.create_task(_say_prompt())
+
+            if local_flow_state == FLOW_CHECKING_PHONE_NUMBER:
+                room_log("PHONE_FLOW_TURN_IGNORED", reason="lookup_already_running", turn_id=current_turn_id)
+                return True
+
+            if local_flow_state == FLOW_AWAITING_PHONE_NUMBER:
+                if not raw_digits:
+                    if get_agent_language() == "el":
+                        msg = "Παρακαλώ πείτε τον αριθμό τηλεφώνου που χρησιμοποιήσατε για την παραγγελία, ψηφίο προς ψηφίο."
+                    else:
+                        msg = "Please provide the phone number used for the order, digit by digit."
+                    _schedule_manual_prompt(msg, reason="awaiting_phone_digits")
+                    return True
+
+                combined_digits = _append_phone_digits_from_turn(user_text)
+                phone_candidate = _normalize_phone_for_lookup(combined_digits)
+                if phone_candidate:
+                    _reset_phone_digit_buffer("phone_candidate_captured")
+                    _current_session["pending_phone_candidate"] = phone_candidate
+                    _set_support_flow_state(FLOW_AWAITING_PHONE_CONFIRMATION, reason="phone_candidate_captured")
+                    room_log("PHONE_CANDIDATE_CAPTURED", phone=phone_candidate, turn_id=current_turn_id)
+                    _current_session["forced_response_manual_say_active"] = True
+                    _current_session["forced_response_spoken_turn_id"] = current_turn_id
+                    _current_session["forced_response_suppress_llm_until"] = time.time() + 8.0
+                    _clear_pending_lookup_wait_phrase("phone_confirmation_prompt")
+                    _clear_lookup_pending("phone_confirmation_prompt")
+                    _current_session["phone_lookup_inflight"] = False
+                    _snooze_silence_prompts(8.0, reason="phone_confirmation_prompt")
+                    asyncio.create_task(
+                        _speak_phone_confirmation_prompt(
+                            current_turn_id,
+                            phone_candidate,
+                            "phone_candidate_captured",
+                        )
+                    )
+                    return True
+
+                min_digits = _as_int(
+                    get_agent_setting("phone_lookup_min_digits", 10),
+                    10,
+                    min_value=7,
+                    max_value=15,
+                )
+                if len(combined_digits) < min_digits:
+                    if get_agent_language() == "el":
+                        msg = "Σας ακούω. Συνεχίστε με τα υπόλοιπα ψηφία του τηλεφώνου, παρακαλώ."
+                    else:
+                        msg = "I’m listening. Please continue with the remaining digits of the phone number."
+                    _schedule_manual_prompt(msg, reason="phone_digits_partial", suppress_s=6.0)
+                    return True
+
+                _reset_phone_digit_buffer("invalid_complete_phone")
+                _current_session["pending_phone_candidate"] = None
+                _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="invalid_complete_phone")
+                if get_agent_language() == "el":
+                    msg = (
+                        "Αυτό δεν φαίνεται να είναι πλήρης αριθμός τηλεφώνου. "
+                        f"Παρακαλώ επαναλάβετε ολόκληρο τον αριθμό, τουλάχιστον {min_digits} ψηφία, ψηφίο προς ψηφίο."
+                    )
+                else:
+                    msg = (
+                        "That does not look like a complete phone number. "
+                        f"Please repeat the full number, at least {min_digits} digits, digit by digit."
+                    )
+                _schedule_manual_prompt(msg, reason="invalid_complete_phone")
+                room_log("INVALID_OR_PARTIAL_PHONE_REJECTED", digits=combined_digits, turn_id=current_turn_id)
+                return True
+
+            # FLOW_AWAITING_PHONE_CONFIRMATION
+            phone_candidate = _normalize_phone_for_lookup(user_text or "")
+            if phone_candidate:
+                _reset_phone_digit_buffer("phone_candidate_captured")
+                _current_session["pending_phone_candidate"] = phone_candidate
+                _set_support_flow_state(FLOW_AWAITING_PHONE_CONFIRMATION, reason="phone_candidate_captured")
+                room_log("PHONE_CANDIDATE_CAPTURED", phone=phone_candidate, turn_id=current_turn_id)
+                _current_session["forced_response_manual_say_active"] = True
+                _current_session["forced_response_spoken_turn_id"] = current_turn_id
+                _current_session["forced_response_suppress_llm_until"] = time.time() + 8.0
+                _clear_pending_lookup_wait_phrase("phone_confirmation_prompt")
+                _clear_lookup_pending("phone_confirmation_prompt")
+                _current_session["phone_lookup_inflight"] = False
+                _snooze_silence_prompts(8.0, reason="phone_confirmation_prompt")
+                asyncio.create_task(
+                    _speak_phone_confirmation_prompt(
+                        current_turn_id,
+                        phone_candidate,
+                        "phone_candidate_captured",
+                    )
+                )
+                return True
+
+            if pending_phone and is_affirmative:
+                _current_session["pending_phone_candidate"] = None
+                _set_support_flow_state(FLOW_CHECKING_PHONE_NUMBER, reason="phone_confirmation_yes")
+                _current_session["forced_response_spoken_turn_id"] = current_turn_id
+                _current_session["forced_response_suppress_llm_until"] = time.time() + 30.0
+                _current_session["phone_forced_pending_turn_id"] = current_turn_id
+                _set_lookup_pending(pending_phone, reason="forced_phone_lookup_scheduled")
+                _snooze_silence_prompts(phone_lookup_schedule_snooze, reason="phone_lookup_scheduled")
+                asyncio.create_task(
+                    _force_lookup_by_phone(current_turn_id, pending_phone, "phone_confirmation_yes")
+                )
+                room_log("PHONE_LOOKUP_FORCED_TRIGGERED", phone=pending_phone, turn_id=current_turn_id)
+                return True
+
+            if is_negative:
+                _current_session["pending_phone_candidate"] = None
+                _reset_phone_digit_buffer("phone_confirmation_rejected")
+                _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="phone_confirmation_rejected")
+                if get_agent_language() == "el":
+                    msg = "Εντάξει. Πείτε ξανά τον αριθμό τηλεφώνου σας, ψηφίο προς ψηφίο."
+                else:
+                    msg = "Okay. Please repeat your phone number again, digit by digit."
+                _schedule_manual_prompt(msg, reason="phone_confirmation_rejected")
+                return True
+
+            if raw_digits:
+                combined_digits = _append_phone_digits_from_turn(user_text)
+                min_digits = _as_int(
+                    get_agent_setting("phone_lookup_min_digits", 10),
+                    10,
+                    min_value=7,
+                    max_value=15,
+                )
+                if len(combined_digits) < min_digits:
+                    if get_agent_language() == "el":
+                        msg = "Σας ακούω. Συνεχίστε με τα υπόλοιπα ψηφία του τηλεφώνου, παρακαλώ."
+                    else:
+                        msg = "I’m listening. Please continue with the remaining digits of the phone number."
+                    _schedule_manual_prompt(msg, reason="phone_digits_partial", suppress_s=6.0)
+                else:
+                    _reset_phone_digit_buffer("invalid_complete_phone")
+                    if get_agent_language() == "el":
+                        msg = (
+                            "Αυτό δεν φαίνεται να είναι πλήρης αριθμός τηλεφώνου. "
+                            f"Παρακαλώ επαναλάβετε ολόκληρο τον αριθμό, τουλάχιστον {min_digits} ψηφία, ψηφίο προς ψηφίο."
+                        )
+                    else:
+                        msg = (
+                            "That does not look like a complete phone number. "
+                            f"Please repeat the full number, at least {min_digits} digits, digit by digit."
+                        )
+                    _schedule_manual_prompt(msg, reason="invalid_complete_phone")
+                return True
+
+            if pending_phone:
+                asyncio.create_task(
+                    _speak_phone_confirmation_prompt(
+                        current_turn_id,
+                        pending_phone,
+                        "non_confirmation_reply",
+                        reprompt=True,
+                    )
+                )
+                return True
+            if get_agent_language() == "el":
+                msg = "Παρακαλώ πείτε ξανά τον αριθμό τηλεφώνου σας, ψηφίο προς ψηφίο."
+            else:
+                msg = "Please say your phone number again, digit by digit."
+            _schedule_manual_prompt(msg, reason="awaiting_phone_recovery")
+            return True
+
+        if phone_flow_active:
+            handled = _handle_phone_flow_turn(
+                user_text=user_text,
+                current_turn_id=current_turn_id,
+                is_affirmative=is_affirmative,
+                is_negative=is_negative,
+            )
+            if handled:
+                return
 
         # Deterministic state bootstrap: treat the first open-ended complaint as issue context,
         # then ask for order number unless caller explicitly says they don't have it.
@@ -4508,7 +4807,6 @@ async def entrypoint(ctx: JobContext):
                     ),
                 )
 
-        normalized_phone_candidate = _normalize_phone_for_lookup(user_text or "")
         has_digits = bool(_extract_digit_parts(user_text))
         if (
             flow_state == FLOW_AWAITING_ORDER_NUMBER
@@ -4535,56 +4833,16 @@ async def entrypoint(ctx: JobContext):
                         "- If caller says they don't have it, then request the phone number used in the order."
                     ),
                 )
-        elif flow_state == FLOW_AWAITING_PHONE_NUMBER and not normalized_phone_candidate:
-            agent.chat_ctx.append(
-                role="system",
-                text=(
-                    "SUPPORT FLOW - REQUEST PHONE NUMBER:\n"
-                    "- Ask the caller to provide the mobile number used for the order.\n"
-                    "- Ask them to say it digit by digit."
-                ),
-            )
-        elif (
-            flow_state == FLOW_AWAITING_PHONE_CONFIRMATION
-            and not _is_affirmative_utterance(user_text)
-            and not _is_negative_utterance(user_text)
-            and not normalized_phone_candidate
-        ):
-            pending_phone = str(_current_session.get("pending_phone_candidate") or "")
-            if pending_phone:
-                asyncio.create_task(
-                    _speak_phone_confirmation_prompt(
-                        current_turn_id,
-                        pending_phone,
-                        "non_confirmation_reply",
-                        reprompt=True,
-                    )
-                )
 
         if _mentions_no_order_number(user_text):
+            _reset_phone_digit_buffer("starting_phone_flow")
             _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="no_order_number")
             room_log("NUMBER_MODE_HINT", mode="phone", reason="no_order_number")
-        elif normalized_order_candidate:
+        elif normalized_order_candidate and flow_state == FLOW_AWAITING_ORDER_NUMBER:
             # Caller provided a valid order id, so clear phone-capture context.
             _current_session["pending_phone_candidate"] = None
+            _reset_phone_digit_buffer("back_to_order_flow")
             _set_support_flow_state(FLOW_CHECKING_ORDER_NUMBER, reason="order_number_provided")
-        # Clear stale pending forced-turn markers from previous turns.
-        if (
-            int(_current_session.get("phone_forced_pending_turn_id") or 0) < current_turn_id
-            and not bool(_current_session.get("phone_lookup_inflight"))
-        ):
-            _current_session["phone_forced_pending_turn_id"] = 0
-        if (
-            int(_current_session.get("details_forced_pending_turn_id") or 0) < current_turn_id
-            and not bool(_current_session.get("details_lookup_inflight"))
-        ):
-            _current_session["details_forced_pending_turn_id"] = 0
-        # New user turn cancels stale forced-response suppression window.
-        last_forced_response_turn = int(_current_session.get("forced_response_spoken_turn_id") or 0)
-        if current_turn_id > last_forced_response_turn:
-            _current_session["forced_response_suppress_llm_until"] = 0.0
-            _current_session["forced_response_spoken_text"] = ""
-
         _current_session["number_mode_lock"] = None
         _current_session["number_mode_turn_id"] = 0
         flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
@@ -4617,130 +4875,10 @@ async def entrypoint(ctx: JobContext):
 
         now = time.time()
         explicit_details_request = _explicit_more_order_details_request(user_text)
-        is_affirmative = _is_affirmative_utterance(user_text)
-        is_negative = _is_negative_utterance(user_text)
-
-        last_agent_text = str(_current_session.get("last_agent_text") or "")
-        phone_mode_locked = str(_current_session.get("number_mode_lock") or "") == "phone"
-        phone_confirmation_context = _is_phone_confirmation_prompt(last_agent_text)
-        phone_lookup_schedule_snooze = _as_float(
-            get_agent_setting("phone_lookup_schedule_snooze_seconds", 20.0),
-            20.0,
-            min_value=5.0,
-            max_value=90.0,
-        )
 
         # Drop stale phone candidate if this turn is clearly back to order-id flow.
         if inferred_mode == "order":
             _current_session["pending_phone_candidate"] = None
-
-        flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
-        phone_flow_active = flow_state in phone_flow_states
-        if phone_flow_active and (
-            phone_mode_locked
-            or phone_confirmation_context
-            or flow_state == FLOW_AWAITING_PHONE_CONFIRMATION
-        ):
-            phone_candidate = _normalize_phone_for_lookup(user_text or "")
-            raw_digits = "".join(_extract_digit_parts(user_text or ""))
-            if phone_candidate:
-                _current_session["pending_phone_candidate"] = phone_candidate
-                _set_support_flow_state(
-                    FLOW_AWAITING_PHONE_CONFIRMATION,
-                    reason="phone_candidate_captured",
-                )
-                room_log(
-                    "PHONE_CANDIDATE_CAPTURED",
-                    phone=phone_candidate,
-                    turn_id=current_turn_id,
-                )
-                # This turn is now deterministic: block any parallel LLM response.
-                now = time.time()
-                _current_session["forced_response_manual_say_active"] = True
-                _current_session["forced_response_spoken_turn_id"] = current_turn_id
-                _current_session["forced_response_suppress_llm_until"] = now + 8.0
-                _clear_pending_lookup_wait_phrase("phone_confirmation_prompt")
-                _clear_lookup_pending("phone_confirmation_prompt")
-                _current_session["phone_lookup_inflight"] = False
-                _snooze_silence_prompts(8.0, reason="phone_confirmation_prompt")
-                asyncio.create_task(
-                    _speak_phone_confirmation_prompt(
-                        current_turn_id,
-                        phone_candidate,
-                        "phone_candidate_captured",
-                    )
-                )
-                return
-            elif raw_digits:
-                # User gave numeric input, but it's not a valid Greek mobile.
-                _current_session["pending_phone_candidate"] = None
-                _current_session["number_mode_lock"] = "phone"
-                _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="invalid_or_partial_phone_digits")
-                _current_session["forced_response_manual_say_active"] = True
-                _current_session["forced_response_spoken_turn_id"] = current_turn_id
-                _current_session["forced_response_suppress_llm_until"] = time.time() + 8.0
-                _clear_pending_lookup_wait_phrase("invalid_or_partial_phone_digits")
-                _clear_lookup_pending("invalid_or_partial_phone_digits")
-                _current_session["phone_lookup_inflight"] = False
-                _snooze_silence_prompts(8.0, reason="invalid_or_partial_phone_digits")
-
-                async def _say_invalid_phone_prompt() -> None:
-                    if call_ended["value"] or _current_session.get("should_end"):
-                        room_log("INVALID_PHONE_PROMPT_SKIP", reason="call_ended", turn_id=current_turn_id)
-                        return
-                    live_agent = _current_session.get("agent")
-                    if not live_agent:
-                        _current_session["forced_response_manual_say_active"] = False
-                        return
-                    min_digits = _as_int(
-                        get_agent_setting("phone_lookup_min_digits", 10),
-                        10,
-                        min_value=7,
-                        max_value=15,
-                    )
-                    lang = get_agent_language()
-                    if lang == "el":
-                        msg = (
-                            "Αυτό δεν φαίνεται να είναι πλήρης αριθμός τηλεφώνου. "
-                            f"Παρακαλώ επαναλάβετε ολόκληρο τον αριθμό, τουλάχιστον {min_digits} ψηφία, ψηφίο προς ψηφίο."
-                        )
-                    else:
-                        msg = (
-                            "That does not look like a complete phone number. "
-                            f"Please repeat the full number, at least {min_digits} digits, digit by digit."
-                        )
-                    _current_session["forced_response_spoken_text"] = msg
-                    try:
-                        await live_agent.say(msg, allow_interruptions=True)
-                        _current_session["forced_response_suppress_llm_until"] = time.time() + 8.0
-                        mark_agent_speaking()
-                        _snooze_silence_prompts(8.0, reason="invalid_or_partial_phone_digits_prompt")
-                    finally:
-                        _current_session["forced_response_manual_say_active"] = False
-
-                asyncio.create_task(_say_invalid_phone_prompt())
-                room_log("INVALID_OR_PARTIAL_PHONE_REJECTED", digits=raw_digits, turn_id=current_turn_id)
-                return
-            elif is_negative:
-                # Caller rejected previously repeated number; clear candidate.
-                _current_session["pending_phone_candidate"] = None
-                _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="phone_confirmation_rejected")
-
-            pending_phone = str(_current_session.get("pending_phone_candidate") or "")
-            awaiting_phone_confirmation = _is_phone_confirmation_pending()
-            if pending_phone and is_affirmative and (awaiting_phone_confirmation or phone_confirmation_context):
-                # Consume candidate immediately to avoid duplicate triggers on repeated "yes".
-                _current_session["pending_phone_candidate"] = None
-                _set_support_flow_state(FLOW_CHECKING_PHONE_NUMBER, reason="phone_confirmation_yes")
-                _current_session["forced_response_spoken_turn_id"] = current_turn_id
-                _current_session["forced_response_suppress_llm_until"] = time.time() + 30.0
-                _current_session["phone_forced_pending_turn_id"] = current_turn_id
-                _set_lookup_pending(pending_phone, reason="forced_phone_lookup_scheduled")
-                _snooze_silence_prompts(phone_lookup_schedule_snooze, reason="phone_lookup_scheduled")
-                asyncio.create_task(
-                    _force_lookup_by_phone(current_turn_id, pending_phone, "phone_confirmation_yes")
-                )
-                room_log("PHONE_LOOKUP_FORCED_TRIGGERED", phone=pending_phone, turn_id=current_turn_id)
 
         details_pending = bool(_current_session.get("details_confirmation_pending"))
         details_pending_until = float(_current_session.get("details_confirmation_pending_until") or 0.0)
