@@ -2913,32 +2913,56 @@ async def entrypoint(ctx: JobContext):
 
     def _format_user_text_for_transcript(raw_text: str) -> str:
         """
-        Keep original user text, but append extracted numeric digits for saved transcripts.
-        Example: "Έξι εννιά ..." -> "Έξι εννιά ... [digits: 6942633977]"
+        Normalize number-heavy utterances to raw digits for saved transcripts.
+        Avoid "[digits: ...]" annotations and keep transcript clean.
         """
         text = (raw_text or "").strip()
         if not text:
             return text
-        if "[digits:" in text.lower():
-            return text
 
         phone_candidate = _normalize_phone_for_lookup(text)
         if phone_candidate:
-            digits_value = phone_candidate
-        else:
-            order_candidate = _normalize_order_id_strict(text)
-            if order_candidate:
-                digits_value = order_candidate
-            else:
-                parts = _extract_digit_parts(text)
-                joined = "".join(parts)
-                if len(joined) < 4:
-                    return text
-                digits_value = joined
+            return phone_candidate
 
-        if re.search(rf"(?<!\d){re.escape(digits_value)}(?!\d)", text):
+        order_candidate = _normalize_order_id_strict(text)
+        if order_candidate:
+            return order_candidate
+
+        parts = _extract_digit_parts(text)
+        joined = "".join(parts)
+        if len(joined) >= 4 and _is_digit_collection_utterance(text):
+            return joined
+
+        return text
+
+    def _format_agent_text_for_transcript(raw_text: str) -> str:
+        """
+        Normalize agent phone-confirmation lines to show numeric digits in transcripts.
+        This affects transcript/log text only, not tool inputs.
+        """
+        text = (raw_text or "").strip()
+        if not text:
             return text
-        return f"{text} [digits: {digits_value}]"
+        if get_agent_language() != "el":
+            return text
+
+        if not _is_phone_confirmation_prompt(text):
+            return text
+
+        pending_phone = str(_current_session.get("pending_phone_candidate") or "").strip()
+        if pending_phone and re.fullmatch(r"69\d{8}", pending_phone):
+            return f"?? ?????????????? ??? ?????? ????????? ???: {pending_phone}. ????? ?????;"
+
+        digits = _extract_greek_mobile_from_digits(_digits_from_phrase(text))
+        if not digits:
+            fallback = "".join(_extract_digit_parts(text))
+            if len(fallback) >= 4:
+                digits = fallback
+
+        if digits:
+            return f"?? ?????????????? ??? ?????? ????????? ???: {digits}. ????? ?????;"
+
+        return text
 
     def _mentions_no_order_number(text: str) -> bool:
         """Detect caller intent that they do not have an order number."""
@@ -4709,11 +4733,12 @@ async def entrypoint(ctx: JobContext):
                             text=_truncate(display_text or text),
                         )
                         return
-                asyncio.create_task(send_agent_transcript(display_text or text))
-                asyncio.create_task(send_agent_info(display_text or text))
-                conversation_transcript.append(f"Agent: {display_text or text}")
-                _current_session["last_agent_text"] = (display_text or text)
-                normalized_display = _normalize_switch_text(display_text or text)
+                transcript_text = _format_agent_text_for_transcript(display_text or text)
+                asyncio.create_task(send_agent_transcript(transcript_text))
+                asyncio.create_task(send_agent_info(transcript_text))
+                conversation_transcript.append(f"Agent: {transcript_text}")
+                _current_session["last_agent_text"] = transcript_text
+                normalized_display = _normalize_switch_text(transcript_text)
                 details_prompted = bool(
                     re.search(
                         r"(would you like .*details.*order|complete order details|more details about this order|θέλετε .*λεπτομέρειες.*παραγγελία)",
@@ -4728,7 +4753,7 @@ async def entrypoint(ctx: JobContext):
                     else:
                         _current_session["details_confirmation_pending"] = False
                         _current_session["details_confirmation_pending_until"] = 0.0
-                if _is_clarification_prompt_text(display_text or text):
+                if _is_clarification_prompt_text(transcript_text):
                     clarification_grace = _as_float(
                         get_agent_setting("clarification_silence_grace_seconds", 12.0),
                         12.0,
@@ -4737,11 +4762,11 @@ async def entrypoint(ctx: JobContext):
                     )
                     _snooze_silence_prompts(clarification_grace, reason="clarification_prompt")
                 if _current_session.get("lookup_pending"):
-                    lookup_state_in_text = _classify_lookup_result(display_text or text)
+                    lookup_state_in_text = _classify_lookup_result(transcript_text)
                     if details_prompted or lookup_state_in_text == "not_found":
                         _clear_lookup_pending(reason="agent_committed_lookup_result")
-                logger.info(f"agent_speech_committed: {(display_text or text)[:50]}...")
-                room_log("AGENT_TEXT", text=_truncate(display_text or text))
+                logger.info(f"agent_speech_committed: {transcript_text[:50]}...")
+                room_log("AGENT_TEXT", text=_truncate(transcript_text))
         except Exception as e:
             logger.error(f"Error in agent_speech_committed: {e}")
     # Track detailed metrics from pipeline
