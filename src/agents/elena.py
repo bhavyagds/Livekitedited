@@ -1023,6 +1023,51 @@ def _reset_phone_digit_buffer(reason: str = "") -> None:
     _current_session["phone_digit_buffer_updated_at"] = 0.0
 
 
+def _reset_phone_collection_state(reason: str = "") -> None:
+    """Reset all phone collection state before entering/re-entering phone flow."""
+    room_log(
+        "PHONE_COLLECTION_RESET",
+        reason=reason,
+        pending_phone=_current_session.get("pending_phone_candidate"),
+        buffer=_current_session.get("phone_digit_buffer"),
+    )
+    _current_session["pending_phone_candidate"] = None
+    _current_session["phone_digit_buffer"] = ""
+    _current_session["phone_digit_buffer_updated_at"] = 0.0
+    _current_session["phone_lookup_inflight"] = False
+    _current_session["phone_forced_turn_id"] = 0
+    _current_session["phone_forced_pending_turn_id"] = 0
+
+
+def _reset_support_session_state(reason: str = "") -> None:
+    """Reset deterministic support/session state at call start."""
+    room_log("SUPPORT_SESSION_RESET", reason=reason)
+    _current_session["support_flow_state"] = FLOW_IDLE
+    _current_session["support_issue"] = None
+    _current_session["number_mode_lock"] = None
+    _current_session["number_mode_turn_id"] = 0
+
+    _reset_phone_collection_state(f"{reason}:phone")
+
+    _current_session["lookup_pending"] = False
+    _current_session["lookup_pending_started_at"] = 0.0
+    _current_session["lookup_pending_order"] = None
+    _current_session["lookup_progress_prompt_until"] = 0.0
+
+    _current_session["details_lookup_inflight"] = False
+    _current_session["details_confirmation_pending"] = False
+    _current_session["details_confirmation_pending_until"] = 0.0
+    _current_session["last_lookup_state"] = "unknown"
+    _current_session["last_lookup_order"] = None
+
+    _current_session["forced_response_manual_say_active"] = False
+    _current_session["forced_response_spoken_turn_id"] = 0
+    _current_session["forced_response_spoken_text"] = ""
+    _current_session["forced_response_suppress_llm_until"] = 0.0
+
+    _clear_pending_lookup_wait_phrase("support_session_reset")
+
+
 def _append_phone_digits_from_turn(user_text: str) -> str:
     """Append digits from this turn into session buffer for chunked phone capture."""
     raw_digits = "".join(_extract_digit_parts(user_text or ""))
@@ -2916,6 +2961,7 @@ async def entrypoint(ctx: JobContext):
     _current_session["job_id"] = job_id
     room_log("ROOM_START", call_type=call_type, caller_number=caller_number)
     logger.info(f"Per-room log file: {room_log_path}")
+    _reset_support_session_state("new_call_started")
     
     # Reset session state
     _current_session["should_end"] = False
@@ -4328,6 +4374,18 @@ async def entrypoint(ctx: JobContext):
             room_log("PHONE_LOOKUP_FORCED_SKIP", reason="call_ended", turn_id=turn_id)
             return
 
+        flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
+        if flow_state != FLOW_CHECKING_PHONE_NUMBER:
+            room_log(
+                "PHONE_LOOKUP_FORCED_BLOCKED",
+                reason="phone_not_confirmed",
+                flow_state=flow_state,
+                phone=phone,
+            )
+            _clear_lookup_pending("phone_not_confirmed")
+            _current_session["phone_lookup_inflight"] = False
+            return
+
         normalized_phone = _normalize_phone_for_lookup(phone or "")
         if not normalized_phone:
             room_log(
@@ -4620,6 +4678,43 @@ async def entrypoint(ctx: JobContext):
 
                 asyncio.create_task(_say_prompt())
 
+            def _schedule_phone_confirmation_from_turn(phone_candidate: str, trigger_reason: str) -> bool:
+                """Only confirm phone when current turn actually contains digits."""
+                if not raw_digits:
+                    room_log(
+                        "PHONE_CONFIRMATION_BLOCKED",
+                        reason="no_digits_in_current_user_turn",
+                        user_text=_truncate(user_text),
+                        stale_pending_phone=_current_session.get("pending_phone_candidate"),
+                        stale_buffer=_current_session.get("phone_digit_buffer"),
+                    )
+                    _reset_phone_collection_state("blocked_stale_phone_confirmation")
+                    _set_support_flow_state(
+                        FLOW_AWAITING_PHONE_NUMBER,
+                        reason="blocked_stale_phone_confirmation",
+                    )
+                    return False
+
+                _reset_phone_digit_buffer("phone_candidate_captured")
+                _current_session["pending_phone_candidate"] = phone_candidate
+                _set_support_flow_state(FLOW_AWAITING_PHONE_CONFIRMATION, reason="phone_candidate_captured")
+                room_log("PHONE_CANDIDATE_CAPTURED", phone=phone_candidate, turn_id=current_turn_id)
+                _current_session["forced_response_manual_say_active"] = True
+                _current_session["forced_response_spoken_turn_id"] = current_turn_id
+                _current_session["forced_response_suppress_llm_until"] = time.time() + 8.0
+                _clear_pending_lookup_wait_phrase("phone_confirmation_prompt")
+                _clear_lookup_pending("phone_confirmation_prompt")
+                _current_session["phone_lookup_inflight"] = False
+                _snooze_silence_prompts(8.0, reason="phone_confirmation_prompt")
+                asyncio.create_task(
+                    _speak_phone_confirmation_prompt(
+                        current_turn_id,
+                        phone_candidate,
+                        trigger_reason,
+                    )
+                )
+                return True
+
             if local_flow_state == FLOW_CHECKING_PHONE_NUMBER:
                 room_log("PHONE_FLOW_TURN_IGNORED", reason="lookup_already_running", turn_id=current_turn_id)
                 return True
@@ -4636,25 +4731,10 @@ async def entrypoint(ctx: JobContext):
                 combined_digits = _append_phone_digits_from_turn(user_text)
                 phone_candidate = _normalize_phone_for_lookup(combined_digits)
                 if phone_candidate:
-                    _reset_phone_digit_buffer("phone_candidate_captured")
-                    _current_session["pending_phone_candidate"] = phone_candidate
-                    _set_support_flow_state(FLOW_AWAITING_PHONE_CONFIRMATION, reason="phone_candidate_captured")
-                    room_log("PHONE_CANDIDATE_CAPTURED", phone=phone_candidate, turn_id=current_turn_id)
-                    _current_session["forced_response_manual_say_active"] = True
-                    _current_session["forced_response_spoken_turn_id"] = current_turn_id
-                    _current_session["forced_response_suppress_llm_until"] = time.time() + 8.0
-                    _clear_pending_lookup_wait_phrase("phone_confirmation_prompt")
-                    _clear_lookup_pending("phone_confirmation_prompt")
-                    _current_session["phone_lookup_inflight"] = False
-                    _snooze_silence_prompts(8.0, reason="phone_confirmation_prompt")
-                    asyncio.create_task(
-                        _speak_phone_confirmation_prompt(
-                            current_turn_id,
-                            phone_candidate,
-                            "phone_candidate_captured",
-                        )
+                    return _schedule_phone_confirmation_from_turn(
+                        phone_candidate,
+                        "phone_candidate_captured",
                     )
-                    return True
 
                 min_digits = _as_int(
                     get_agent_setting("phone_lookup_min_digits", 10),
@@ -4690,36 +4770,21 @@ async def entrypoint(ctx: JobContext):
             # FLOW_AWAITING_PHONE_CONFIRMATION
             phone_candidate = _normalize_phone_for_lookup(user_text or "")
             if phone_candidate:
-                _reset_phone_digit_buffer("phone_candidate_captured")
-                _current_session["pending_phone_candidate"] = phone_candidate
-                _set_support_flow_state(FLOW_AWAITING_PHONE_CONFIRMATION, reason="phone_candidate_captured")
-                room_log("PHONE_CANDIDATE_CAPTURED", phone=phone_candidate, turn_id=current_turn_id)
-                _current_session["forced_response_manual_say_active"] = True
-                _current_session["forced_response_spoken_turn_id"] = current_turn_id
-                _current_session["forced_response_suppress_llm_until"] = time.time() + 8.0
-                _clear_pending_lookup_wait_phrase("phone_confirmation_prompt")
-                _clear_lookup_pending("phone_confirmation_prompt")
-                _current_session["phone_lookup_inflight"] = False
-                _snooze_silence_prompts(8.0, reason="phone_confirmation_prompt")
-                asyncio.create_task(
-                    _speak_phone_confirmation_prompt(
-                        current_turn_id,
-                        phone_candidate,
-                        "phone_candidate_captured",
-                    )
+                return _schedule_phone_confirmation_from_turn(
+                    phone_candidate,
+                    "phone_candidate_captured",
                 )
-                return True
 
             if pending_phone and is_affirmative:
                 _current_session["pending_phone_candidate"] = None
-                _set_support_flow_state(FLOW_CHECKING_PHONE_NUMBER, reason="phone_confirmation_yes")
+                _set_support_flow_state(FLOW_CHECKING_PHONE_NUMBER, reason="phone_confirmed")
                 _current_session["forced_response_spoken_turn_id"] = current_turn_id
                 _current_session["forced_response_suppress_llm_until"] = time.time() + 30.0
                 _current_session["phone_forced_pending_turn_id"] = current_turn_id
                 _set_lookup_pending(pending_phone, reason="forced_phone_lookup_scheduled")
                 _snooze_silence_prompts(phone_lookup_schedule_snooze, reason="phone_lookup_scheduled")
                 asyncio.create_task(
-                    _force_lookup_by_phone(current_turn_id, pending_phone, "phone_confirmation_yes")
+                    _force_lookup_by_phone(current_turn_id, pending_phone, "phone_confirmed")
                 )
                 room_log("PHONE_LOOKUP_FORCED_TRIGGERED", phone=pending_phone, turn_id=current_turn_id)
                 return True
@@ -4765,15 +4830,24 @@ async def entrypoint(ctx: JobContext):
                 return True
 
             if pending_phone:
-                asyncio.create_task(
-                    _speak_phone_confirmation_prompt(
-                        current_turn_id,
-                        pending_phone,
-                        "non_confirmation_reply",
-                        reprompt=True,
+                if not raw_digits:
+                    room_log(
+                        "PHONE_CONFIRMATION_BLOCKED",
+                        reason="no_digits_in_current_user_turn",
+                        user_text=_truncate(user_text),
+                        stale_pending_phone=_current_session.get("pending_phone_candidate"),
+                        stale_buffer=_current_session.get("phone_digit_buffer"),
                     )
+                    _reset_phone_collection_state("blocked_stale_phone_confirmation")
+                    _set_support_flow_state(
+                        FLOW_AWAITING_PHONE_NUMBER,
+                        reason="blocked_stale_phone_confirmation",
+                    )
+                    return True
+                return _schedule_phone_confirmation_from_turn(
+                    pending_phone,
+                    "non_confirmation_reply",
                 )
-                return True
             if get_agent_language() == "el":
                 msg = "Παρακαλώ πείτε ξανά τον αριθμό τηλεφώνου σας, ψηφίο προς ψηφίο."
             else:
@@ -4835,9 +4909,41 @@ async def entrypoint(ctx: JobContext):
                 )
 
         if _mentions_no_order_number(user_text):
-            _reset_phone_digit_buffer("starting_phone_flow")
-            _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="no_order_number")
-            room_log("NUMBER_MODE_HINT", mode="phone", reason="no_order_number")
+            _reset_phone_collection_state("user_has_no_order_number")
+            _clear_lookup_pending("user_has_no_order_number")
+            _clear_pending_lookup_wait_phrase("user_has_no_order_number")
+            _current_session["number_mode_lock"] = "phone"
+            _set_support_flow_state(
+                FLOW_AWAITING_PHONE_NUMBER,
+                reason="user_has_no_order_number",
+            )
+            _current_session["forced_response_manual_say_active"] = True
+            _current_session["forced_response_spoken_turn_id"] = current_turn_id
+            _current_session["forced_response_suppress_llm_until"] = time.time() + 8.0
+            _snooze_silence_prompts(8.0, reason="ask_phone_after_no_order_number")
+
+            async def _ask_phone_number() -> None:
+                live_agent = _current_session.get("agent")
+                if not live_agent:
+                    _current_session["forced_response_manual_say_active"] = False
+                    return
+                try:
+                    if get_agent_language() == "el":
+                        msg = (
+                            "Κατανοητό. Μπορείτε να μου δώσετε τον αριθμό τηλεφώνου "
+                            "που χρησιμοποιήσατε για την παραγγελία, ψηφίο προς ψηφίο;"
+                        )
+                    else:
+                        msg = (
+                            "No problem. Please give me the phone number used for the order, "
+                            "digit by digit."
+                        )
+                    await live_agent.say(msg, allow_interruptions=True)
+                finally:
+                    _current_session["forced_response_manual_say_active"] = False
+
+            asyncio.create_task(_ask_phone_number())
+            return
         elif normalized_order_candidate and flow_state == FLOW_AWAITING_ORDER_NUMBER:
             # Caller provided a valid order id, so clear phone-capture context.
             _current_session["pending_phone_candidate"] = None
