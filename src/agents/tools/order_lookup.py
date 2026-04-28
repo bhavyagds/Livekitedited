@@ -169,8 +169,14 @@ async def lookup_order_by_phone(
     
     if not orders:
         if agent_lang == "el":
-            return f"Δεν βρέθηκε καμία παραγγελία για τον αριθμό {phone}. Μήπως έχετε τον 5-ψήφιο αριθμό παραγγελίας από το email σας;"
-        return f"I couldn't find any orders matching the phone number {phone}. Do you have your 5-digit order number from your confirmation email?"
+            return (
+                f"Δεν βρέθηκε καμία παραγγελία συνδεδεμένη με αυτόν τον αριθμό τηλεφώνου: {phone}. "
+                "Μπορείτε να ελέγξετε ξανά τον αριθμό και να τον πείτε ψηφίο προς ψηφίο;"
+            )
+        return (
+            f"I couldn't find any orders attached to this phone number: {phone}. "
+            "Please double-check the number and say it again digit by digit."
+        )
     
     # Store the first/most recent order as "last" for potential detailed lookup
     _last_order_cache["last"] = orders[0]

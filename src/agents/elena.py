@@ -248,12 +248,18 @@ def _normalize_order_id_strict(raw_text: str) -> Optional[str]:
 
 
 def _normalize_phone_for_lookup(raw_text: str) -> Optional[str]:
-    """Normalize and validate Greek mobile phone numbers (69XXXXXXXX)."""
+    """Normalize spoken phone text into digits for Shopify phone lookup."""
     normalized = (raw_text or "").strip().lower()
     if not normalized:
         return None
     digits = _digits_from_phrase(normalized)
-    return _extract_greek_mobile_from_digits(digits)
+    compact = re.sub(r"\D", "", digits or "")
+    if len(compact) < 7:
+        return None
+    # Keep a practical max length for global numbers while still tolerant.
+    if len(compact) > 15:
+        compact = compact[-15:]
+    return compact
 
 
 def _require_setting(key: str, *, allow_empty: bool = False):
@@ -2230,8 +2236,8 @@ class ElenaFunctionContext(llm.FunctionContext):
         if lock_mode == "order" and lock_turn == latest_turn:
             room_log("TOOL_RESULT_BLOCKED", name="lookup_order_by_phone", reason="number_mode_mismatch")
             if lang == "el":
-                return "Αυτό μοιάζει με αριθμό παραγγελίας. Δώστε μου το τηλέφωνό σας σε 10 ψηφία που ξεκινά από 69."
-            return "That looks like an order number. Please share your phone number as 10 digits starting with 69."
+                return "Αυτό μοιάζει με αριθμό παραγγελίας. Δώστε μου το τηλέφωνό σας ψηφίο προς ψηφίο."
+            return "That looks like an order number. Please share your phone number digit by digit."
 
         normalized_phone = _normalize_phone_for_lookup(phone)
         if not normalized_phone:
@@ -2939,12 +2945,17 @@ async def entrypoint(ctx: JobContext):
         return None
 
     def _normalize_phone_for_lookup(raw_text: str) -> Optional[str]:
-        """Normalize and validate Greek mobile phone numbers (69XXXXXXXX)."""
+        """Normalize spoken phone text into digits for Shopify phone lookup."""
         normalized = (raw_text or "").strip().lower()
         if not normalized:
             return None
         digits = _digits_from_phrase(normalized)
-        return _extract_greek_mobile_from_digits(digits)
+        compact = re.sub(r"\D", "", digits or "")
+        if len(compact) < 7:
+            return None
+        if len(compact) > 15:
+            compact = compact[-15:]
+        return compact
 
     def _format_user_text_for_transcript(raw_text: str) -> str:
         """
@@ -2985,17 +2996,15 @@ async def entrypoint(ctx: JobContext):
             return text
 
         pending_phone = str(_current_session.get("pending_phone_candidate") or "").strip()
-        if pending_phone and re.fullmatch(r"69\d{8}", pending_phone):
-            return f"?? ?????????????? ??? ?????? ????????? ???: {pending_phone}. ????? ?????;"
+        if pending_phone and re.fullmatch(r"\d{7,15}", pending_phone):
+            return f"Phone confirmation: {pending_phone}. Is that correct?"
 
-        digits = _extract_greek_mobile_from_digits(_digits_from_phrase(text))
-        if not digits:
-            fallback = "".join(_extract_digit_parts(text))
-            if len(fallback) >= 4:
-                digits = fallback
+        digits = "".join(_extract_digit_parts(text))
+        if len(digits) < 4:
+            digits = ""
 
         if digits:
-            return f"?? ?????????????? ??? ?????? ????????? ???: {digits}. ????? ?????;"
+            return f"Phone confirmation: {digits}. Is that correct?"
 
         return text
 
