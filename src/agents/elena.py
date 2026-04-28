@@ -11,6 +11,7 @@ import re
 import json
 import random
 import threading
+import unicodedata
 from datetime import datetime
 from typing import Annotated, Optional
 
@@ -152,7 +153,45 @@ _ORDER_WORD_TO_DIGIT: dict[str, str] = {
     "epta": "7",
     "okto": "8",
     "ennea": "9",
+    # Common STT variants for Greek "εννιά"
+    "\u03bd\u03b5\u03b1": "9",
+    "\u03bd\u03b9\u03b1": "9",
+    "\u03b5\u03bd\u03b9\u03b1": "9",
+    "\u03b5\u03bd\u03b9\u03ac": "9",
 }
+
+
+def _normalize_digit_token(token: str) -> str:
+    """Lowercase + strip accents so Greek spoken digits map reliably."""
+    normalized = unicodedata.normalize("NFD", (token or "").strip().lower())
+    return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+
+
+def _extract_greek_mobile_from_digits(raw_digits: str) -> Optional[str]:
+    """
+    Extract best Greek mobile candidate (69XXXXXXXX) from a noisy digit stream.
+    Handles extra prefixes/noise and picks the last valid 10-digit window.
+    """
+    digits = re.sub(r"\D", "", raw_digits or "")
+    if not digits:
+        return None
+
+    candidates: list[str] = []
+
+    def _collect(stream: str) -> None:
+        if re.fullmatch(r"69\d{8}", stream):
+            candidates.append(stream)
+        for match in re.finditer(r"69\d{8}", stream):
+            candidates.append(match.group(0))
+
+    _collect(digits)
+
+    if digits.startswith("0030"):
+        _collect(digits[4:])
+    elif digits.startswith("30") and len(digits) > 10:
+        _collect(digits[2:])
+
+    return candidates[-1] if candidates else None
 
 
 def _digits_from_phrase(text: str) -> str:
@@ -160,8 +199,9 @@ def _digits_from_phrase(text: str) -> str:
     tokens = re.findall(r"[a-zA-Z\u0370-\u03FF0-9]+", (text or "").lower())
     digits: list[str] = []
     for token in tokens:
-        if token in _ORDER_WORD_TO_DIGIT:
-            digits.append(_ORDER_WORD_TO_DIGIT[token])
+        normalized = _normalize_digit_token(token)
+        if normalized in _ORDER_WORD_TO_DIGIT:
+            digits.append(_ORDER_WORD_TO_DIGIT[normalized])
             continue
         if token.isdigit():
             digits.append(token)
@@ -176,8 +216,9 @@ def _extract_digit_parts(text: str) -> list[str]:
     tokens = re.findall(r"[a-zA-Z\u0370-\u03FF0-9]+", (text or "").lower())
     parts: list[str] = []
     for token in tokens:
-        if token in _ORDER_WORD_TO_DIGIT:
-            parts.append(_ORDER_WORD_TO_DIGIT[token])
+        normalized = _normalize_digit_token(token)
+        if normalized in _ORDER_WORD_TO_DIGIT:
+            parts.append(_ORDER_WORD_TO_DIGIT[normalized])
             continue
         if token.isdigit():
             parts.append(token)
@@ -212,13 +253,7 @@ def _normalize_phone_for_lookup(raw_text: str) -> Optional[str]:
     if not normalized:
         return None
     digits = _digits_from_phrase(normalized)
-    if digits.startswith("0030"):
-        digits = digits[4:]
-    elif digits.startswith("30") and len(digits) > 10:
-        digits = digits[2:]
-    if re.fullmatch(r"69\d{8}", digits):
-        return digits
-    return None
+    return _extract_greek_mobile_from_digits(digits)
 
 
 def _require_setting(key: str, *, allow_empty: bool = False):
@@ -2787,15 +2822,45 @@ async def entrypoint(ctx: JobContext):
         "epta": "7",
         "okto": "8",
         "ennea": "9",
+        "nea": "9",
+        "nia": "9",
+        "enia": "9",
     }
+
+    def _normalize_digit_token(token: str) -> str:
+        normalized = unicodedata.normalize("NFD", (token or "").strip().lower())
+        return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+
+    def _extract_greek_mobile_from_digits(raw_digits: str) -> Optional[str]:
+        digits = re.sub(r"\D", "", raw_digits or "")
+        if not digits:
+            return None
+
+        candidates: list[str] = []
+
+        def _collect(stream: str) -> None:
+            if re.fullmatch(r"69\d{8}", stream):
+                candidates.append(stream)
+            for match in re.finditer(r"69\d{8}", stream):
+                candidates.append(match.group(0))
+
+        _collect(digits)
+
+        if digits.startswith("0030"):
+            _collect(digits[4:])
+        elif digits.startswith("30") and len(digits) > 10:
+            _collect(digits[2:])
+
+        return candidates[-1] if candidates else None
 
     def _digits_from_phrase(text: str) -> str:
         """Convert mixed spoken-number tokens into a compact digits-only string."""
         tokens = re.findall(r"[a-zA-Z\u0370-\u03FF0-9]+", (text or "").lower())
         digits: list[str] = []
         for token in tokens:
-            if token in _ORDER_WORD_TO_DIGIT:
-                digits.append(_ORDER_WORD_TO_DIGIT[token])
+            normalized = _normalize_digit_token(token)
+            if normalized in _ORDER_WORD_TO_DIGIT:
+                digits.append(_ORDER_WORD_TO_DIGIT[normalized])
                 continue
             if token.isdigit():
                 digits.append(token)
@@ -2809,8 +2874,9 @@ async def entrypoint(ctx: JobContext):
         tokens = re.findall(r"[a-zA-Z\u0370-\u03FF0-9]+", (text or "").lower())
         parts: list[str] = []
         for token in tokens:
-            if token in _ORDER_WORD_TO_DIGIT:
-                parts.append(_ORDER_WORD_TO_DIGIT[token])
+            normalized = _normalize_digit_token(token)
+            if normalized in _ORDER_WORD_TO_DIGIT:
+                parts.append(_ORDER_WORD_TO_DIGIT[normalized])
                 continue
             if token.isdigit():
                 parts.append(token)
@@ -2843,13 +2909,36 @@ async def entrypoint(ctx: JobContext):
         if not normalized:
             return None
         digits = _digits_from_phrase(normalized)
-        if digits.startswith("0030"):
-            digits = digits[4:]
-        elif digits.startswith("30") and len(digits) > 10:
-            digits = digits[2:]
-        if re.fullmatch(r"69\d{8}", digits):
-            return digits
-        return None
+        return _extract_greek_mobile_from_digits(digits)
+
+    def _format_user_text_for_transcript(raw_text: str) -> str:
+        """
+        Keep original user text, but append extracted numeric digits for saved transcripts.
+        Example: "Έξι εννιά ..." -> "Έξι εννιά ... [digits: 6942633977]"
+        """
+        text = (raw_text or "").strip()
+        if not text:
+            return text
+        if "[digits:" in text.lower():
+            return text
+
+        phone_candidate = _normalize_phone_for_lookup(text)
+        if phone_candidate:
+            digits_value = phone_candidate
+        else:
+            order_candidate = _normalize_order_id_strict(text)
+            if order_candidate:
+                digits_value = order_candidate
+            else:
+                parts = _extract_digit_parts(text)
+                joined = "".join(parts)
+                if len(joined) < 4:
+                    return text
+                digits_value = joined
+
+        if re.search(rf"(?<!\d){re.escape(digits_value)}(?!\d)", text):
+            return text
+        return f"{text} [digits: {digits_value}]"
 
     def _mentions_no_order_number(text: str) -> bool:
         """Detect caller intent that they do not have an order number."""
@@ -4530,7 +4619,8 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.debug(f"Order lookup forcing skipped: {e}")
 
-        asyncio.create_task(send_user_transcript(user_text))
+        user_text_for_transcript = _format_user_text_for_transcript(user_text)
+        asyncio.create_task(send_user_transcript(user_text_for_transcript))
 
         # Reset silence timer - user is responding
         reset_silence_timer()
@@ -4552,7 +4642,7 @@ async def entrypoint(ctx: JobContext):
             _snooze_silence_prompts(short_grace, reason="short_utterance")
 
         # Add to transcript
-        conversation_transcript.append(f"User: {user_text}")
+        conversation_transcript.append(f"User: {user_text_for_transcript}")
         if abuse_detection_enabled:
             # Check for abusive language
             abuse_detected, abuse_response = check_and_respond_to_abuse(
