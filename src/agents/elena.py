@@ -2450,7 +2450,28 @@ class ElenaFunctionContext(llm.FunctionContext):
 
         pending_phone = str(_current_session.get("pending_phone_candidate") or "").strip()
         awaiting_confirmation = _is_phone_confirmation_pending()
+        flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
+        if not awaiting_confirmation and flow_state != FLOW_CHECKING_PHONE_NUMBER:
+            _current_session["pending_phone_candidate"] = normalized_phone
+            _set_support_flow_state(FLOW_AWAITING_PHONE_CONFIRMATION, reason="lookup_order_by_phone_guard")
+            _clear_pending_lookup_wait_phrase("phone_confirmation_required")
+            _clear_lookup_pending("phone_confirmation_required")
+            _current_session["phone_lookup_inflight"] = False
+            room_log(
+                "TOOL_RESULT_BLOCKED",
+                name="lookup_order_by_phone",
+                reason="phone_confirmation_required_hard_gate",
+                phone=normalized_phone,
+                flow_state=flow_state,
+            )
+            spoken_phone = _speak_digits(normalized_phone, get_agent_language())
+            if lang == "el":
+                return f"Για επιβεβαίωση, ο αριθμός τηλεφώνου σας είναι {spoken_phone}. Είναι σωστός;"
+            return f"Just to confirm, your phone number is {spoken_phone}. Is that correct?"
+
         if awaiting_confirmation:
+            _clear_lookup_pending("phone_confirmation_required")
+            _current_session["phone_lookup_inflight"] = False
             if pending_phone and normalized_phone == pending_phone:
                 _clear_pending_lookup_wait_phrase("phone_confirmation_required")
                 room_log(
@@ -2472,6 +2493,8 @@ class ElenaFunctionContext(llm.FunctionContext):
                 pending_phone=pending_phone or None,
             )
             _clear_pending_lookup_wait_phrase("phone_confirmation_pending_mismatch")
+            _clear_lookup_pending("phone_confirmation_pending_mismatch")
+            _current_session["phone_lookup_inflight"] = False
             if lang == "el":
                 return "Για να συνεχίσουμε, επιβεβαιώστε πρώτα τον αριθμό τηλεφώνου."
             return "To continue, please confirm the phone number first."
@@ -2746,6 +2769,7 @@ async def entrypoint(ctx: JobContext):
     
     startup_time = time.time()
     logger.info(f"Elena agent starting for room: {ctx.room.name}")
+    logger.warning("VOICE_AGENT_VERSION: phone-confirmation-hard-gate-2026-04-28-v4")
     
     # Track call timing for metrics
     call_start_time = time.time()
@@ -4219,6 +4243,8 @@ async def entrypoint(ctx: JobContext):
         _set_lookup_pending(normalized_phone, reason="phone_lookup_started")
         _snooze_silence_prompts(30.0, reason="phone_lookup_started")
         _current_session["lookup_progress_prompt_until"] = time.time() + 30.0
+        _current_session["last_lookup_tool_called_at"] = time.time()
+        _current_session["last_lookup_tool_order"] = normalized_phone
         _pause_silence_for_tool("forced_lookup_order_by_phone")
 
         try:
