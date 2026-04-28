@@ -257,6 +257,42 @@ def _normalize_phone_for_lookup(raw_text: str) -> Optional[str]:
     return _extract_greek_mobile_from_digits(compact)
 
 
+def _speak_digits(raw: str, language: str) -> str:
+    """Convert digits into digit-by-digit spoken words for reliable confirmations."""
+    digits = re.sub(r"\D", "", raw or "")
+    if not digits:
+        return ""
+
+    if (language or "").lower() == "el":
+        words = {
+            "0": "μηδέν",
+            "1": "ένα",
+            "2": "δύο",
+            "3": "τρία",
+            "4": "τέσσερα",
+            "5": "πέντε",
+            "6": "έξι",
+            "7": "επτά",
+            "8": "οκτώ",
+            "9": "εννέα",
+        }
+    else:
+        words = {
+            "0": "zero",
+            "1": "one",
+            "2": "two",
+            "3": "three",
+            "4": "four",
+            "5": "five",
+            "6": "six",
+            "7": "seven",
+            "8": "eight",
+            "9": "nine",
+        }
+
+    return " ".join(words[digit] for digit in digits)
+
+
 def _require_setting(key: str, *, allow_empty: bool = False):
     """Fetch a required setting from DB. Raises if missing or empty."""
     value = get_agent_setting(key)
@@ -528,7 +564,6 @@ _current_session: dict = {
     "last_forced_lookup_order": None,
     "last_forced_lookup_at": 0.0,
     "last_user_turn_id": 0,
-    "prefetched_lookup": None,
     "last_lookup_tool_called_at": 0.0,
     "last_lookup_tool_order": None,
     "lookup_progress_prompt_until": 0.0,
@@ -538,8 +573,6 @@ _current_session: dict = {
     "prefetch_spoken_turn_id": 0,
     "prefetch_spoken_text": "",
     "prefetch_suppress_llm_until": 0.0,
-    "prefetched_lookup_spoken_at": 0.0,
-    "prefetched_lookup_spoken_order": None,
     "lookup_pending": False,
     "lookup_pending_started_at": 0.0,
     "lookup_pending_order": None,
@@ -759,17 +792,33 @@ def _classify_lookup_result(result_text: str) -> str:
     if re.search(r"\border\s+\d{3,8}\s+(is|was)\s+\w+", normalized):
         return "found"
 
+    if re.search(r"\border\s*#?\s*\d{3,8}\b", normalized):
+        return "found"
+
     found_markers = (
         "would you like more details about this order",
         "scheduled for delivery",
+        "delivery",
+        "delivery date",
         "θέλετε περισσότερες λεπτομέρειες",
         "προγραμματισμένη παράδοση",
+        "status",
+        "paid",
+        "fulfilled",
+        "unfulfilled",
         "συνολο",
         "σύνολο",
-        "total ",
-        "status is",
+        "total",
+        "subtotal",
+        "shipping",
+        "items",
+        "line items",
+        "κατάσταση",
+        "παράδοση",
         "is completed",
         "was cancelled",
+        "completed",
+        "cancelled",
         "ολοκληρώθηκε",
         "ακυρώθηκε",
     )
@@ -1649,7 +1698,7 @@ def create_tts():
         if configured_model not in {"eleven_multilingual_v2", "eleven_turbo_v2_5"}:
             tts_model = "eleven_multilingual_v2"
             logger.warning(
-                "?????? TTS: Overriding %s ??? %s for auto language switching",
+                "TTS: overriding %s -> %s for auto language switching",
                 configured_model,
                 tts_model,
             )
@@ -1658,15 +1707,15 @@ def create_tts():
     elif agent_lang == "el" and configured_model == "eleven_turbo_v2":
         # Override to multilingual for Greek support
         tts_model = "eleven_multilingual_v2"
-        logger.warning(f"?????? TTS: Overriding {configured_model} ??? {tts_model} for Greek support")
+        logger.warning("TTS: overriding %s -> %s for Greek support", configured_model, tts_model)
     elif agent_lang == "el" and "turbo" in configured_model.lower() and "v2_5" not in configured_model:
         # eleven_turbo_v2 doesn't support Greek, v2.5 does
         tts_model = "eleven_turbo_v2_5"
-        logger.warning(f"?????? TTS: Overriding {configured_model} ??? {tts_model} for Greek support")
+        logger.warning("TTS: overriding %s -> %s for Greek support", configured_model, tts_model)
     else:
         tts_model = configured_model
     
-    logger.info(f"???? TTS Model: {tts_model} (language: {agent_lang})")
+    logger.info("TTS model selected: %s (language: %s)", tts_model, agent_lang)
     
     voice_id = str(get_agent_setting("agent_voice_id", settings.elevenlabs_voice_id) or settings.elevenlabs_voice_id)
     if not elevenlabs_voice_exists(voice_id):
@@ -2309,6 +2358,32 @@ class ElenaFunctionContext(llm.FunctionContext):
             _snooze_silence_prompts(invalid_recovery_grace, reason="invalid_phone_recovery")
             return _repeat_number_prompt_for_mode("phone", lang)
 
+        pending_phone = str(_current_session.get("pending_phone_candidate") or "").strip()
+        awaiting_confirmation = bool(_current_session.get("awaiting_phone_confirmation"))
+        if awaiting_confirmation:
+            if pending_phone and normalized_phone == pending_phone:
+                room_log(
+                    "TOOL_RESULT_BLOCKED",
+                    name="lookup_order_by_phone",
+                    reason="phone_confirmation_required",
+                )
+                if lang == "el":
+                    return (
+                        "Πριν το ελέγξω, παρακαλώ επιβεβαιώστε αν αυτός ο αριθμός τηλεφώνου είναι σωστός."
+                    )
+                return "Before I check that, please confirm whether this phone number is correct."
+
+            room_log(
+                "TOOL_RESULT_BLOCKED",
+                name="lookup_order_by_phone",
+                reason="phone_confirmation_pending_mismatch",
+                phone=normalized_phone,
+                pending_phone=pending_phone or None,
+            )
+            if lang == "el":
+                return "Για να συνεχίσουμε, επιβεβαιώστε πρώτα τον αριθμό τηλεφώνου."
+            return "To continue, please confirm the phone number first."
+
         _set_support_flow_state(FLOW_CHECKING_PHONE_NUMBER, reason="lookup_order_by_phone_called")
         _set_lookup_pending(normalized_phone, reason="lookup_order_by_phone_called")
         _current_session["last_lookup_tool_called_at"] = time.time()
@@ -2609,7 +2684,6 @@ async def entrypoint(ctx: JobContext):
     _current_session["last_forced_lookup_order"] = None
     _current_session["last_forced_lookup_at"] = 0.0
     _current_session["last_user_turn_id"] = 0
-    _current_session["prefetched_lookup"] = None
     _current_session["last_lookup_tool_called_at"] = 0.0
     _current_session["last_lookup_tool_order"] = None
     _current_session["lookup_progress_prompt_until"] = 0.0
@@ -2619,8 +2693,6 @@ async def entrypoint(ctx: JobContext):
     _current_session["prefetch_spoken_turn_id"] = 0
     _current_session["prefetch_spoken_text"] = ""
     _current_session["prefetch_suppress_llm_until"] = 0.0
-    _current_session["prefetched_lookup_spoken_at"] = 0.0
-    _current_session["prefetched_lookup_spoken_order"] = None
     _current_session["lookup_pending"] = False
     _current_session["lookup_pending_started_at"] = 0.0
     _current_session["lookup_pending_order"] = None
@@ -4099,6 +4171,104 @@ async def entrypoint(ctx: JobContext):
                 _current_session["phone_forced_pending_turn_id"] = 0
             _resume_silence_for_tool("forced_lookup_order_by_phone")
 
+    async def _speak_phone_confirmation_prompt(
+        turn_id: int,
+        phone: str,
+        trigger_reason: str,
+        *,
+        reprompt: bool = False,
+    ) -> None:
+        """Speak phone confirmation directly from code, independent of LLM instruction following."""
+        if call_ended["value"] or _current_session.get("should_end"):
+            room_log("PHONE_CONFIRMATION_SKIP", reason="call_ended", turn_id=turn_id)
+            return
+
+        normalized_phone = _normalize_phone_for_lookup(phone or "")
+        if not normalized_phone:
+            room_log(
+                "PHONE_CONFIRMATION_SKIP",
+                reason="invalid_phone_pattern",
+                turn_id=turn_id,
+                phone=_truncate(phone, max_len=64),
+            )
+            return
+
+        latest_turn = int(_current_session.get("last_user_turn_id") or 0)
+        if latest_turn > turn_id:
+            room_log(
+                "PHONE_CONFIRMATION_SKIP",
+                reason="newer_user_turn",
+                turn_id=turn_id,
+                latest_turn=latest_turn,
+            )
+            return
+
+        pending_phone = str(_current_session.get("pending_phone_candidate") or "")
+        if pending_phone and pending_phone != normalized_phone:
+            room_log(
+                "PHONE_CONFIRMATION_SKIP",
+                reason="pending_phone_mismatch",
+                turn_id=turn_id,
+                pending_phone=pending_phone,
+                phone=normalized_phone,
+            )
+            return
+
+        if not bool(_current_session.get("awaiting_phone_confirmation")):
+            room_log("PHONE_CONFIRMATION_SKIP", reason="not_awaiting_confirmation", turn_id=turn_id)
+            return
+
+        suppress_s = _as_float(
+            get_agent_setting("phone_confirmation_llm_suppress_seconds", 18.0),
+            18.0,
+            min_value=8.0,
+            max_value=60.0,
+        )
+        confirmation_snooze_s = _as_float(
+            get_agent_setting("phone_confirmation_silence_snooze_seconds", 10.0),
+            10.0,
+            min_value=4.0,
+            max_value=30.0,
+        )
+
+        _current_session["prefetch_spoken_turn_id"] = turn_id
+        _current_session["prefetch_suppress_llm_until"] = time.time() + suppress_s
+        spoken_phone = _speak_digits(normalized_phone, get_agent_language())
+
+        if get_agent_language() == "el":
+            if reprompt:
+                confirmation_text = (
+                    f"Για να συνεχίσουμε, απαντήστε μόνο ναι ή όχι. Ο αριθμός είναι {spoken_phone}. Είναι σωστός;"
+                )
+            else:
+                confirmation_text = f"Για επιβεβαίωση, ο αριθμός τηλεφώνου σας είναι {spoken_phone}. Είναι σωστός;"
+        else:
+            if reprompt:
+                confirmation_text = (
+                    f"To continue, please answer only yes or no. The number is {spoken_phone}. Is that correct?"
+                )
+            else:
+                confirmation_text = f"Just to confirm, your phone number is {spoken_phone}. Is that correct?"
+
+        room_log(
+            "PHONE_CONFIRMATION_PROMPT",
+            turn_id=turn_id,
+            phone=normalized_phone,
+            reason=trigger_reason,
+            reprompt=reprompt,
+        )
+
+        _current_session["prefetch_manual_say_active"] = True
+        _current_session["prefetch_spoken_text"] = confirmation_text
+        try:
+            await agent.say(confirmation_text, allow_interruptions=True)
+            _current_session["prefetch_suppress_llm_until"] = time.time() + suppress_s
+            mark_agent_speaking()
+            _snooze_silence_prompts(confirmation_snooze_s, reason="phone_confirmation_prompt")
+            room_log("PHONE_CONFIRMATION_SPOKEN", turn_id=turn_id, reason=trigger_reason)
+        finally:
+            _current_session["prefetch_manual_say_active"] = False
+
     @agent.on("user_speech_committed")
     def on_user_speech_committed(message):
         """Send user transcript to frontend and check for abuse."""
@@ -4106,6 +4276,8 @@ async def entrypoint(ctx: JobContext):
             room_log("LATE_EVENT_DROPPED", source="user_speech_committed")
             return
         user_text = message.content
+        current_turn_id = int(_current_session.get("last_user_turn_id") or 0) + 1
+        _current_session["last_user_turn_id"] = current_turn_id
         flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
         normalized_order_candidate = _normalize_order_id_strict(user_text)
 
@@ -4167,14 +4339,16 @@ async def entrypoint(ctx: JobContext):
             and not _is_negative_utterance(user_text)
             and not normalized_phone_candidate
         ):
-            agent.chat_ctx.append(
-                role="system",
-                text=(
-                    "SUPPORT FLOW - PHONE CONFIRMATION PENDING:\n"
-                    "- Ask the caller to answer only yes or no to confirm the captured phone number.\n"
-                    "- If they prefer, they can repeat the phone number digit by digit."
-                ),
-            )
+            pending_phone = str(_current_session.get("pending_phone_candidate") or "")
+            if pending_phone:
+                asyncio.create_task(
+                    _speak_phone_confirmation_prompt(
+                        current_turn_id,
+                        pending_phone,
+                        "non_confirmation_reply",
+                        reprompt=True,
+                    )
+                )
 
         if _mentions_no_order_number(user_text):
             _current_session["customer_no_order_number"] = True
@@ -4186,8 +4360,6 @@ async def entrypoint(ctx: JobContext):
             _current_session["pending_phone_candidate"] = None
             _current_session["awaiting_phone_confirmation"] = False
             _set_support_flow_state(FLOW_CHECKING_ORDER_NUMBER, reason="order_number_provided")
-        current_turn_id = int(_current_session.get("last_user_turn_id") or 0) + 1
-        _current_session["last_user_turn_id"] = current_turn_id
         # Clear stale pending forced-turn markers from previous turns.
         if (
             int(_current_session.get("phone_forced_pending_turn_id") or 0) < current_turn_id
@@ -4264,21 +4436,23 @@ async def entrypoint(ctx: JobContext):
             flow_state in phone_flow_states
             or bool(_current_session.get("customer_no_order_number"))
         )
-        if phone_flow_active and (phone_mode_locked or phone_confirmation_context):
+        if phone_flow_active and (
+            phone_mode_locked
+            or phone_confirmation_context
+            or flow_state == FLOW_AWAITING_PHONE_CONFIRMATION
+        ):
             phone_candidate = _normalize_phone_for_lookup(user_text or "")
             if phone_candidate:
                 _current_session["pending_phone_candidate"] = phone_candidate
                 _current_session["awaiting_phone_confirmation"] = True
                 _set_support_flow_state(FLOW_AWAITING_PHONE_CONFIRMATION, reason="phone_candidate_captured")
                 room_log("PHONE_CANDIDATE_CAPTURED", phone=phone_candidate, turn_id=current_turn_id)
-                agent.chat_ctx.append(
-                    role="system",
-                    text=(
-                        "PHONE CONFIRMATION REQUIRED:\n"
-                        f"- You captured phone number {phone_candidate}.\n"
-                        "- Repeat it back and ask the caller to confirm yes/no.\n"
-                        "- Do not call lookup_order_by_phone until the caller confirms yes."
-                    ),
+                asyncio.create_task(
+                    _speak_phone_confirmation_prompt(
+                        current_turn_id,
+                        phone_candidate,
+                        "phone_candidate_captured",
+                    )
                 )
             elif is_negative:
                 # Caller rejected previously repeated number; clear candidate.
@@ -4526,7 +4700,7 @@ async def entrypoint(ctx: JobContext):
             )
 
             if abuse_detected:
-                logger.warning(f"?????? Abuse detected in: {user_text[:50]}...")
+                logger.warning("Abuse detected in: %s...", user_text[:50])
                 # The agent will continue normally, but we log the incident
                 # The abuse response will be handled by the LLM with special instructions
                 # For now, we just track it for escalation purposes
@@ -4748,7 +4922,6 @@ async def entrypoint(ctx: JobContext):
             _current_session["last_forced_lookup_order"] = None
             _current_session["last_forced_lookup_at"] = 0.0
             _current_session["last_user_turn_id"] = 0
-            _current_session["prefetched_lookup"] = None
             _current_session["last_lookup_tool_called_at"] = 0.0
             _current_session["last_lookup_tool_order"] = None
             _current_session["lookup_progress_prompt_until"] = 0.0
@@ -4758,8 +4931,6 @@ async def entrypoint(ctx: JobContext):
             _current_session["prefetch_spoken_turn_id"] = 0
             _current_session["prefetch_spoken_text"] = ""
             _current_session["prefetch_suppress_llm_until"] = 0.0
-            _current_session["prefetched_lookup_spoken_at"] = 0.0
-            _current_session["prefetched_lookup_spoken_order"] = None
             _current_session["lookup_pending"] = False
             _current_session["lookup_pending_started_at"] = 0.0
             _current_session["lookup_pending_order"] = None
