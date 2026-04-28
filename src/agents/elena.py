@@ -2877,142 +2877,11 @@ async def entrypoint(ctx: JobContext):
                 return True
         return False
 
-    _ORDER_WORD_TO_DIGIT = {
-        # English
-        "zero": "0",
-        "oh": "0",
-        "o": "0",
-        "one": "1",
-        "two": "2",
-        "three": "3",
-        "four": "4",
-        "five": "5",
-        "six": "6",
-        "seven": "7",
-        "eight": "8",
-        "nine": "9",
-        # Greek (with and without accents)
-        "μηδέν": "0",
-        "μηδεν": "0",
-        "ένα": "1",
-        "ενα": "1",
-        "δύο": "2",
-        "δυο": "2",
-        "τρία": "3",
-        "τρια": "3",
-        "τέσσερα": "4",
-        "τεσσερα": "4",
-        "πέντε": "5",
-        "πεντε": "5",
-        "έξι": "6",
-        "εξι": "6",
-        "επτά": "7",
-        "επτα": "7",
-        "εφτά": "7",
-        "εφτα": "7",
-        "οκτώ": "8",
-        "οκτω": "8",
-        "εννέα": "9",
-        "εννεα": "9",
-        # Common transliterations
-        "ena": "1",
-        "dyo": "2",
-        "tria": "3",
-        "tessera": "4",
-        "pente": "5",
-        "eksi": "6",
-        "epta": "7",
-        "okto": "8",
-        "ennea": "9",
-        "nea": "9",
-        "nia": "9",
-        "enia": "9",
-    }
-
-    def _normalize_digit_token(token: str) -> str:
-        normalized = unicodedata.normalize("NFD", (token or "").strip().lower())
-        return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
-
-    def _extract_greek_mobile_from_digits(raw_digits: str) -> Optional[str]:
-        digits = re.sub(r"\D", "", raw_digits or "")
-        if not digits:
-            return None
-
-        candidates: list[str] = []
-
-        def _collect(stream: str) -> None:
-            if re.fullmatch(r"69\d{8}", stream):
-                candidates.append(stream)
-            for match in re.finditer(r"69\d{8}", stream):
-                candidates.append(match.group(0))
-
-        _collect(digits)
-
-        if digits.startswith("0030"):
-            _collect(digits[4:])
-        elif digits.startswith("30") and len(digits) > 10:
-            _collect(digits[2:])
-
-        return candidates[-1] if candidates else None
-
-    def _digits_from_phrase(text: str) -> str:
-        """Convert mixed spoken-number tokens into a compact digits-only string."""
-        tokens = re.findall(r"[a-zA-Z\u0370-\u03FF0-9]+", (text or "").lower())
-        digits: list[str] = []
-        for token in tokens:
-            normalized = _normalize_digit_token(token)
-            if normalized in _ORDER_WORD_TO_DIGIT:
-                digits.append(_ORDER_WORD_TO_DIGIT[normalized])
-                continue
-            if token.isdigit():
-                digits.append(token)
-                continue
-            embedded_digits = re.sub(r"\D", "", token)
-            if embedded_digits:
-                digits.append(embedded_digits)
-        return "".join(digits)
-
-    def _extract_digit_parts(text: str) -> list[str]:
-        tokens = re.findall(r"[a-zA-Z\u0370-\u03FF0-9]+", (text or "").lower())
-        parts: list[str] = []
-        for token in tokens:
-            normalized = _normalize_digit_token(token)
-            if normalized in _ORDER_WORD_TO_DIGIT:
-                parts.append(_ORDER_WORD_TO_DIGIT[normalized])
-                continue
-            if token.isdigit():
-                parts.append(token)
-                continue
-            embedded_digits = re.sub(r"\D", "", token)
-            if embedded_digits:
-                parts.append(embedded_digits)
-        return parts
-
-    def _normalize_order_id_strict(raw_text: str) -> Optional[str]:
-        """Return strict order id candidate with exact configured length."""
-        expected = _expected_order_digits()
-        normalized = (raw_text or "").strip().lower()
-        if not normalized:
-            return None
-
-        explicit_runs = re.findall(rf"\d{{{expected}}}", normalized)
-        if explicit_runs:
-            return explicit_runs[-1]
-
-        parts = _extract_digit_parts(normalized)
-        joined = "".join(parts)
-        if len(joined) == expected:
-            return joined
-        return None
-
-    def _normalize_phone_for_lookup(raw_text: str) -> Optional[str]:
-        """Normalize spoken phone text into strict Greek mobile digits for lookup."""
-        normalized = (raw_text or "").strip().lower()
-        if not normalized:
-            return None
-        digits = _digits_from_phrase(normalized)
-        compact = re.sub(r"\D", "", digits or "")
-        return _extract_greek_mobile_from_digits(compact)
+    # Reuse module-level numeric parsers to avoid divergence between scopes.
+    _digits_from_phrase = globals()["_digits_from_phrase"]
+    _extract_digit_parts = globals()["_extract_digit_parts"]
+    _normalize_order_id_strict = globals()["_normalize_order_id_strict"]
+    _normalize_phone_for_lookup = globals()["_normalize_phone_for_lookup"]
 
     def _format_user_text_for_transcript(raw_text: str) -> str:
         """
@@ -4338,13 +4207,33 @@ async def entrypoint(ctx: JobContext):
 
         _current_session["number_mode_lock"] = None
         _current_session["number_mode_turn_id"] = 0
+        flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
         inferred_mode = _infer_number_mode(user_text, str(_current_session.get("last_agent_text") or ""))
+        phone_flow_states = {
+            FLOW_AWAITING_PHONE_NUMBER,
+            FLOW_AWAITING_PHONE_CONFIRMATION,
+            FLOW_CHECKING_PHONE_NUMBER,
+        }
+        if (
+            flow_state == FLOW_AWAITING_ORDER_NUMBER
+            and inferred_mode == "phone"
+            and not _mentions_no_order_number(user_text)
+        ):
+            inferred_mode = None
+            room_log("NUMBER_MODE_SUPPRESSED", flow_state=flow_state, candidate="phone")
         if (
             inferred_mode is None
             and bool(_current_session.get("customer_no_order_number"))
             and bool(_extract_digit_parts(user_text))
         ):
             inferred_mode = "phone"
+        if (
+            flow_state in phone_flow_states
+            and inferred_mode == "order"
+            and not normalized_order_candidate
+        ):
+            inferred_mode = "phone"
+            room_log("NUMBER_MODE_FORCED", flow_state=flow_state, mode="phone")
         if inferred_mode in {"order", "phone"}:
             _current_session["number_mode_lock"] = inferred_mode
             _current_session["number_mode_turn_id"] = current_turn_id
@@ -4370,7 +4259,12 @@ async def entrypoint(ctx: JobContext):
             _current_session["pending_phone_candidate"] = None
             _current_session["awaiting_phone_confirmation"] = False
 
-        if phone_mode_locked or phone_confirmation_context:
+        flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
+        phone_flow_active = (
+            flow_state in phone_flow_states
+            or bool(_current_session.get("customer_no_order_number"))
+        )
+        if phone_flow_active and (phone_mode_locked or phone_confirmation_context):
             phone_candidate = _normalize_phone_for_lookup(user_text or "")
             if phone_candidate:
                 _current_session["pending_phone_candidate"] = phone_candidate
@@ -4555,7 +4449,16 @@ async def entrypoint(ctx: JobContext):
         try:
             detected_order_number = _extract_order_number_candidate(user_text)
             number_mode = str(_current_session.get("number_mode_lock") or "")
-            if _should_force_order_lookup(user_text, detected_order_number) and number_mode != "phone":
+            flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
+            order_lookup_blocked_by_flow = (
+                flow_state in {FLOW_AWAITING_PHONE_CONFIRMATION, FLOW_CHECKING_PHONE_NUMBER}
+                and not detected_order_number
+            )
+            if (
+                _should_force_order_lookup(user_text, detected_order_number)
+                and number_mode != "phone"
+                and not order_lookup_blocked_by_flow
+            ):
                 _set_lookup_pending(detected_order_number, reason="order_number_detected")
                 now = time.time()
                 last_forced_order = str(_current_session.get("last_forced_lookup_order") or "")
@@ -4580,6 +4483,12 @@ async def entrypoint(ctx: JobContext):
 
                     # No background prefetch task here to avoid duplicate/racing
                     # responses with normal tool calls in the same turn.
+            elif order_lookup_blocked_by_flow and _should_force_order_lookup(user_text, detected_order_number):
+                room_log(
+                    "ORDER_LOOKUP_HINT_SKIPPED",
+                    reason="phone_flow_in_progress",
+                    flow_state=flow_state,
+                )
         except Exception as e:
             logger.debug(f"Order lookup forcing skipped: {e}")
 
