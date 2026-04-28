@@ -544,6 +544,11 @@ FLOW_AWAITING_PHONE_CONFIRMATION = "awaiting_phone_confirmation"
 FLOW_CHECKING_PHONE_NUMBER = "checking_phone_number"
 FLOW_ORDER_FOUND = "order_found"
 FLOW_ORDER_NOT_FOUND = "order_not_found"
+PHONE_FLOW_STATES = {
+    FLOW_AWAITING_PHONE_NUMBER,
+    FLOW_AWAITING_PHONE_CONFIRMATION,
+    FLOW_CHECKING_PHONE_NUMBER,
+}
 
 # Global reference to current session for termination/logging
 _current_session: dict = {
@@ -609,7 +614,22 @@ def _set_support_flow_state(new_state: str, reason: str = "") -> None:
     """Centralized flow-state transition with logging."""
     previous = str(_current_session.get("support_flow_state") or FLOW_IDLE)
     _current_session["support_flow_state"] = new_state
+    # Keep transitional legacy flags in sync while we gradually move to pure flow-state control.
+    _current_session["awaiting_phone_confirmation"] = new_state == FLOW_AWAITING_PHONE_CONFIRMATION
+    if new_state in PHONE_FLOW_STATES:
+        _current_session["customer_no_order_number"] = True
+    elif new_state in {FLOW_CHECKING_ORDER_NUMBER, FLOW_ORDER_FOUND, FLOW_ORDER_NOT_FOUND, FLOW_AWAITING_ORDER_NUMBER, FLOW_IDLE}:
+        _current_session["customer_no_order_number"] = False
     room_log("SUPPORT_FLOW_STATE", previous=previous, current=new_state, reason=reason)
+
+
+def _is_phone_confirmation_pending() -> bool:
+    """Source-of-truth check for whether phone confirmation is currently required."""
+    flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
+    if flow_state == FLOW_AWAITING_PHONE_CONFIRMATION:
+        return True
+    # Transitional fallback for in-flight turns where state and legacy flag may be briefly out of sync.
+    return bool(_current_session.get("awaiting_phone_confirmation"))
 
 
 def _safe_slug(value: str) -> str:
@@ -918,6 +938,14 @@ def _clear_lookup_pending(reason: str) -> None:
     _current_session["lookup_pending"] = False
     _current_session["lookup_pending_started_at"] = 0.0
     _current_session["lookup_pending_order"] = None
+
+
+def _clear_pending_lookup_wait_phrase(reason: str) -> None:
+    """Clear pending wait-phrase state to avoid stale prepends on unrelated turns."""
+    if _current_session.get("pending_lookup_wait_phrase"):
+        room_log("TOOL_WAIT_ACK_CLEARED", reason=reason)
+    _current_session["pending_lookup_wait_phrase"] = None
+    _current_session["pending_lookup_wait_phrase_set_at"] = 0.0
 
 
 def _build_order_voice_summary(result_text: str, language: str) -> str:
@@ -2344,8 +2372,7 @@ class ElenaFunctionContext(llm.FunctionContext):
         normalized_phone = _normalize_phone_for_lookup(phone)
         if not normalized_phone:
             room_log("TOOL_RESULT_BLOCKED", name="lookup_order_by_phone", reason="invalid_phone_pattern")
-            _current_session["pending_lookup_wait_phrase"] = None
-            _current_session["pending_lookup_wait_phrase_set_at"] = 0.0
+            _clear_pending_lookup_wait_phrase("invalid_phone_pattern")
             _current_session["pending_phone_candidate"] = None
             _current_session["awaiting_phone_confirmation"] = False
             _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="invalid_phone_pattern")
@@ -2359,9 +2386,10 @@ class ElenaFunctionContext(llm.FunctionContext):
             return _repeat_number_prompt_for_mode("phone", lang)
 
         pending_phone = str(_current_session.get("pending_phone_candidate") or "").strip()
-        awaiting_confirmation = bool(_current_session.get("awaiting_phone_confirmation"))
+        awaiting_confirmation = _is_phone_confirmation_pending()
         if awaiting_confirmation:
             if pending_phone and normalized_phone == pending_phone:
+                _clear_pending_lookup_wait_phrase("phone_confirmation_required")
                 room_log(
                     "TOOL_RESULT_BLOCKED",
                     name="lookup_order_by_phone",
@@ -2380,6 +2408,7 @@ class ElenaFunctionContext(llm.FunctionContext):
                 phone=normalized_phone,
                 pending_phone=pending_phone or None,
             )
+            _clear_pending_lookup_wait_phrase("phone_confirmation_pending_mismatch")
             if lang == "el":
                 return "Για να συνεχίσουμε, επιβεβαιώστε πρώτα τον αριθμό τηλεφώνου."
             return "To continue, please confirm the phone number first."
@@ -3662,19 +3691,33 @@ async def entrypoint(ctx: JobContext):
                 if strict_wait_phrase:
                     pending_phrase = _current_session.get("pending_lookup_wait_phrase")
                     pending_set_at = float(_current_session.get("pending_lookup_wait_phrase_set_at") or 0.0)
+                    wait_phrase_window_s = _as_float(
+                        get_agent_setting("lookup_wait_ack_require_tool_window_seconds", 4.0),
+                        4.0,
+                        min_value=1.0,
+                        max_value=20.0,
+                    )
+                    last_lookup_called_at = float(_current_session.get("last_lookup_tool_called_at") or 0.0)
+                    lookup_active = bool(
+                        _current_session.get("lookup_pending")
+                        or _current_session.get("phone_lookup_inflight")
+                        or _current_session.get("details_lookup_inflight")
+                    ) or (
+                        last_lookup_called_at and (time.time() - last_lookup_called_at) <= wait_phrase_window_s
+                    )
                     if pending_phrase and (time.time() - pending_set_at) <= 20.0:
                         if _is_silence_prompt_text(text):
                             room_log("TOOL_WAIT_ACK_SKIPPED", reason="silence_prompt")
+                        elif not lookup_active:
+                            _clear_pending_lookup_wait_phrase("lookup_not_active")
                         else:
                             if pending_phrase.lower() not in text.lower():
                                 text = f"{pending_phrase} {text}".strip()
                                 room_log("TOOL_WAIT_ACK_ENFORCED", phrase=_truncate(pending_phrase))
-                            _current_session["pending_lookup_wait_phrase"] = None
-                            _current_session["pending_lookup_wait_phrase_set_at"] = 0.0
+                            _clear_pending_lookup_wait_phrase("consumed")
                     elif pending_phrase:
                         # Expire stale pending phrase to avoid polluting unrelated turns.
-                        _current_session["pending_lookup_wait_phrase"] = None
-                        _current_session["pending_lookup_wait_phrase_set_at"] = 0.0
+                        _clear_pending_lookup_wait_phrase("expired")
                 text = _enforce_locked_output_language(text)
 
                 from src.utils import (
@@ -4214,7 +4257,7 @@ async def entrypoint(ctx: JobContext):
             )
             return
 
-        if not bool(_current_session.get("awaiting_phone_confirmation")):
+        if not _is_phone_confirmation_pending():
             room_log("PHONE_CONFIRMATION_SKIP", reason="not_awaiting_confirmation", turn_id=turn_id)
             return
 
@@ -4381,11 +4424,7 @@ async def entrypoint(ctx: JobContext):
         _current_session["number_mode_turn_id"] = 0
         flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
         inferred_mode = _infer_number_mode(user_text, str(_current_session.get("last_agent_text") or ""))
-        phone_flow_states = {
-            FLOW_AWAITING_PHONE_NUMBER,
-            FLOW_AWAITING_PHONE_CONFIRMATION,
-            FLOW_CHECKING_PHONE_NUMBER,
-        }
+        phone_flow_states = PHONE_FLOW_STATES
         if (
             flow_state == FLOW_AWAITING_ORDER_NUMBER
             and inferred_mode == "phone"
@@ -4461,7 +4500,7 @@ async def entrypoint(ctx: JobContext):
                 _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="phone_confirmation_rejected")
 
             pending_phone = str(_current_session.get("pending_phone_candidate") or "")
-            awaiting_phone_confirmation = bool(_current_session.get("awaiting_phone_confirmation"))
+            awaiting_phone_confirmation = _is_phone_confirmation_pending()
             if pending_phone and is_affirmative and (awaiting_phone_confirmation or phone_confirmation_context):
                 # Consume candidate immediately to avoid duplicate triggers on repeated "yes".
                 _current_session["pending_phone_candidate"] = None
