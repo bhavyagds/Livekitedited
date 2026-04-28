@@ -562,6 +562,7 @@ _current_session: dict = {
     "should_end": False,
     "silence_tracker": None,
     "silence_pause_depth": 0,
+    "last_silence_block_reason": None,
     "last_lookup_wait_phrase": None,
     "pending_lookup_wait_phrase": None,
     "pending_lookup_wait_phrase_set_at": 0.0,
@@ -962,53 +963,51 @@ def _should_block_silence_prompt(reason: str = "") -> bool:
     Return True when silence prompts must be blocked during deterministic work.
     """
     now = time.time()
+    block_reason: Optional[str] = None
 
     if bool(_current_session.get("lookup_pending")):
-        room_log("SILENCE_PROMPT_BLOCKED", reason=f"{reason}:lookup_pending")
-        return True
-    if bool(_current_session.get("phone_lookup_inflight")):
-        room_log("SILENCE_PROMPT_BLOCKED", reason=f"{reason}:phone_lookup_inflight")
-        return True
-    if bool(_current_session.get("details_lookup_inflight")):
-        room_log("SILENCE_PROMPT_BLOCKED", reason=f"{reason}:details_lookup_inflight")
+        block_reason = f"{reason}:lookup_pending"
+    elif bool(_current_session.get("phone_lookup_inflight")):
+        block_reason = f"{reason}:phone_lookup_inflight"
+    elif bool(_current_session.get("details_lookup_inflight")):
+        block_reason = f"{reason}:details_lookup_inflight"
+    elif bool(_current_session.get("forced_response_manual_say_active")):
+        block_reason = f"{reason}:forced_response_active"
+    else:
+        forced_suppress_until = float(_current_session.get("forced_response_suppress_llm_until") or 0.0)
+        if forced_suppress_until and now <= forced_suppress_until:
+            block_reason = f"{reason}:forced_response_suppress_window"
+        elif _is_phone_confirmation_pending():
+            block_reason = f"{reason}:phone_confirmation_pending"
+        else:
+            lookup_progress_until = float(_current_session.get("lookup_progress_prompt_until") or 0.0)
+            if lookup_progress_until and now <= lookup_progress_until:
+                block_reason = f"{reason}:lookup_progress_window"
+            else:
+                tracker = _current_session.get("silence_tracker")
+                if isinstance(tracker, dict):
+                    snooze_until = float(tracker.get("snooze_until") or 0.0)
+                    if snooze_until and now <= snooze_until:
+                        block_reason = f"{reason}:silence_snooze"
+                if not block_reason:
+                    pending_wait_phrase = str(_current_session.get("pending_lookup_wait_phrase") or "").strip()
+                    pending_wait_set_at = float(_current_session.get("pending_lookup_wait_phrase_set_at") or 0.0)
+                    lookup_wait_guard_s = _as_float(
+                        get_agent_setting("lookup_wait_phrase_silence_guard_seconds", 30.0),
+                        30.0,
+                        min_value=10.0,
+                        max_value=90.0,
+                    )
+                    if pending_wait_phrase and pending_wait_set_at and (now - pending_wait_set_at) <= lookup_wait_guard_s:
+                        block_reason = f"{reason}:recent_wait_phrase"
+
+    if block_reason:
+        if _current_session.get("last_silence_block_reason") != block_reason:
+            room_log("SILENCE_PROMPT_BLOCKED", reason=block_reason)
+            _current_session["last_silence_block_reason"] = block_reason
         return True
 
-    if bool(_current_session.get("forced_response_manual_say_active")):
-        room_log("SILENCE_PROMPT_BLOCKED", reason=f"{reason}:forced_response_active")
-        return True
-    forced_suppress_until = float(_current_session.get("forced_response_suppress_llm_until") or 0.0)
-    if forced_suppress_until and now <= forced_suppress_until:
-        room_log("SILENCE_PROMPT_BLOCKED", reason=f"{reason}:forced_response_suppress_window")
-        return True
-
-    if _is_phone_confirmation_pending():
-        room_log("SILENCE_PROMPT_BLOCKED", reason=f"{reason}:phone_confirmation_pending")
-        return True
-
-    lookup_progress_until = float(_current_session.get("lookup_progress_prompt_until") or 0.0)
-    if lookup_progress_until and now <= lookup_progress_until:
-        room_log("SILENCE_PROMPT_BLOCKED", reason=f"{reason}:lookup_progress_window")
-        return True
-
-    tracker = _current_session.get("silence_tracker")
-    if isinstance(tracker, dict):
-        snooze_until = float(tracker.get("snooze_until") or 0.0)
-        if snooze_until and now <= snooze_until:
-            room_log("SILENCE_PROMPT_BLOCKED", reason=f"{reason}:silence_snooze")
-            return True
-
-    pending_wait_phrase = str(_current_session.get("pending_lookup_wait_phrase") or "").strip()
-    pending_wait_set_at = float(_current_session.get("pending_lookup_wait_phrase_set_at") or 0.0)
-    lookup_wait_guard_s = _as_float(
-        get_agent_setting("lookup_wait_phrase_silence_guard_seconds", 30.0),
-        30.0,
-        min_value=10.0,
-        max_value=90.0,
-    )
-    if pending_wait_phrase and pending_wait_set_at and (now - pending_wait_set_at) <= lookup_wait_guard_s:
-        room_log("SILENCE_PROMPT_BLOCKED", reason=f"{reason}:recent_wait_phrase")
-        return True
-
+    _current_session["last_silence_block_reason"] = None
     return False
 
 
@@ -2778,6 +2777,7 @@ async def entrypoint(ctx: JobContext):
     _current_session["should_end"] = False
     _current_session["silence_tracker"] = None
     _current_session["silence_pause_depth"] = 0
+    _current_session["last_silence_block_reason"] = None
     _current_session["last_lookup_wait_phrase"] = None
     _current_session["pending_lookup_wait_phrase"] = None
     _current_session["pending_lookup_wait_phrase_set_at"] = 0.0
@@ -5056,6 +5056,7 @@ async def entrypoint(ctx: JobContext):
         finally:
             _current_session["silence_tracker"] = None
             _current_session["silence_pause_depth"] = 0
+            _current_session["last_silence_block_reason"] = None
             _current_session["last_lookup_wait_phrase"] = None
             _current_session["pending_lookup_wait_phrase"] = None
             _current_session["pending_lookup_wait_phrase_set_at"] = 0.0
