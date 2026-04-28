@@ -1373,15 +1373,21 @@ def _build_order_details_voice_summary(result_text: str, language: str) -> str:
         elif status:
             parts.append(f"The status is {status}.")
 
+        delivery_total_parts: list[str] = []
         if delivery_spoken:
-            parts.append(f"Delivery is scheduled for {delivery_spoken}.")
+            delivery_total_parts.append(f"delivery is scheduled for {delivery_spoken}")
 
         if amount:
             whole, _, frac = amount.partition(".")
             if frac:
-                parts.append(f"The total is {int(whole)} euros and {int(frac[:2]):02d} cents.")
+                delivery_total_parts.append(
+                    f"the total is {int(whole)} euros and {int(frac[:2]):02d} cents"
+                )
             else:
-                parts.append(f"The total is {int(whole)} euros.")
+                delivery_total_parts.append(f"the total is {int(whole)} euros")
+
+        if delivery_total_parts:
+            parts.append("Also, " + ", and ".join(delivery_total_parts) + ".")
 
         if item_lines:
             items_text = ", ".join(item_lines)
