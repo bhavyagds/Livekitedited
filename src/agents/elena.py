@@ -583,10 +583,12 @@ def _truncate(text: str, max_len: int = 500) -> str:
 
 
 def _strip_markup_for_output(text: str) -> str:
-    """Strip SSML/markdown markers so logs/UI don't include literal markup."""
+    """Strip SSML/markdown markers so logs/UI do not include literal markup."""
     if not text:
         return ""
     cleaned = re.sub(r"</?[^>]+>", " ", str(text))
+    # Remove emojis and special pictograms to prevent "bluffing" and TTS issues
+    cleaned = re.sub(r"[\U00010000-\U0010ffff\u2600-\u27bf]", "", cleaned)
     cleaned = re.sub(r"^\s*(?:[-*]|\u2022)\s+", " ", cleaned, flags=re.MULTILINE)
     cleaned = re.sub(r"[*_`~#]+", " ", cleaned)
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
@@ -621,9 +623,6 @@ def _strip_tts_style_leakage(text: str) -> str:
         " ",
         cleaned,
     )
-    # Remove repeated horizontal separators.
-    cleaned = re.sub(r"\s*-{3,}\s*", " ", cleaned)
-    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
     return cleaned
 
 
@@ -4720,7 +4719,8 @@ async def entrypoint(ctx: JobContext):
             _snooze_silence_prompts(short_grace, reason="short_utterance")
 
         # Add to transcript
-        conversation_transcript.append(f"User: {user_text_for_transcript}")
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        conversation_transcript.append(f"User: [{timestamp}] {user_text_for_transcript}")
         if abuse_detection_enabled:
             # Check for abusive language
             abuse_detected, abuse_response = check_and_respond_to_abuse(
@@ -4790,7 +4790,8 @@ async def entrypoint(ctx: JobContext):
                 transcript_text = _format_agent_text_for_transcript(display_text or text)
                 asyncio.create_task(send_agent_transcript(transcript_text))
                 asyncio.create_task(send_agent_info(transcript_text))
-                conversation_transcript.append(f"Agent: {transcript_text}")
+                timestamp = datetime.now().strftime('%H:%M:%S')
+                conversation_transcript.append(f"Agent: [{timestamp}] {transcript_text}")
                 _current_session["last_agent_text"] = transcript_text
                 normalized_display = _normalize_switch_text(transcript_text)
                 details_prompted = bool(

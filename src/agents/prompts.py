@@ -343,6 +343,13 @@ Use these answers precisely when the corresponding questions arise.""")
         parts.append("="*60 + "\n")
         logger.info(f"🧠 Injected long-term memory: {len(memory_context)} chars")
 
+    # Add tool usage guardrails
+    parts.append("""TOOL USAGE GUARDRAIL:
+1. VERBATIM REPORTING: When you use a tool (like lookup_order or get_order_details), report the findings EXACTLY as provided by the tool.
+2. NO HALLUCINATION: Do not "bluff" or make up details (dates, statuses, amounts) that are not explicitly stated in the tool output.
+3. NO EMOJIS: Never use emojis in your voice responses. They cause issues with the voice engine and transcript.
+4. BE PRECISE: If the tool says "processing", say "being prepared". If it says a date, say that exact date. Do not summarize unless asked.""")
+
     # Repeat language guardrail at the end so it remains the strongest instruction.
     parts.append(lang_instruction)
     
@@ -400,6 +407,13 @@ Use these answers precisely when the corresponding questions arise.""")
         parts.append(memory_context)
         parts.append("="*60 + "\n")
         logger.info(f"🧠 Injected long-term memory: {len(memory_context)} chars")
+
+    # Add tool usage guardrails
+    parts.append("""TOOL USAGE GUARDRAIL:
+1. VERBATIM REPORTING: When you use a tool (like lookup_order or get_order_details), report the findings EXACTLY as provided by the tool.
+2. NO HALLUCINATION: Do not "bluff" or make up details (dates, statuses, amounts) that are not explicitly stated in the tool output.
+3. NO EMOJIS: Never use emojis in your voice responses. They cause issues with the voice engine and transcript.
+4. BE PRECISE: If the tool says "processing", say "being prepared". If it says a date, say that exact date. Do not summarize unless asked.""")
 
     # Repeat language guardrail at the end so it remains the strongest instruction.
     parts.append(lang_instruction)

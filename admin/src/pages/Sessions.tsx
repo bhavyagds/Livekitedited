@@ -58,8 +58,8 @@ function AddToMemoryModal({
   onClose: () => void
   onSaved: () => void
 }) {
-  const [question, setQuestion] = useState(role === 'user' ? line.replace(/^User:\s*/i, '') : '')
-  const [answer, setAnswer] = useState(role === 'agent' ? line.replace(/^Agent:\s*/i, '') : '')
+  const [question, setQuestion] = useState(role === 'user' ? line.replace(/^User:\s*(\[\d{2}:\d{2}:\d{2}\]\s*)?/i, '') : '')
+  const [answer, setAnswer] = useState(role === 'agent' ? line.replace(/^Agent:\s*(\[\d{2}:\d{2}:\d{2}\]\s*)?/i, '') : '')
   const [comment, setComment] = useState('')
 
   const mutation = useMutation({
@@ -459,6 +459,10 @@ export default function Sessions() {
                     const isAgent = line.startsWith('Agent:')
                     const role: 'user' | 'agent' = isUser ? 'user' : 'agent'
                     if (!line.trim()) return null
+                    const timeMatch = line.match(/\[(\d{2}:\d{2}:\d{2})\]/)
+                    const timeStr = timeMatch ? timeMatch[1] : null
+                    const cleanLine = timeStr ? line.replace(`[${timeStr}] `, '') : line
+
                     return (
                       <div
                         key={i}
@@ -470,7 +474,14 @@ export default function Sessions() {
                             : 'bg-slate-50 text-slate-700'
                         }`}
                       >
-                        <span className="flex-1 leading-snug">{line}</span>
+                        <div className="flex-1 flex flex-col sm:flex-row sm:items-baseline gap-1 sm:gap-2">
+                          <span className="flex-1 leading-snug">{cleanLine}</span>
+                          {timeStr && (
+                            <span className="text-[10px] opacity-40 font-mono whitespace-nowrap">
+                              {timeStr}
+                            </span>
+                          )}
+                        </div>
                         {(isUser || isAgent) && (
                           <button
                             onClick={() => setMemoryModal({ line, role })}
