@@ -583,14 +583,23 @@ def _truncate(text: str, max_len: int = 500) -> str:
 
 
 def _strip_markup_for_output(text: str) -> str:
-    """Strip SSML/markdown markers so logs/UI do not include literal markup."""
+    """Strip SSML/markdown markers and meta-text so logs/UI are clean."""
     if not text:
         return ""
-    cleaned = re.sub(r"</?[^>]+>", " ", str(text))
-    # Remove emojis and special pictograms to prevent "bluffing" and TTS issues
+    cleaned = str(text)
+    # Remove SSML tags
+    cleaned = re.sub(r"</?[^>]+>", " ", cleaned)
+    # Remove emojis and pictograms
     cleaned = re.sub(r"[\U00010000-\U0010ffff\u2600-\u27bf]", "", cleaned)
-    cleaned = re.sub(r"^\s*(?:[-*]|\u2022)\s+", " ", cleaned, flags=re.MULTILINE)
+    # Remove anything in brackets/parens (meta-instructions like [Elena laughs])
+    cleaned = re.sub(r"[\(\[\{].*?[\)\]\}]", " ", cleaned)
+    # Remove markdown formatting and action stars (e.g. *Elena nods*)
     cleaned = re.sub(r"[*_`~#]+", " ", cleaned)
+    # Remove horizontal separators
+    cleaned = re.sub(r"\s*-{3,}\s*", " ", cleaned)
+    # Remove list markers
+    cleaned = re.sub(r"^\s*(?:[-*]|\u2022)\s+", " ", cleaned, flags=re.MULTILINE)
+    # Remove excess whitespace
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
     return cleaned.strip()
 
@@ -604,25 +613,30 @@ def _strip_tts_style_leakage(text: str) -> str:
         return ""
 
     cleaned = str(text)
-    # Remove common label-style fragments.
+    
+    # 1. Remove meta-instructions in brackets or parens that GPT sometimes adds
+    cleaned = re.sub(r"[\(\[\{].*?[\)\]\}]", " ", cleaned)
+    
+    # 2. Remove role prefixes (e.g. "Agent: Hello" -> "Hello")
+    cleaned = re.sub(r"^(?:Agent|Elena|Assistant|User):\s*", "", cleaned, flags=re.IGNORECASE)
+
+    # 3. Remove common label-style fragments (pitch: low, etc.)
     cleaned = re.sub(
         r"(?i)\b(?:pitch|volume|rate|speed|tone|style|prosody|emotion|voice(?:\s*style)?)\s*[:=]\s*[a-z0-9_.-]+",
         " ",
         cleaned,
     )
-    # Remove free-form sequences like "high pitch medium volume fast rate".
+    # 4. Remove free-form style sequences
     cleaned = re.sub(
         r"(?i)\b(?:x-?low|low|medium|high|x-?high|soft|loud|x-?loud|slow|fast|x-?fast)\s+"
         r"(?:pitch|volume|rate|speed|tone|style|prosody)\b",
         " ",
         cleaned,
     )
-    # Remove SSML prosody self references that sometimes leak as plain text.
-    cleaned = re.sub(
-        r'(?i)\bprosody\s+pitch\s+"?[a-z-]+"?\s+rate\s+"?[a-z-]+"?\s+volume\s+"?[a-z-]+"?\b',
-        " ",
-        cleaned,
-    )
+    # 5. Remove horizontal separators and clean up whitespace
+    cleaned = re.sub(r"\s*-{3,}\s*", " ", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    
     return cleaned
 
 
