@@ -70,28 +70,36 @@ EKATONTADES = {
 }
 
 
-def number_to_greek(n: int) -> str:
+def number_to_greek(n: int, gender: str = "neuter") -> str:
     """
     Convert an integer to Greek words.
-    
-    Examples:
-        42 -> "σαράντα δύο"
-        101 -> "εκατόν ένα"
-        1234 -> "χίλια διακόσια τριάντα τέσσερα"
-        12619 -> "δώδεκα χιλιάδες εξακόσια δεκαεννέα"
+    gender can be "neuter", "feminine", or "masculine".
+    Default is "neuter" (used for general numbers, ευρώ, κλπ).
+    Thousands (χιλιάδες) are feminine.
     """
     if n < 0:
-        return "μείον " + number_to_greek(-n)
+        return "μείον " + number_to_greek(-n, gender)
     
     if n == 0:
         return MONOPSIIFIA[0]
     
     # Numbers 1-9
     if n < 10:
+        if gender == "feminine":
+            if n == 1: return "μία"
+            if n == 3: return "τρεις"
+            if n == 4: return "τέσσερις"
+        elif gender == "masculine":
+            if n == 1: return "ένας"
+            if n == 3: return "τρεις"
+            if n == 4: return "τέσσερις"
         return MONOPSIIFIA[n]
     
     # Numbers 10-19 (atomic)
     if n < 20:
+        if gender in ("feminine", "masculine"):
+            if n == 13: return "δεκατρείς"
+            if n == 14: return "δεκατέσσερις"
         return DEKA_ENNEEA[n]
     
     # Numbers 20-99
@@ -101,21 +109,31 @@ def number_to_greek(n: int) -> str:
         if units == 0:
             return DEKADES[tens]
         else:
-            return f"{DEKADES[tens]} {MONOPSIIFIA[units]}"
+            return f"{DEKADES[tens]} {number_to_greek(units, gender)}"
     
     # Numbers 100-999
     if n < 1000:
         hundreds = (n // 100) * 100
         remainder = n % 100
         
+        # Hundreds also have gender in Greek!
+        # 200: διακόσια (neuter), διακόσιες (feminine), διακόσιοι (masculine)
+        # However, for simplicity and most common cases (orders/prices), 
+        # the neuter forms are usually acceptable or preferred.
+        # But for thousands, they MUST be feminine.
+        
+        hundreds_word = EKATONTADES[hundreds]
+        if gender == "feminine" and hundreds >= 200:
+            hundreds_word = hundreds_word[:-2] + "ες"  # διακόσια -> διακόσιες
+        
         if remainder == 0:
-            return EKATONTADES[hundreds]
+            return hundreds_word
         else:
             # Special rule: 100 becomes "εκατόν" when followed by something
             if hundreds == 100:
-                return f"εκατόν {number_to_greek(remainder)}"
+                return f"εκατόν {number_to_greek(remainder, gender)}"
             else:
-                return f"{EKATONTADES[hundreds]} {number_to_greek(remainder)}"
+                return f"{hundreds_word} {number_to_greek(remainder, gender)}"
     
     # Numbers 1000-999999
     if n < 1_000_000:
@@ -125,27 +143,29 @@ def number_to_greek(n: int) -> str:
         if thousands == 1:
             thousands_word = "χίλια"
         else:
-            thousands_word = f"{number_to_greek(thousands)} χιλιάδες"
+            # Thousands are feminine!
+            thousands_word = f"{number_to_greek(thousands, 'feminine')} χιλιάδες"
         
         if remainder == 0:
             return thousands_word
         else:
-            return f"{thousands_word} {number_to_greek(remainder)}"
+            return f"{thousands_word} {number_to_greek(remainder, gender)}"
     
     # Numbers 1,000,000+
     if n < 1_000_000_000_000:
         millions = n // 1_000_000
         remainder = n % 1_000_000
         
+        # Millions are neuter (εκατομμύριο)
         if millions == 1:
             millions_word = "ένα εκατομμύριο"
         else:
-            millions_word = f"{number_to_greek(millions)} εκατομμύρια"
+            millions_word = f"{number_to_greek(millions, 'neuter')} εκατομμύρια"
         
         if remainder == 0:
             return millions_word
         else:
-            return f"{millions_word} {number_to_greek(remainder)}"
+            return f"{millions_word} {number_to_greek(remainder, gender)}"
     
     # For very large numbers, just return the digits
     return str(n)

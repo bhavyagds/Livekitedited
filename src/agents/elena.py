@@ -641,13 +641,20 @@ def _strip_tts_style_leakage(text: str) -> str:
 
 
 def _normalize_intent_text(text: str) -> str:
-    """Normalize text for robust intent checks."""
-    lowered = (text or "").strip().lower()
-    if not lowered:
+    """
+    Normalize text for robust intent checks.
+    Lowercase, strip accents (tonos), and remove punctuation.
+    """
+    if not text:
         return ""
-    lowered = re.sub(r"[^\w\s]", " ", lowered, flags=re.UNICODE)
-    lowered = re.sub(r"\s+", " ", lowered).strip()
-    return lowered
+    # Lowercase and normalize to NFD to separate accents
+    normalized = unicodedata.normalize("NFD", str(text).strip().lower())
+    # Strip accents (category Mn)
+    no_accents = "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+    # Remove punctuation and excess whitespace
+    cleaned = re.sub(r"[^\w\s]", " ", no_accents, flags=re.UNICODE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
 
 
 def _is_affirmative_utterance(text: str) -> bool:
