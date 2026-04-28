@@ -963,12 +963,11 @@ def _set_lookup_pending(order_number: Optional[str], reason: str) -> None:
         min_value=5.0,
         max_value=120.0,
     )
-    _current_session["lookup_progress_prompt_until"] = max(
-        float(_current_session.get("lookup_progress_prompt_until") or 0.0),
-        now + progress_window_s,
-    )
+    _current_session["lookup_progress_prompt_until"] = now + progress_window_s
     tracker = _current_session.get("silence_tracker")
     if isinstance(tracker, dict):
+        tracker["last_lookup_progress_prompt_at"] = 0.0
+        tracker["lookup_progress_prompt_count"] = 0
         # Immediate race guard: prevent stale silence prompts right after order capture.
         capture_snooze = _as_float(
             get_agent_setting("order_lookup_capture_snooze_seconds", 8.0),
@@ -994,6 +993,11 @@ def _clear_lookup_pending(reason: str) -> None:
     _current_session["lookup_pending"] = False
     _current_session["lookup_pending_started_at"] = 0.0
     _current_session["lookup_pending_order"] = None
+    _current_session["lookup_progress_prompt_until"] = 0.0
+    tracker = _current_session.get("silence_tracker")
+    if isinstance(tracker, dict):
+        tracker["last_lookup_progress_prompt_at"] = 0.0
+        tracker["lookup_progress_prompt_count"] = 0
 
 
 def _clear_pending_lookup_wait_phrase(reason: str) -> None:
@@ -2354,30 +2358,34 @@ class ElenaFunctionContext(llm.FunctionContext):
         _current_session["last_lookup_tool_called_at"] = time.time()
         _current_session["last_lookup_tool_order"] = strict_order
         room_log("TOOL_CALL", name="lookup_order", order_number=strict_order)
-        result = await self._run_tool_with_silence_pause(
-            "lookup_order",
-            order_lookup.lookup_order(strict_order),
-        )
-        room_log("TOOL_RESULT", name="lookup_order", result=_truncate(result))
-        lookup_state = _classify_lookup_result(result)
-        _current_session["last_lookup_state"] = lookup_state
-        _current_session["last_lookup_order"] = strict_order if lookup_state == "found" else ""
-        if lookup_state == "found":
-            _set_support_flow_state(FLOW_ORDER_FOUND, reason="lookup_order_found")
-            _current_session["details_confirmation_pending"] = True
-            _current_session["details_confirmation_pending_until"] = time.time() + 120.0
-        else:
-            if lookup_state == "not_found":
-                _set_support_flow_state(FLOW_AWAITING_ORDER_NUMBER, reason="lookup_order_not_found")
+        try:
+            result = await self._run_tool_with_silence_pause(
+                "lookup_order",
+                order_lookup.lookup_order(strict_order),
+            )
+            room_log("TOOL_RESULT", name="lookup_order", result=_truncate(result))
+            lookup_state = _classify_lookup_result(result)
+            _current_session["last_lookup_state"] = lookup_state
+            _current_session["last_lookup_order"] = strict_order if lookup_state == "found" else ""
+            if lookup_state == "found":
+                _set_support_flow_state(FLOW_ORDER_FOUND, reason="lookup_order_found")
+                _current_session["details_confirmation_pending"] = True
+                _current_session["details_confirmation_pending_until"] = time.time() + 120.0
             else:
-                _set_support_flow_state(FLOW_ORDER_NOT_FOUND, reason=f"lookup_order_{lookup_state}")
-            _current_session["details_confirmation_pending"] = False
-            _current_session["details_confirmation_pending_until"] = 0.0
-            _current_session["full_order_details_allowed_until"] = 0.0
-        summary = _build_order_voice_summary(result, get_agent_language()) or result
-        if _as_bool(get_agent_setting("order_lookup_wait_phrase_enabled", True), default=True):
-            self._pick_lookup_wait_phrase()
-        return summary
+                _set_support_flow_state(FLOW_AWAITING_ORDER_NUMBER, reason=f"lookup_order_{lookup_state}")
+                _current_session["details_confirmation_pending"] = False
+                _current_session["details_confirmation_pending_until"] = 0.0
+                _current_session["full_order_details_allowed_until"] = 0.0
+                _current_session["number_mode_lock"] = "order"
+                _current_session["pending_phone_candidate"] = None
+
+            summary = _build_order_voice_summary(result, get_agent_language()) or result
+            return summary
+        finally:
+            _clear_lookup_pending("lookup_order_finished")
+            _clear_pending_lookup_wait_phrase("lookup_order_finished")
+            _current_session["lookup_progress_prompt_until"] = 0.0
+            _snooze_silence_prompts(5.0, reason="lookup_order_finished")
 
     @llm.ai_callable()
     async def get_order_details(
@@ -3504,6 +3512,7 @@ async def entrypoint(ctx: JobContext):
         "tool_pause_depth": 0,
         "snooze_until": 0.0,
         "last_lookup_progress_prompt_at": 0.0,
+        "lookup_progress_prompt_count": 0,
     }
     _current_session["silence_tracker"] = silence_tracker
     
@@ -5328,23 +5337,66 @@ async def entrypoint(ctx: JobContext):
 
                 now = time.time()
 
-                # Lookup-in-progress is not user silence; announce progress instead.
-                if (
-                    _current_session.get("lookup_pending")
-                    or _current_session.get("phone_lookup_inflight")
-                    or _current_session.get("details_lookup_inflight")
-                ):
+                lookup_active = (
+                    bool(_current_session.get("lookup_pending"))
+                    or bool(_current_session.get("phone_lookup_inflight"))
+                    or bool(_current_session.get("details_lookup_inflight"))
+                )
+                if lookup_active:
                     tracker = _current_session.get("silence_tracker")
+                    pending_started = float(_current_session.get("lookup_pending_started_at") or 0.0)
+                    max_progress_s = _as_float(
+                        get_agent_setting("lookup_progress_max_seconds", 45.0),
+                        45.0,
+                        min_value=10.0,
+                        max_value=120.0,
+                    )
+
+                    # Stale safety: if pending is too old, clear it and stop progress prompts.
+                    if pending_started and (now - pending_started) > max_progress_s:
+                        room_log(
+                            "LOOKUP_PROGRESS_STALE_CLEARED",
+                            age_s=round(now - pending_started, 2),
+                        )
+                        _clear_lookup_pending("lookup_progress_stale")
+                        _current_session["phone_lookup_inflight"] = False
+                        _current_session["details_lookup_inflight"] = False
+                        continue
+
+                    # Do not speak progress if agent is already speaking.
+                    if silence_tracker.get("agent_is_speaking"):
+                        continue
+
+                    first_progress_delay = _as_float(
+                        get_agent_setting("lookup_progress_first_prompt_delay_seconds", 10.0),
+                        10.0,
+                        min_value=5.0,
+                        max_value=30.0,
+                    )
+                    if pending_started and (now - pending_started) < first_progress_delay:
+                        continue
+
                     if isinstance(tracker, dict):
+                        progress_count = int(tracker.get("lookup_progress_prompt_count") or 0)
+                        max_progress_prompts = _as_int(
+                            get_agent_setting("lookup_progress_max_prompts", 1),
+                            1,
+                            min_value=0,
+                            max_value=3,
+                        )
+                        if progress_count >= max_progress_prompts:
+                            continue
+
                         last_progress_at = float(tracker.get("last_lookup_progress_prompt_at") or 0.0)
                         progress_interval = _as_float(
-                            get_agent_setting("lookup_progress_repeat_seconds", 12.0),
-                            12.0,
-                            min_value=8.0,
-                            max_value=30.0,
+                            get_agent_setting("lookup_progress_repeat_seconds", 15.0),
+                            15.0,
+                            min_value=10.0,
+                            max_value=45.0,
                         )
                         if now - last_progress_at >= progress_interval:
                             tracker["last_lookup_progress_prompt_at"] = now
+                            tracker["lookup_progress_prompt_count"] = progress_count + 1
                             await agent.say(_lookup_progress_prompt(), allow_interruptions=True)
                     continue
 
