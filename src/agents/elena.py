@@ -4582,12 +4582,23 @@ async def entrypoint(ctx: JobContext):
             raw_digits = "".join(_extract_digit_parts(user_text or ""))
             if phone_candidate:
                 _current_session["pending_phone_candidate"] = phone_candidate
-                _set_support_flow_state(FLOW_AWAITING_PHONE_CONFIRMATION, reason="phone_candidate_captured")
-                room_log("PHONE_CANDIDATE_CAPTURED", phone=phone_candidate, turn_id=current_turn_id)
+                _set_support_flow_state(
+                    FLOW_AWAITING_PHONE_CONFIRMATION,
+                    reason="phone_candidate_captured",
+                )
+                room_log(
+                    "PHONE_CANDIDATE_CAPTURED",
+                    phone=phone_candidate,
+                    turn_id=current_turn_id,
+                )
+                # This turn is now deterministic: block any parallel LLM response.
+                now = time.time()
                 _current_session["forced_response_manual_say_active"] = True
                 _current_session["forced_response_spoken_turn_id"] = current_turn_id
-                _current_session["forced_response_suppress_llm_until"] = time.time() + 8.0
+                _current_session["forced_response_suppress_llm_until"] = now + 8.0
                 _clear_pending_lookup_wait_phrase("phone_confirmation_prompt")
+                _clear_lookup_pending("phone_confirmation_prompt")
+                _current_session["phone_lookup_inflight"] = False
                 _snooze_silence_prompts(8.0, reason="phone_confirmation_prompt")
                 asyncio.create_task(
                     _speak_phone_confirmation_prompt(
