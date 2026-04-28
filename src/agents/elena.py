@@ -4321,88 +4321,88 @@ async def entrypoint(ctx: JobContext):
         reprompt: bool = False,
     ) -> None:
         """Speak phone confirmation directly from code, independent of LLM instruction following."""
-        if call_ended["value"] or _current_session.get("should_end"):
-            room_log("PHONE_CONFIRMATION_SKIP", reason="call_ended", turn_id=turn_id)
-            return
-
-        normalized_phone = _normalize_phone_for_lookup(phone or "")
-        if not normalized_phone:
-            room_log(
-                "PHONE_CONFIRMATION_SKIP",
-                reason="invalid_phone_pattern",
-                turn_id=turn_id,
-                phone=_truncate(phone, max_len=64),
-            )
-            return
-
-        latest_turn = int(_current_session.get("last_user_turn_id") or 0)
-        if latest_turn > turn_id:
-            room_log(
-                "PHONE_CONFIRMATION_SKIP",
-                reason="newer_user_turn",
-                turn_id=turn_id,
-                latest_turn=latest_turn,
-            )
-            return
-
-        pending_phone = str(_current_session.get("pending_phone_candidate") or "")
-        if pending_phone and pending_phone != normalized_phone:
-            room_log(
-                "PHONE_CONFIRMATION_SKIP",
-                reason="pending_phone_mismatch",
-                turn_id=turn_id,
-                pending_phone=pending_phone,
-                phone=normalized_phone,
-            )
-            return
-
-        if not _is_phone_confirmation_pending():
-            room_log("PHONE_CONFIRMATION_SKIP", reason="not_awaiting_confirmation", turn_id=turn_id)
-            return
-
-        suppress_s = _as_float(
-            get_agent_setting("phone_confirmation_llm_suppress_seconds", 18.0),
-            18.0,
-            min_value=8.0,
-            max_value=60.0,
-        )
-        confirmation_snooze_s = _as_float(
-            get_agent_setting("phone_confirmation_silence_snooze_seconds", 10.0),
-            10.0,
-            min_value=4.0,
-            max_value=30.0,
-        )
-
-        _current_session["forced_response_spoken_turn_id"] = turn_id
-        _current_session["forced_response_suppress_llm_until"] = time.time() + suppress_s
-        spoken_phone = _speak_digits(normalized_phone, get_agent_language())
-
-        if get_agent_language() == "el":
-            if reprompt:
-                confirmation_text = (
-                    f"Για να συνεχίσουμε, απαντήστε μόνο ναι ή όχι. Ο αριθμός είναι {spoken_phone}. Είναι σωστός;"
-                )
-            else:
-                confirmation_text = f"Για επιβεβαίωση, ο αριθμός τηλεφώνου σας είναι {spoken_phone}. Είναι σωστός;"
-        else:
-            if reprompt:
-                confirmation_text = (
-                    f"To continue, please answer only yes or no. The number is {spoken_phone}. Is that correct?"
-                )
-            else:
-                confirmation_text = f"Just to confirm, your phone number is {spoken_phone}. Is that correct?"
-
-        room_log(
-            "PHONE_CONFIRMATION_PROMPT",
-            turn_id=turn_id,
-            phone=normalized_phone,
-            reason=trigger_reason,
-            reprompt=reprompt,
-        )
-
-        _current_session["forced_response_manual_say_active"] = True
-        _current_session["forced_response_spoken_text"] = confirmation_text
         try:
+            if call_ended["value"] or _current_session.get("should_end"):
+                room_log("PHONE_CONFIRMATION_SKIP", reason="call_ended", turn_id=turn_id)
+                return
+
+            normalized_phone = _normalize_phone_for_lookup(phone or "")
+            if not normalized_phone:
+                room_log(
+                    "PHONE_CONFIRMATION_SKIP",
+                    reason="invalid_phone_pattern",
+                    turn_id=turn_id,
+                    phone=_truncate(phone, max_len=64),
+                )
+                return
+
+            latest_turn = int(_current_session.get("last_user_turn_id") or 0)
+            if latest_turn > turn_id:
+                room_log(
+                    "PHONE_CONFIRMATION_SKIP",
+                    reason="newer_user_turn",
+                    turn_id=turn_id,
+                    latest_turn=latest_turn,
+                )
+                return
+
+            pending_phone = str(_current_session.get("pending_phone_candidate") or "")
+            if pending_phone and pending_phone != normalized_phone:
+                room_log(
+                    "PHONE_CONFIRMATION_SKIP",
+                    reason="pending_phone_mismatch",
+                    turn_id=turn_id,
+                    pending_phone=pending_phone,
+                    phone=normalized_phone,
+                )
+                return
+
+            if not _is_phone_confirmation_pending():
+                room_log("PHONE_CONFIRMATION_SKIP", reason="not_awaiting_confirmation", turn_id=turn_id)
+                return
+
+            suppress_s = _as_float(
+                get_agent_setting("phone_confirmation_llm_suppress_seconds", 18.0),
+                18.0,
+                min_value=8.0,
+                max_value=60.0,
+            )
+            confirmation_snooze_s = _as_float(
+                get_agent_setting("phone_confirmation_silence_snooze_seconds", 10.0),
+                10.0,
+                min_value=4.0,
+                max_value=30.0,
+            )
+
+            _current_session["forced_response_spoken_turn_id"] = turn_id
+            _current_session["forced_response_suppress_llm_until"] = time.time() + suppress_s
+            spoken_phone = _speak_digits(normalized_phone, get_agent_language())
+
+            if get_agent_language() == "el":
+                if reprompt:
+                    confirmation_text = (
+                        f"Για να συνεχίσουμε, απαντήστε μόνο ναι ή όχι. Ο αριθμός είναι {spoken_phone}. Είναι σωστός;"
+                    )
+                else:
+                    confirmation_text = f"Για επιβεβαίωση, ο αριθμός τηλεφώνου σας είναι {spoken_phone}. Είναι σωστός;"
+            else:
+                if reprompt:
+                    confirmation_text = (
+                        f"To continue, please answer only yes or no. The number is {spoken_phone}. Is that correct?"
+                    )
+                else:
+                    confirmation_text = f"Just to confirm, your phone number is {spoken_phone}. Is that correct?"
+
+            room_log(
+                "PHONE_CONFIRMATION_PROMPT",
+                turn_id=turn_id,
+                phone=normalized_phone,
+                reason=trigger_reason,
+                reprompt=reprompt,
+            )
+
+            _current_session["forced_response_manual_say_active"] = True
+            _current_session["forced_response_spoken_text"] = confirmation_text
             await agent.say(confirmation_text, allow_interruptions=True)
             _current_session["forced_response_suppress_llm_until"] = time.time() + suppress_s
             mark_agent_speaking()
@@ -4578,6 +4578,11 @@ async def entrypoint(ctx: JobContext):
                 _current_session["pending_phone_candidate"] = phone_candidate
                 _set_support_flow_state(FLOW_AWAITING_PHONE_CONFIRMATION, reason="phone_candidate_captured")
                 room_log("PHONE_CANDIDATE_CAPTURED", phone=phone_candidate, turn_id=current_turn_id)
+                _current_session["forced_response_manual_say_active"] = True
+                _current_session["forced_response_spoken_turn_id"] = current_turn_id
+                _current_session["forced_response_suppress_llm_until"] = time.time() + 8.0
+                _clear_pending_lookup_wait_phrase("phone_confirmation_prompt")
+                _snooze_silence_prompts(8.0, reason="phone_confirmation_prompt")
                 asyncio.create_task(
                     _speak_phone_confirmation_prompt(
                         current_turn_id,
@@ -4585,6 +4590,7 @@ async def entrypoint(ctx: JobContext):
                         "phone_candidate_captured",
                     )
                 )
+                return
             elif raw_digits:
                 # User gave numeric input, but it's not a valid Greek mobile.
                 _current_session["pending_phone_candidate"] = None
