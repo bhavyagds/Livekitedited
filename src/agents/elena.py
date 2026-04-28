@@ -5056,6 +5056,26 @@ async def entrypoint(ctx: JobContext):
                 # Grace period after lookup wait-ack to avoid stitching with "Are you there?"
                 if time.time() < float(silence_tracker.get("snooze_until") or 0.0):
                     continue
+
+                # If we recently acknowledged a lookup wait phrase, avoid silence prompts.
+                pending_wait_phrase = str(_current_session.get("pending_lookup_wait_phrase") or "").strip()
+                pending_wait_set_at = float(_current_session.get("pending_lookup_wait_phrase_set_at") or 0.0)
+                lookup_wait_guard_s = _as_float(
+                    get_agent_setting("lookup_wait_phrase_silence_guard_seconds", 20.0),
+                    20.0,
+                    min_value=5.0,
+                    max_value=60.0,
+                )
+                if pending_wait_phrase and pending_wait_set_at and (time.time() - pending_wait_set_at) <= lookup_wait_guard_s:
+                    continue
+
+                # Skip silence prompts while any deterministic lookup flow is still active.
+                if (
+                    bool(_current_session.get("prefetch_manual_say_active"))
+                    or bool(_current_session.get("phone_lookup_inflight"))
+                    or bool(_current_session.get("details_lookup_inflight"))
+                ):
+                    continue
                 
                 # Calculate time since last activity
                 time_since_user = time.time() - silence_tracker["last_user_speech"]
@@ -5076,11 +5096,12 @@ async def entrypoint(ctx: JobContext):
                         lookup_progress_until = float(_current_session.get("lookup_progress_prompt_until") or 0.0)
                         recently_lookup = lookup_called_at and (now - lookup_called_at) <= lookup_progress_window_s
                         progress_active = lookup_progress_until and now <= lookup_progress_until
-                        if (recently_lookup or progress_active) and prompt_count < (silence_tracker["max_prompts"] - 1):
-                            prompt_text = lookup_progress_prompt
-                            room_log("SILENCE_PROMPT_REPLACED", reason="lookup_in_progress", text=_truncate(prompt_text))
-                        else:
-                            prompt_text = prompts[min(prompt_count, len(prompts) - 1)]
+                        # While lookup is in progress/recent, do not ask "Are you still there?".
+                        # This avoids interrupting the user during order fetch latency.
+                        if (recently_lookup or progress_active):
+                            room_log("SILENCE_PROMPT_SKIPPED", reason="lookup_in_progress")
+                            continue
+                        prompt_text = prompts[min(prompt_count, len(prompts) - 1)]
                         # Re-check race conditions right before speaking the silence prompt.
                         if _current_session.get("lookup_pending"):
                             room_log("SILENCE_PROMPT_SKIPPED", reason="lookup_pending_race")
