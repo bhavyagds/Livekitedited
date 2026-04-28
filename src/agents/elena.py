@@ -501,7 +501,6 @@ _latency_tracker = LatencyTracker()
 
 # Deterministic support flow states (business logic, not LLM inference)
 FLOW_IDLE = "idle"
-FLOW_ISSUE_COLLECTED = "issue_collected"
 FLOW_AWAITING_ORDER_NUMBER = "awaiting_order_number"
 FLOW_CHECKING_ORDER_NUMBER = "checking_order_number"
 FLOW_AWAITING_PHONE_NUMBER = "awaiting_phone_number"
@@ -509,8 +508,6 @@ FLOW_AWAITING_PHONE_CONFIRMATION = "awaiting_phone_confirmation"
 FLOW_CHECKING_PHONE_NUMBER = "checking_phone_number"
 FLOW_ORDER_FOUND = "order_found"
 FLOW_ORDER_NOT_FOUND = "order_not_found"
-FLOW_PHONE_NOT_FOUND = "phone_not_found"
-FLOW_DONE = "done"
 
 # Global reference to current session for termination/logging
 _current_session: dict = {
@@ -572,7 +569,6 @@ _current_session: dict = {
     "ticket_reference": None,
     "support_flow_state": FLOW_IDLE,
     "support_issue": None,
-    "pending_order_candidate": None,
 }
 
 
@@ -2155,7 +2151,6 @@ class ElenaFunctionContext(llm.FunctionContext):
 
         # We now have a valid order id, so do not keep forcing phone mode.
         _current_session["customer_no_order_number"] = False
-        _current_session["pending_order_candidate"] = strict_order
         _set_support_flow_state(FLOW_CHECKING_ORDER_NUMBER, reason="lookup_order_called")
         _set_lookup_pending(strict_order, reason="lookup_order_called")
         _current_session["last_lookup_tool_called_at"] = time.time()
@@ -2655,7 +2650,6 @@ async def entrypoint(ctx: JobContext):
     _current_session["ticket_reference"] = None
     _current_session["support_flow_state"] = FLOW_IDLE
     _current_session["support_issue"] = None
-    _current_session["pending_order_candidate"] = None
     
     # =========================================================================
     # PARALLEL STARTUP - Run ALL independent operations concurrently for speed
@@ -4262,6 +4256,57 @@ async def entrypoint(ctx: JobContext):
                     ),
                 )
 
+        normalized_phone_candidate = _normalize_phone_for_lookup(user_text or "")
+        has_digits = bool(_extract_digit_parts(user_text))
+        if (
+            flow_state == FLOW_AWAITING_ORDER_NUMBER
+            and not _mentions_no_order_number(user_text)
+            and not normalized_order_candidate
+        ):
+            expected = _expected_order_digits()
+            if has_digits:
+                agent.chat_ctx.append(
+                    role="system",
+                    text=(
+                        "SUPPORT FLOW - ORDER NUMBER STILL MISSING:\n"
+                        f"- The caller has not provided a valid {expected}-digit order number yet.\n"
+                        "- Ask them to repeat the order number digit by digit.\n"
+                        "- Do not switch to phone lookup unless they explicitly say they don't have an order number."
+                    ),
+                )
+            else:
+                agent.chat_ctx.append(
+                    role="system",
+                    text=(
+                        "SUPPORT FLOW - REQUEST ORDER NUMBER:\n"
+                        "- Ask for the order number now.\n"
+                        "- If caller says they don't have it, then request the phone number used in the order."
+                    ),
+                )
+        elif flow_state == FLOW_AWAITING_PHONE_NUMBER and not normalized_phone_candidate:
+            agent.chat_ctx.append(
+                role="system",
+                text=(
+                    "SUPPORT FLOW - REQUEST PHONE NUMBER:\n"
+                    "- Ask the caller to provide the mobile number used for the order.\n"
+                    "- Ask them to say it digit by digit."
+                ),
+            )
+        elif (
+            flow_state == FLOW_AWAITING_PHONE_CONFIRMATION
+            and not _is_affirmative_utterance(user_text)
+            and not _is_negative_utterance(user_text)
+            and not normalized_phone_candidate
+        ):
+            agent.chat_ctx.append(
+                role="system",
+                text=(
+                    "SUPPORT FLOW - PHONE CONFIRMATION PENDING:\n"
+                    "- Ask the caller to answer only yes or no to confirm the captured phone number.\n"
+                    "- If they prefer, they can repeat the phone number digit by digit."
+                ),
+            )
+
         if _mentions_no_order_number(user_text):
             _current_session["customer_no_order_number"] = True
             _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="no_order_number")
@@ -4271,7 +4316,6 @@ async def entrypoint(ctx: JobContext):
             _current_session["customer_no_order_number"] = False
             _current_session["pending_phone_candidate"] = None
             _current_session["awaiting_phone_confirmation"] = False
-            _current_session["pending_order_candidate"] = normalized_order_candidate
             _set_support_flow_state(FLOW_CHECKING_ORDER_NUMBER, reason="order_number_provided")
         current_turn_id = int(_current_session.get("last_user_turn_id") or 0) + 1
         _current_session["last_user_turn_id"] = current_turn_id
@@ -4836,7 +4880,6 @@ async def entrypoint(ctx: JobContext):
             _current_session["ticket_reference"] = None
             _current_session["support_flow_state"] = FLOW_IDLE
             _current_session["support_issue"] = None
-            _current_session["pending_order_candidate"] = None
             set_runtime_language(None)
     # Handle participant disconnection
     @ctx.room.on("participant_disconnected")
