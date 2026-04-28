@@ -701,6 +701,12 @@ def _classify_lookup_result(result_text: str) -> str:
         "δεν βρηκαμε παραγγελιες",
         "no orders found for this phone",
         "couldn't find any orders matching the phone",
+        "couldn t find any orders matching the phone",
+        "could not find any orders matching the phone",
+        "couldn t find any orders matching this phone number",
+        "could not find any orders matching this phone number",
+        "couldn t find any orders for this phone",
+        "could not find any orders for this phone",
         "σωστό αριθμό παραγγελίας",
         "σωστο αριθμο παραγγελιας",
     )
@@ -958,6 +964,32 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
             parts.append(f"The total is {int(whole)} euros.")
     parts.append("Would you like more details about this order?")
     return re.sub(r"\s{2,}", " ", " ".join(parts)).strip()
+
+
+def _build_phone_lookup_voice_summary(result_text: str, language: str) -> str:
+    """
+    Build voice-safe summary for phone lookups.
+    Preserve explicit phone not-found wording from the tool output.
+    """
+    text = _strip_markup_for_output(result_text or "")
+    if not text:
+        return ""
+
+    lang = (language or "en").lower()
+    lookup_state = _classify_lookup_result(text)
+    normalized = _normalize_intent_text(text)
+
+    if lookup_state == "not_found":
+        return text
+
+    if (
+        "couldn t understand that phone number" in normalized
+        or "could not understand that phone number" in normalized
+        or "phone number must" in normalized
+    ):
+        return _repeat_number_prompt_for_mode("phone", lang)
+
+    return _build_order_voice_summary(text, lang) or text
 
 
 def _build_order_details_voice_summary(result_text: str, language: str) -> str:
@@ -2085,7 +2117,7 @@ class ElenaFunctionContext(llm.FunctionContext):
             _current_session["details_confirmation_pending"] = False
             _current_session["details_confirmation_pending_until"] = 0.0
             _current_session["full_order_details_allowed_until"] = 0.0
-        summary = _build_order_voice_summary(result, get_agent_language()) or result
+        summary = _build_phone_lookup_voice_summary(result, get_agent_language()) or result
         if _as_bool(get_agent_setting("order_lookup_wait_phrase_enabled", True), default=True):
             return f"{self._pick_lookup_wait_phrase()} {summary}"
         return summary
@@ -2145,6 +2177,9 @@ class ElenaFunctionContext(llm.FunctionContext):
         _current_session["full_order_details_allowed_until"] = 0.0
         _current_session["details_confirmation_pending"] = False
         _current_session["details_confirmation_pending_until"] = 0.0
+        _set_lookup_pending(requested_order, reason="get_order_details_called")
+        _current_session["last_lookup_tool_called_at"] = time.time()
+        _current_session["last_lookup_tool_order"] = requested_order
         room_log("TOOL_CALL", name="get_order_details", order_number=requested_order)
         result = await self._run_tool_with_silence_pause(
             "get_order_details",
@@ -4227,7 +4262,7 @@ async def entrypoint(ctx: JobContext):
                 _current_session["details_confirmation_pending_until"] = 0.0
                 _current_session["full_order_details_allowed_until"] = 0.0
 
-            spoken_summary = _build_order_voice_summary(result, get_agent_language()) or result
+            spoken_summary = _build_phone_lookup_voice_summary(result, get_agent_language()) or result
             room_log(
                 "PHONE_LOOKUP_FORCED_FORMATTED",
                 phone=normalized_phone,
@@ -4312,6 +4347,12 @@ async def entrypoint(ctx: JobContext):
         last_agent_text = str(_current_session.get("last_agent_text") or "")
         phone_mode_locked = str(_current_session.get("number_mode_lock") or "") == "phone"
         phone_confirmation_context = _is_phone_confirmation_prompt(last_agent_text)
+        phone_lookup_schedule_snooze = _as_float(
+            get_agent_setting("phone_lookup_schedule_snooze_seconds", 20.0),
+            20.0,
+            min_value=5.0,
+            max_value=90.0,
+        )
 
         # Drop stale phone candidate if this turn is clearly back to order-id flow.
         if inferred_mode == "order":
@@ -4329,6 +4370,8 @@ async def entrypoint(ctx: JobContext):
                     _current_session["prefetch_spoken_turn_id"] = current_turn_id
                     _current_session["prefetch_suppress_llm_until"] = time.time() + 30.0
                     _current_session["phone_forced_pending_turn_id"] = current_turn_id
+                    _set_lookup_pending(phone_candidate, reason="forced_phone_lookup_scheduled")
+                    _snooze_silence_prompts(phone_lookup_schedule_snooze, reason="phone_lookup_scheduled")
                     asyncio.create_task(
                         _force_lookup_by_phone(current_turn_id, phone_candidate, "phone_number_captured")
                     )
@@ -4344,6 +4387,8 @@ async def entrypoint(ctx: JobContext):
                 _current_session["prefetch_spoken_turn_id"] = current_turn_id
                 _current_session["prefetch_suppress_llm_until"] = time.time() + 30.0
                 _current_session["phone_forced_pending_turn_id"] = current_turn_id
+                _set_lookup_pending(pending_phone, reason="forced_phone_lookup_scheduled")
+                _snooze_silence_prompts(phone_lookup_schedule_snooze, reason="phone_lookup_scheduled")
                 asyncio.create_task(
                     _force_lookup_by_phone(current_turn_id, pending_phone, "phone_confirmation_yes")
                 )
@@ -4763,7 +4808,7 @@ async def entrypoint(ctx: JobContext):
                     _snooze_silence_prompts(clarification_grace, reason="clarification_prompt")
                 if _current_session.get("lookup_pending"):
                     lookup_state_in_text = _classify_lookup_result(transcript_text)
-                    if details_prompted or lookup_state_in_text == "not_found":
+                    if details_prompted or lookup_state_in_text in {"found", "not_found"}:
                         _clear_lookup_pending(reason="agent_committed_lookup_result")
                 logger.info(f"agent_speech_committed: {transcript_text[:50]}...")
                 room_log("AGENT_TEXT", text=_truncate(transcript_text))
@@ -5082,6 +5127,15 @@ async def entrypoint(ctx: JobContext):
                 if time.time() < float(silence_tracker.get("snooze_until") or 0.0):
                     continue
 
+                # Hold silence prompts while lookup work is recent/in progress.
+                now = time.time()
+                lookup_called_at = float(_current_session.get("last_lookup_tool_called_at") or 0.0)
+                lookup_progress_until = float(_current_session.get("lookup_progress_prompt_until") or 0.0)
+                recently_lookup = lookup_called_at and (now - lookup_called_at) <= lookup_progress_window_s
+                progress_active = lookup_progress_until and now <= lookup_progress_until
+                if recently_lookup or progress_active:
+                    continue
+
                 # If we recently acknowledged a lookup wait phrase, avoid silence prompts.
                 pending_wait_phrase = str(_current_session.get("pending_lookup_wait_phrase") or "").strip()
                 pending_wait_set_at = float(_current_session.get("pending_lookup_wait_phrase_set_at") or 0.0)
@@ -5116,11 +5170,6 @@ async def entrypoint(ctx: JobContext):
                     
                     if prompt_count < silence_tracker["max_prompts"]:
                         # Prompt the user
-                        now = time.time()
-                        lookup_called_at = float(_current_session.get("last_lookup_tool_called_at") or 0.0)
-                        lookup_progress_until = float(_current_session.get("lookup_progress_prompt_until") or 0.0)
-                        recently_lookup = lookup_called_at and (now - lookup_called_at) <= lookup_progress_window_s
-                        progress_active = lookup_progress_until and now <= lookup_progress_until
                         # While lookup is in progress/recent, do not ask "Are you still there?".
                         # This avoids interrupting the user during order fetch latency.
                         if (recently_lookup or progress_active):
