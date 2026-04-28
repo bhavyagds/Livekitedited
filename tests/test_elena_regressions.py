@@ -210,16 +210,21 @@ class TestElenaRegressions(unittest.TestCase):
     def test_phone_normalization_accepts_prefixed_greek_mobile(self):
         self.assertEqual(
             self.elena._normalize_phone_for_lookup("0030 69 1234 5678"),
-            "6912345678",
+            "00306912345678",
         )
         self.assertEqual(
             self.elena._normalize_phone_for_lookup("30 69 1234 5678"),
-            "6912345678",
+            "306912345678",
         )
 
     def test_phone_normalization_rejects_invalid_numbers(self):
+        self.assertIsNone(self.elena._normalize_phone_for_lookup("94269"))
+        self.assertIsNone(self.elena._normalize_phone_for_lookup("69263977"))
         self.assertIsNone(self.elena._normalize_phone_for_lookup("1234567"))
-        self.assertIsNone(self.elena._normalize_phone_for_lookup("9999999999"))
+
+    def test_phone_normalization_accepts_generic_full_numbers(self):
+        self.assertEqual(self.elena._normalize_phone_for_lookup("9999999999"), "9999999999")
+        self.assertEqual(self.elena._normalize_phone_for_lookup("2101234567"), "2101234567")
 
     def test_lookup_classifier_catches_common_not_found_variants(self):
         self.assertEqual(

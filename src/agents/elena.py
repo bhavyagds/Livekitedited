@@ -248,13 +248,59 @@ def _normalize_order_id_strict(raw_text: str) -> Optional[str]:
 
 
 def _normalize_phone_for_lookup(raw_text: str) -> Optional[str]:
-    """Normalize spoken phone text into strict Greek mobile digits for lookup."""
+    """
+    Normalize spoken phone text into a complete phone number for Shopify lookup.
+
+    Rules:
+    - Reject partial numbers.
+    - Accept configured market pattern if provided.
+    - By default, accept:
+      - Greek mobile: 69XXXXXXXX
+      - Greek international mobile: 3069XXXXXXXX or 003069XXXXXXXX
+      - Generic full phone numbers: 10 to 15 digits
+    """
     normalized = (raw_text or "").strip().lower()
     if not normalized:
         return None
+
     digits = _digits_from_phrase(normalized)
     compact = re.sub(r"\D", "", digits or "")
-    return _extract_greek_mobile_from_digits(compact)
+    if not compact:
+        return None
+
+    configured_regex = str(
+        get_agent_setting(
+            "phone_lookup_regex",
+            r"^(?:69\d{8}|30\d{10}|0030\d{10}|\d{10,15})$",
+        )
+        or ""
+    ).strip()
+    if configured_regex:
+        try:
+            if re.fullmatch(configured_regex, compact):
+                return compact
+        except re.error:
+            room_log("INVALID_PHONE_REGEX_SETTING", regex=configured_regex)
+
+    greek_mobile = _extract_greek_mobile_from_digits(compact)
+    if greek_mobile:
+        return greek_mobile
+
+    min_digits = _as_int(
+        get_agent_setting("phone_lookup_min_digits", 10),
+        10,
+        min_value=7,
+        max_value=15,
+    )
+    max_digits = _as_int(
+        get_agent_setting("phone_lookup_max_digits", 15),
+        15,
+        min_value=min_digits,
+        max_value=15,
+    )
+    if min_digits <= len(compact) <= max_digits:
+        return compact
+    return None
 
 
 def _speak_digits(raw: str, language: str) -> str:
@@ -1508,6 +1554,13 @@ def _repeat_number_prompt_for_mode(mode: str, lang: str) -> str:
     return "Could you please repeat your order number digit by digit?"
 
 
+def _lookup_progress_prompt() -> str:
+    """Progress prompt while deterministic lookup is still in progress."""
+    if get_agent_language() == "el":
+        return "Ελέγχω ακόμη τα στοιχεία της παραγγελίας σας. Μία στιγμή ακόμη, παρακαλώ."
+    return "I’m still checking your order details. One more moment, please."
+
+
 def create_llm():
     """Create the LLM instance based on admin settings.
     
@@ -2508,8 +2561,8 @@ class ElenaFunctionContext(llm.FunctionContext):
         _set_support_flow_state(FLOW_CHECKING_PHONE_NUMBER, reason="lookup_order_by_phone_called")
         _current_session["phone_lookup_inflight"] = True
         _set_lookup_pending(normalized_phone, reason="phone_lookup_started")
-        _snooze_silence_prompts(30.0, reason="phone_lookup_started")
-        _current_session["lookup_progress_prompt_until"] = time.time() + 30.0
+        _snooze_silence_prompts(45.0, reason="phone_lookup_started")
+        _current_session["lookup_progress_prompt_until"] = time.time() + 45.0
         _current_session["last_lookup_tool_called_at"] = time.time()
         _current_session["last_lookup_tool_order"] = normalized_phone
         room_log("TOOL_CALL", name="lookup_order_by_phone", phone=normalized_phone)
@@ -3450,6 +3503,7 @@ async def entrypoint(ctx: JobContext):
         "paused_by_tool": False,
         "tool_pause_depth": 0,
         "snooze_until": 0.0,
+        "last_lookup_progress_prompt_at": 0.0,
     }
     _current_session["silence_tracker"] = silence_tracker
     
@@ -4247,8 +4301,8 @@ async def entrypoint(ctx: JobContext):
         _current_session["forced_response_suppress_llm_until"] = time.time() + forced_suppress_s
         _set_support_flow_state(FLOW_CHECKING_PHONE_NUMBER, reason=f"forced_phone_lookup:{trigger_reason}")
         _set_lookup_pending(normalized_phone, reason="phone_lookup_started")
-        _snooze_silence_prompts(30.0, reason="phone_lookup_started")
-        _current_session["lookup_progress_prompt_until"] = time.time() + 30.0
+        _snooze_silence_prompts(45.0, reason="phone_lookup_started")
+        _current_session["lookup_progress_prompt_until"] = time.time() + 45.0
         _current_session["last_lookup_tool_called_at"] = time.time()
         _current_session["last_lookup_tool_order"] = normalized_phone
         _pause_silence_for_tool("forced_lookup_order_by_phone")
@@ -4611,41 +4665,53 @@ async def entrypoint(ctx: JobContext):
             elif raw_digits:
                 # User gave numeric input, but it's not a valid Greek mobile.
                 _current_session["pending_phone_candidate"] = None
-                _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="invalid_phone_digits")
+                _current_session["number_mode_lock"] = "phone"
+                _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="invalid_or_partial_phone_digits")
+                _current_session["forced_response_manual_say_active"] = True
                 _current_session["forced_response_spoken_turn_id"] = current_turn_id
                 _current_session["forced_response_suppress_llm_until"] = time.time() + 8.0
-                _clear_pending_lookup_wait_phrase("invalid_phone_digits")
-                _clear_lookup_pending("invalid_phone_digits")
+                _clear_pending_lookup_wait_phrase("invalid_or_partial_phone_digits")
+                _clear_lookup_pending("invalid_or_partial_phone_digits")
                 _current_session["phone_lookup_inflight"] = False
-                _snooze_silence_prompts(8.0, reason="invalid_phone_digits")
+                _snooze_silence_prompts(8.0, reason="invalid_or_partial_phone_digits")
 
                 async def _say_invalid_phone_prompt() -> None:
                     if call_ended["value"] or _current_session.get("should_end"):
                         room_log("INVALID_PHONE_PROMPT_SKIP", reason="call_ended", turn_id=current_turn_id)
                         return
+                    live_agent = _current_session.get("agent")
+                    if not live_agent:
+                        _current_session["forced_response_manual_say_active"] = False
+                        return
+                    min_digits = _as_int(
+                        get_agent_setting("phone_lookup_min_digits", 10),
+                        10,
+                        min_value=7,
+                        max_value=15,
+                    )
                     lang = get_agent_language()
                     if lang == "el":
                         msg = (
-                            "Αυτό δεν φαίνεται να είναι έγκυρος αριθμός κινητού. "
-                            "Παρακαλώ πείτε έναν αριθμό κινητού που ξεκινάει με έξι εννέα, ψηφίο προς ψηφίο."
+                            "Αυτό δεν φαίνεται να είναι πλήρης αριθμός τηλεφώνου. "
+                            f"Παρακαλώ επαναλάβετε ολόκληρο τον αριθμό, τουλάχιστον {min_digits} ψηφία, ψηφίο προς ψηφίο."
                         )
                     else:
                         msg = (
-                            "That does not look like a valid mobile number. "
-                            "Please give me a mobile number starting with six nine, digit by digit."
+                            "That does not look like a complete phone number. "
+                            f"Please repeat the full number, at least {min_digits} digits, digit by digit."
                         )
-                    _current_session["forced_response_manual_say_active"] = True
                     _current_session["forced_response_spoken_text"] = msg
                     try:
-                        await agent.say(msg, allow_interruptions=True)
+                        await live_agent.say(msg, allow_interruptions=True)
                         _current_session["forced_response_suppress_llm_until"] = time.time() + 8.0
                         mark_agent_speaking()
-                        _snooze_silence_prompts(8.0, reason="invalid_phone_digits_prompt")
+                        _snooze_silence_prompts(8.0, reason="invalid_or_partial_phone_digits_prompt")
                     finally:
                         _current_session["forced_response_manual_say_active"] = False
 
                 asyncio.create_task(_say_invalid_phone_prompt())
-                room_log("INVALID_PHONE_DIGITS_REJECTED", digits=raw_digits, turn_id=current_turn_id)
+                room_log("INVALID_OR_PARTIAL_PHONE_REJECTED", digits=raw_digits, turn_id=current_turn_id)
+                return
             elif is_negative:
                 # Caller rejected previously repeated number; clear candidate.
                 _current_session["pending_phone_candidate"] = None
@@ -5242,24 +5308,44 @@ async def entrypoint(ctx: JobContext):
         # Silence prompts based on language
         if agent_lang == "el":
             prompts = [
-                "Είστε εκεί;",
-                "Με ακούτε;",
-                "Φαίνεται ότι δεν είστε εκεί. Αντίο!",
+                "Είμαι εδώ όταν είστε έτοιμοι.",
+                "Πάρτε τον χρόνο σας. Είμαι ακόμη εδώ.",
+                "Θα τερματίσω την κλήση προς το παρόν. Μπορείτε να μας καλέσετε ξανά οποιαδήποτε στιγμή.",
             ]
-            lookup_progress_prompt = "Συλλέγω τώρα τα στοιχεία της παραγγελίας σας. Ένα λεπτό ακόμη."
         else:
             prompts = [
-                "Are you still there?",
-                "Hello? Can you hear me?",
-                "It seems like you're not there. Goodbye!",
+                "I’m here when you’re ready.",
+                "Take your time. I’m still here.",
+                "I’ll end the call for now. You can call us again anytime.",
             ]
-            lookup_progress_prompt = "I am getting your order information now. One more moment please."
         try:
             while not _current_session["should_end"] and silence_tracker["enabled"]:
                 await asyncio.sleep(1.0)  # Check every second
                 
                 # Only check silence if we're waiting for a response
                 if not silence_tracker["is_waiting_for_response"]:
+                    continue
+
+                now = time.time()
+
+                # Lookup-in-progress is not user silence; announce progress instead.
+                if (
+                    _current_session.get("lookup_pending")
+                    or _current_session.get("phone_lookup_inflight")
+                    or _current_session.get("details_lookup_inflight")
+                ):
+                    tracker = _current_session.get("silence_tracker")
+                    if isinstance(tracker, dict):
+                        last_progress_at = float(tracker.get("last_lookup_progress_prompt_at") or 0.0)
+                        progress_interval = _as_float(
+                            get_agent_setting("lookup_progress_repeat_seconds", 12.0),
+                            12.0,
+                            min_value=8.0,
+                            max_value=30.0,
+                        )
+                        if now - last_progress_at >= progress_interval:
+                            tracker["last_lookup_progress_prompt_at"] = now
+                            await agent.say(_lookup_progress_prompt(), allow_interruptions=True)
                     continue
 
                 # Pause silence prompts while tool calls are executing.
@@ -5275,8 +5361,8 @@ async def entrypoint(ctx: JobContext):
                     continue
                 
                 # Calculate time since last activity
-                time_since_user = time.time() - silence_tracker["last_user_speech"]
-                time_since_agent = time.time() - silence_tracker["last_agent_speech"]
+                time_since_user = now - silence_tracker["last_user_speech"]
+                time_since_agent = now - silence_tracker["last_agent_speech"]
                 
                 # Only trigger if:
                 # 1. User hasn't spoken for silence_timeout seconds
