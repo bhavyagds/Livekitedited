@@ -574,18 +574,16 @@ _current_session: dict = {
     "lookup_progress_prompt_until": 0.0,
     "number_mode_lock": None,
     "number_mode_turn_id": 0,
-    "prefetch_manual_say_active": False,
-    "prefetch_spoken_turn_id": 0,
-    "prefetch_spoken_text": "",
-    "prefetch_suppress_llm_until": 0.0,
+    "forced_response_manual_say_active": False,
+    "forced_response_spoken_turn_id": 0,
+    "forced_response_spoken_text": "",
+    "forced_response_suppress_llm_until": 0.0,
     "lookup_pending": False,
     "lookup_pending_started_at": 0.0,
     "lookup_pending_order": None,
     "last_lookup_state": "unknown",
     "last_lookup_order": None,
-    "customer_no_order_number": False,
     "pending_phone_candidate": None,
-    "awaiting_phone_confirmation": False,
     "phone_lookup_inflight": False,
     "phone_forced_turn_id": 0,
     "phone_forced_pending_turn_id": 0,
@@ -614,22 +612,19 @@ def _set_support_flow_state(new_state: str, reason: str = "") -> None:
     """Centralized flow-state transition with logging."""
     previous = str(_current_session.get("support_flow_state") or FLOW_IDLE)
     _current_session["support_flow_state"] = new_state
-    # Keep transitional legacy flags in sync while we gradually move to pure flow-state control.
-    _current_session["awaiting_phone_confirmation"] = new_state == FLOW_AWAITING_PHONE_CONFIRMATION
-    if new_state in PHONE_FLOW_STATES:
-        _current_session["customer_no_order_number"] = True
-    elif new_state in {FLOW_CHECKING_ORDER_NUMBER, FLOW_ORDER_FOUND, FLOW_ORDER_NOT_FOUND, FLOW_AWAITING_ORDER_NUMBER, FLOW_IDLE}:
-        _current_session["customer_no_order_number"] = False
     room_log("SUPPORT_FLOW_STATE", previous=previous, current=new_state, reason=reason)
+
+
+def _is_phone_flow_active() -> bool:
+    """True when flow is currently collecting/checking phone-based lookup."""
+    flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
+    return flow_state in PHONE_FLOW_STATES
 
 
 def _is_phone_confirmation_pending() -> bool:
     """Source-of-truth check for whether phone confirmation is currently required."""
     flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
-    if flow_state == FLOW_AWAITING_PHONE_CONFIRMATION:
-        return True
-    # Transitional fallback for in-flight turns where state and legacy flag may be briefly out of sync.
-    return bool(_current_session.get("awaiting_phone_confirmation"))
+    return flow_state == FLOW_AWAITING_PHONE_CONFIRMATION
 
 
 def _safe_slug(value: str) -> str:
@@ -815,34 +810,48 @@ def _classify_lookup_result(result_text: str) -> str:
     if re.search(r"\border\s*#?\s*\d{3,8}\b", normalized):
         return "found"
 
-    found_markers = (
+    strong_found_markers = (
+        "i found your order",
+        "thanks for waiting i found your order",
+        "order details for",
+        "here are the details for order",
         "would you like more details about this order",
-        "scheduled for delivery",
-        "delivery",
-        "delivery date",
+        "βρήκα την παραγγελία σας",
+        "βρηκα την παραγγελια σας",
+        "στοιχεία παραγγελίας",
+        "λεπτομέρειες παραγγελίας",
         "θέλετε περισσότερες λεπτομέρειες",
-        "προγραμματισμένη παράδοση",
-        "status",
-        "paid",
-        "fulfilled",
-        "unfulfilled",
-        "συνολο",
-        "σύνολο",
-        "total",
-        "subtotal",
-        "shipping",
-        "items",
-        "line items",
-        "κατάσταση",
-        "παράδοση",
-        "is completed",
-        "was cancelled",
-        "completed",
-        "cancelled",
-        "ολοκληρώθηκε",
-        "ακυρώθηκε",
     )
-    if any(marker in normalized for marker in found_markers):
+    if any(marker in normalized for marker in strong_found_markers):
+        return "found"
+
+    has_order_ref = bool(
+        re.search(r"\border\s*#?\s*\d{3,8}\b", normalized)
+        or re.search(r"\bπαραγγε\w*\s*#?\s*\d{3,8}\b", normalized)
+    )
+    has_status = bool(
+        re.search(
+            r"\b(status|is completed|was cancelled|completed|cancelled|fulfilled|unfulfilled|paid|"
+            r"κατάσταση|ολοκληρώθηκε|ακυρώθηκε)\b",
+            normalized,
+        )
+    )
+    has_delivery_signal = bool(
+        re.search(
+            r"\b(delivery date|scheduled for delivery|delivery is scheduled|delivery|"
+            r"παράδοση|προγραμματισμένη παράδοση)\b",
+            normalized,
+        )
+    )
+    has_total_signal = bool(
+        re.search(r"\b(total|subtotal|σύνολο|συνολο)\b", normalized)
+    )
+    has_items_signal = bool(re.search(r"\b(line items|items \(|items:)\b", normalized))
+
+    if has_order_ref and (has_status or has_delivery_signal or has_total_signal or has_items_signal):
+        return "found"
+
+    if (has_status and has_delivery_signal) or (has_status and has_total_signal):
         return "found"
     return "unknown"
 
@@ -2226,8 +2235,7 @@ class ElenaFunctionContext(llm.FunctionContext):
                 return f"Ο αριθμός παραγγελίας πρέπει να είναι ακριβώς {expected} ψηφία. Μπορείτε να τον πείτε ξανά ψηφίο προς ψηφίο;"
             return f"The order number must be exactly {expected} digits. Could you say it again digit by digit?"
 
-        # We now have a valid order id, so do not keep forcing phone mode.
-        _current_session["customer_no_order_number"] = False
+        # We now have a valid order id, so move flow authority back to order lookup.
         _set_support_flow_state(FLOW_CHECKING_ORDER_NUMBER, reason="lookup_order_called")
         _set_lookup_pending(strict_order, reason="lookup_order_called")
         _current_session["last_lookup_tool_called_at"] = time.time()
@@ -2270,7 +2278,7 @@ class ElenaFunctionContext(llm.FunctionContext):
         forced_pending_turn = int(_current_session.get("details_forced_pending_turn_id") or 0)
         if current_turn and (forced_turn == current_turn or forced_pending_turn == current_turn):
             room_log("TOOL_RESULT_BLOCKED", name="get_order_details", reason="forced_turn_in_progress")
-            in_flight_text = _strip_markup_for_output(str(_current_session.get("prefetch_spoken_text") or ""))
+            in_flight_text = _strip_markup_for_output(str(_current_session.get("forced_response_spoken_text") or ""))
             if in_flight_text:
                 return in_flight_text
             if lang == "el":
@@ -2278,7 +2286,7 @@ class ElenaFunctionContext(llm.FunctionContext):
             return "I am already fetching those details and will share them in a moment."
         if bool(_current_session.get("details_lookup_inflight")):
             room_log("TOOL_RESULT_BLOCKED", name="get_order_details", reason="forced_lookup_inflight")
-            in_flight_text = _strip_markup_for_output(str(_current_session.get("prefetch_spoken_text") or ""))
+            in_flight_text = _strip_markup_for_output(str(_current_session.get("forced_response_spoken_text") or ""))
             if in_flight_text:
                 return in_flight_text
             if lang == "el":
@@ -2346,7 +2354,7 @@ class ElenaFunctionContext(llm.FunctionContext):
         forced_pending_turn = int(_current_session.get("phone_forced_pending_turn_id") or 0)
         if current_turn and (forced_turn == current_turn or forced_pending_turn == current_turn):
             room_log("TOOL_RESULT_BLOCKED", name="lookup_order_by_phone", reason="forced_turn_in_progress")
-            in_flight_text = _strip_markup_for_output(str(_current_session.get("prefetch_spoken_text") or ""))
+            in_flight_text = _strip_markup_for_output(str(_current_session.get("forced_response_spoken_text") or ""))
             if in_flight_text:
                 return in_flight_text
             if lang == "el":
@@ -2354,7 +2362,7 @@ class ElenaFunctionContext(llm.FunctionContext):
             return "I am already checking that phone number and will respond in a moment."
         if bool(_current_session.get("phone_lookup_inflight")):
             room_log("TOOL_RESULT_BLOCKED", name="lookup_order_by_phone", reason="forced_lookup_inflight")
-            in_flight_text = _strip_markup_for_output(str(_current_session.get("prefetch_spoken_text") or ""))
+            in_flight_text = _strip_markup_for_output(str(_current_session.get("forced_response_spoken_text") or ""))
             if in_flight_text:
                 return in_flight_text
             if lang == "el":
@@ -2374,7 +2382,6 @@ class ElenaFunctionContext(llm.FunctionContext):
             room_log("TOOL_RESULT_BLOCKED", name="lookup_order_by_phone", reason="invalid_phone_pattern")
             _clear_pending_lookup_wait_phrase("invalid_phone_pattern")
             _current_session["pending_phone_candidate"] = None
-            _current_session["awaiting_phone_confirmation"] = False
             _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="invalid_phone_pattern")
             invalid_recovery_grace = _as_float(
                 get_agent_setting("invalid_number_recovery_silence_grace_seconds", 12.0),
@@ -2718,18 +2725,16 @@ async def entrypoint(ctx: JobContext):
     _current_session["lookup_progress_prompt_until"] = 0.0
     _current_session["number_mode_lock"] = None
     _current_session["number_mode_turn_id"] = 0
-    _current_session["prefetch_manual_say_active"] = False
-    _current_session["prefetch_spoken_turn_id"] = 0
-    _current_session["prefetch_spoken_text"] = ""
-    _current_session["prefetch_suppress_llm_until"] = 0.0
+    _current_session["forced_response_manual_say_active"] = False
+    _current_session["forced_response_spoken_turn_id"] = 0
+    _current_session["forced_response_spoken_text"] = ""
+    _current_session["forced_response_suppress_llm_until"] = 0.0
     _current_session["lookup_pending"] = False
     _current_session["lookup_pending_started_at"] = 0.0
     _current_session["lookup_pending_order"] = None
     _current_session["last_lookup_state"] = "unknown"
     _current_session["last_lookup_order"] = None
-    _current_session["customer_no_order_number"] = False
     _current_session["pending_phone_candidate"] = None
-    _current_session["awaiting_phone_confirmation"] = False
     _current_session["phone_lookup_inflight"] = False
     _current_session["phone_forced_turn_id"] = 0
     _current_session["phone_forced_pending_turn_id"] = 0
@@ -3058,7 +3063,7 @@ async def entrypoint(ctx: JobContext):
         if not lowered:
             return None
 
-        force_phone_context = bool(_current_session.get("customer_no_order_number"))
+        force_phone_context = _is_phone_flow_active()
         if _mentions_no_order_number(lowered):
             return "phone"
 
@@ -3609,12 +3614,12 @@ async def entrypoint(ctx: JobContext):
         if _is_silence_prompt_text(text_value):
             return False, ""
 
-        if not _current_session.get("prefetch_manual_say_active"):
-            suppress_until = float(_current_session.get("prefetch_suppress_llm_until") or 0.0)
-            suppress_turn = int(_current_session.get("prefetch_spoken_turn_id") or 0)
+        if not _current_session.get("forced_response_manual_say_active"):
+            suppress_until = float(_current_session.get("forced_response_suppress_llm_until") or 0.0)
+            suppress_turn = int(_current_session.get("forced_response_spoken_turn_id") or 0)
             latest_turn = int(_current_session.get("last_user_turn_id") or 0)
             if suppress_until and time.time() <= suppress_until and suppress_turn == latest_turn:
-                return True, "prefetch_mutual_exclusion"
+                return True, "forced_response_mutual_exclusion"
 
         retry_guard_s = _as_float(
             get_agent_setting("forced_details_retry_guard_seconds", 120.0),
@@ -4037,8 +4042,8 @@ async def entrypoint(ctx: JobContext):
         _current_session["details_forced_pending_turn_id"] = turn_id
         _current_session["details_lookup_inflight"] = True
         _current_session["details_forced_turn_id"] = turn_id
-        _current_session["prefetch_spoken_turn_id"] = turn_id
-        _current_session["prefetch_suppress_llm_until"] = time.time() + forced_suppress_s
+        _current_session["forced_response_spoken_turn_id"] = turn_id
+        _current_session["forced_response_suppress_llm_until"] = time.time() + forced_suppress_s
         _set_lookup_pending(order_number, reason="forced_get_order_details")
         _pause_silence_for_tool("forced_get_order_details")
 
@@ -4079,10 +4084,10 @@ async def entrypoint(ctx: JobContext):
                 result=_truncate(final_text),
             )
             room_log("ORDER_DETAILS_FORCED_SPEAKING", order_number=order_number, turn_id=turn_id)
-            _current_session["prefetch_manual_say_active"] = True
-            _current_session["prefetch_spoken_text"] = final_text
+            _current_session["forced_response_manual_say_active"] = True
+            _current_session["forced_response_spoken_text"] = final_text
             await agent.say(final_text, allow_interruptions=True)
-            _current_session["prefetch_suppress_llm_until"] = time.time() + forced_suppress_s
+            _current_session["forced_response_suppress_llm_until"] = time.time() + forced_suppress_s
             mark_agent_speaking()
             _snooze_silence_prompts(10.0, reason="post_forced_order_details_spoken")
             _clear_lookup_pending(reason="forced_order_details_spoken")
@@ -4098,7 +4103,7 @@ async def entrypoint(ctx: JobContext):
             )
             _clear_lookup_pending(reason="forced_order_details_error")
         finally:
-            _current_session["prefetch_manual_say_active"] = False
+            _current_session["forced_response_manual_say_active"] = False
             _current_session["details_lookup_inflight"] = False
             if int(_current_session.get("details_forced_pending_turn_id") or 0) == turn_id:
                 _current_session["details_forced_pending_turn_id"] = 0
@@ -4143,8 +4148,8 @@ async def entrypoint(ctx: JobContext):
         _current_session["phone_forced_pending_turn_id"] = turn_id
         _current_session["phone_lookup_inflight"] = True
         _current_session["phone_forced_turn_id"] = turn_id
-        _current_session["prefetch_spoken_turn_id"] = turn_id
-        _current_session["prefetch_suppress_llm_until"] = time.time() + forced_suppress_s
+        _current_session["forced_response_spoken_turn_id"] = turn_id
+        _current_session["forced_response_suppress_llm_until"] = time.time() + forced_suppress_s
         _set_support_flow_state(FLOW_CHECKING_PHONE_NUMBER, reason=f"forced_phone_lookup:{trigger_reason}")
         _set_lookup_pending(normalized_phone, reason="forced_lookup_order_by_phone")
         _pause_silence_for_tool("forced_lookup_order_by_phone")
@@ -4191,10 +4196,10 @@ async def entrypoint(ctx: JobContext):
                 result=_truncate(spoken_summary),
             )
             room_log("PHONE_LOOKUP_FORCED_SPEAKING", phone=normalized_phone, turn_id=turn_id)
-            _current_session["prefetch_manual_say_active"] = True
-            _current_session["prefetch_spoken_text"] = spoken_summary
+            _current_session["forced_response_manual_say_active"] = True
+            _current_session["forced_response_spoken_text"] = spoken_summary
             await agent.say(spoken_summary, allow_interruptions=True)
-            _current_session["prefetch_suppress_llm_until"] = time.time() + forced_suppress_s
+            _current_session["forced_response_suppress_llm_until"] = time.time() + forced_suppress_s
             mark_agent_speaking()
             _snooze_silence_prompts(10.0, reason="post_forced_phone_lookup_spoken")
             _clear_lookup_pending(reason="forced_phone_lookup_spoken")
@@ -4208,7 +4213,7 @@ async def entrypoint(ctx: JobContext):
             )
             _clear_lookup_pending(reason="forced_phone_lookup_error")
         finally:
-            _current_session["prefetch_manual_say_active"] = False
+            _current_session["forced_response_manual_say_active"] = False
             _current_session["phone_lookup_inflight"] = False
             if int(_current_session.get("phone_forced_pending_turn_id") or 0) == turn_id:
                 _current_session["phone_forced_pending_turn_id"] = 0
@@ -4274,8 +4279,8 @@ async def entrypoint(ctx: JobContext):
             max_value=30.0,
         )
 
-        _current_session["prefetch_spoken_turn_id"] = turn_id
-        _current_session["prefetch_suppress_llm_until"] = time.time() + suppress_s
+        _current_session["forced_response_spoken_turn_id"] = turn_id
+        _current_session["forced_response_suppress_llm_until"] = time.time() + suppress_s
         spoken_phone = _speak_digits(normalized_phone, get_agent_language())
 
         if get_agent_language() == "el":
@@ -4301,16 +4306,16 @@ async def entrypoint(ctx: JobContext):
             reprompt=reprompt,
         )
 
-        _current_session["prefetch_manual_say_active"] = True
-        _current_session["prefetch_spoken_text"] = confirmation_text
+        _current_session["forced_response_manual_say_active"] = True
+        _current_session["forced_response_spoken_text"] = confirmation_text
         try:
             await agent.say(confirmation_text, allow_interruptions=True)
-            _current_session["prefetch_suppress_llm_until"] = time.time() + suppress_s
+            _current_session["forced_response_suppress_llm_until"] = time.time() + suppress_s
             mark_agent_speaking()
             _snooze_silence_prompts(confirmation_snooze_s, reason="phone_confirmation_prompt")
             room_log("PHONE_CONFIRMATION_SPOKEN", turn_id=turn_id, reason=trigger_reason)
         finally:
-            _current_session["prefetch_manual_say_active"] = False
+            _current_session["forced_response_manual_say_active"] = False
 
     @agent.on("user_speech_committed")
     def on_user_speech_committed(message):
@@ -4394,14 +4399,11 @@ async def entrypoint(ctx: JobContext):
                 )
 
         if _mentions_no_order_number(user_text):
-            _current_session["customer_no_order_number"] = True
             _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="no_order_number")
             room_log("NUMBER_MODE_HINT", mode="phone", reason="no_order_number")
         elif normalized_order_candidate:
-            # Caller provided a valid order id, so clear sticky phone preference.
-            _current_session["customer_no_order_number"] = False
+            # Caller provided a valid order id, so clear phone-capture context.
             _current_session["pending_phone_candidate"] = None
-            _current_session["awaiting_phone_confirmation"] = False
             _set_support_flow_state(FLOW_CHECKING_ORDER_NUMBER, reason="order_number_provided")
         # Clear stale pending forced-turn markers from previous turns.
         if (
@@ -4414,11 +4416,11 @@ async def entrypoint(ctx: JobContext):
             and not bool(_current_session.get("details_lookup_inflight"))
         ):
             _current_session["details_forced_pending_turn_id"] = 0
-        # New user turn cancels stale prefetch suppression window.
-        last_prefetch_turn = int(_current_session.get("prefetch_spoken_turn_id") or 0)
-        if current_turn_id > last_prefetch_turn:
-            _current_session["prefetch_suppress_llm_until"] = 0.0
-            _current_session["prefetch_spoken_text"] = ""
+        # New user turn cancels stale forced-response suppression window.
+        last_forced_response_turn = int(_current_session.get("forced_response_spoken_turn_id") or 0)
+        if current_turn_id > last_forced_response_turn:
+            _current_session["forced_response_suppress_llm_until"] = 0.0
+            _current_session["forced_response_spoken_text"] = ""
 
         _current_session["number_mode_lock"] = None
         _current_session["number_mode_turn_id"] = 0
@@ -4434,7 +4436,7 @@ async def entrypoint(ctx: JobContext):
             room_log("NUMBER_MODE_SUPPRESSED", flow_state=flow_state, candidate="phone")
         if (
             inferred_mode is None
-            and bool(_current_session.get("customer_no_order_number"))
+            and _is_phone_flow_active()
             and bool(_extract_digit_parts(user_text))
         ):
             inferred_mode = "phone"
@@ -4468,13 +4470,9 @@ async def entrypoint(ctx: JobContext):
         # Drop stale phone candidate if this turn is clearly back to order-id flow.
         if inferred_mode == "order":
             _current_session["pending_phone_candidate"] = None
-            _current_session["awaiting_phone_confirmation"] = False
 
         flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
-        phone_flow_active = (
-            flow_state in phone_flow_states
-            or bool(_current_session.get("customer_no_order_number"))
-        )
+        phone_flow_active = flow_state in phone_flow_states
         if phone_flow_active and (
             phone_mode_locked
             or phone_confirmation_context
@@ -4483,7 +4481,6 @@ async def entrypoint(ctx: JobContext):
             phone_candidate = _normalize_phone_for_lookup(user_text or "")
             if phone_candidate:
                 _current_session["pending_phone_candidate"] = phone_candidate
-                _current_session["awaiting_phone_confirmation"] = True
                 _set_support_flow_state(FLOW_AWAITING_PHONE_CONFIRMATION, reason="phone_candidate_captured")
                 room_log("PHONE_CANDIDATE_CAPTURED", phone=phone_candidate, turn_id=current_turn_id)
                 asyncio.create_task(
@@ -4496,7 +4493,6 @@ async def entrypoint(ctx: JobContext):
             elif is_negative:
                 # Caller rejected previously repeated number; clear candidate.
                 _current_session["pending_phone_candidate"] = None
-                _current_session["awaiting_phone_confirmation"] = False
                 _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="phone_confirmation_rejected")
 
             pending_phone = str(_current_session.get("pending_phone_candidate") or "")
@@ -4504,10 +4500,9 @@ async def entrypoint(ctx: JobContext):
             if pending_phone and is_affirmative and (awaiting_phone_confirmation or phone_confirmation_context):
                 # Consume candidate immediately to avoid duplicate triggers on repeated "yes".
                 _current_session["pending_phone_candidate"] = None
-                _current_session["awaiting_phone_confirmation"] = False
                 _set_support_flow_state(FLOW_CHECKING_PHONE_NUMBER, reason="phone_confirmation_yes")
-                _current_session["prefetch_spoken_turn_id"] = current_turn_id
-                _current_session["prefetch_suppress_llm_until"] = time.time() + 30.0
+                _current_session["forced_response_spoken_turn_id"] = current_turn_id
+                _current_session["forced_response_suppress_llm_until"] = time.time() + 30.0
                 _current_session["phone_forced_pending_turn_id"] = current_turn_id
                 _set_lookup_pending(pending_phone, reason="forced_phone_lookup_scheduled")
                 _snooze_silence_prompts(phone_lookup_schedule_snooze, reason="phone_lookup_scheduled")
@@ -4528,8 +4523,8 @@ async def entrypoint(ctx: JobContext):
                     _current_session["details_confirmation_pending_until"] = 0.0
                     room_log("FULL_DETAILS_ALLOWED", ttl_s=120, reason="single_yes_unlock")
                     # Deterministic path: suppress generic LLM chatter and force details tool fetch.
-                    _current_session["prefetch_spoken_turn_id"] = current_turn_id
-                    _current_session["prefetch_suppress_llm_until"] = time.time() + 20.0
+                    _current_session["forced_response_spoken_turn_id"] = current_turn_id
+                    _current_session["forced_response_suppress_llm_until"] = time.time() + 20.0
                     _current_session["details_forced_pending_turn_id"] = current_turn_id
                     asyncio.create_task(
                         _force_get_order_details(current_turn_id, "single_yes_unlock")
@@ -4551,8 +4546,8 @@ async def entrypoint(ctx: JobContext):
                 _current_session["details_confirmation_pending"] = False
                 _current_session["details_confirmation_pending_until"] = 0.0
                 room_log("FULL_DETAILS_ALLOWED", ttl_s=120, reason="explicit_request")
-                _current_session["prefetch_spoken_turn_id"] = current_turn_id
-                _current_session["prefetch_suppress_llm_until"] = time.time() + 20.0
+                _current_session["forced_response_spoken_turn_id"] = current_turn_id
+                _current_session["forced_response_suppress_llm_until"] = time.time() + 20.0
                 _current_session["details_forced_pending_turn_id"] = current_turn_id
                 asyncio.create_task(
                     _force_get_order_details(current_turn_id, "explicit_request")
@@ -4694,7 +4689,7 @@ async def entrypoint(ctx: JobContext):
                     )
                     room_log("ORDER_LOOKUP_HINT_INJECTED", order_number=detected_order_number)
 
-                    # No background prefetch task here to avoid duplicate/racing
+                    # No background forced-response task here to avoid duplicate/racing
                     # responses with normal tool calls in the same turn.
             elif order_lookup_blocked_by_flow and _should_force_order_lookup(user_text, detected_order_number):
                 room_log(
@@ -4774,11 +4769,11 @@ async def entrypoint(ctx: JobContext):
                 display_text = _strip_markup_for_output(normalized_text)
                 suppress_commit, suppress_reason = _should_suppress_tts_text(display_text or text)
                 if suppress_commit:
-                    # Keep the deterministic prefetch/forced summary in transcript even inside suppression windows.
-                    expected_prefetch_text = str(_current_session.get("prefetch_spoken_text") or "")
-                    expected_norm = _normalize_switch_text(expected_prefetch_text)
+                    # Keep the deterministic forced-response summary in transcript even inside suppression windows.
+                    expected_forced_response_text = str(_current_session.get("forced_response_spoken_text") or "")
+                    expected_norm = _normalize_switch_text(expected_forced_response_text)
                     candidate_norm = _normalize_switch_text(display_text or text)
-                    same_as_prefetch = bool(
+                    same_as_forced_response = bool(
                         expected_norm
                         and candidate_norm
                         and (
@@ -4787,7 +4782,7 @@ async def entrypoint(ctx: JobContext):
                             or expected_norm in candidate_norm
                         )
                     )
-                    if not same_as_prefetch:
+                    if not same_as_forced_response:
                         room_log(
                             "AGENT_TEXT_SUPPRESSED",
                             reason=suppress_reason,
@@ -4966,18 +4961,16 @@ async def entrypoint(ctx: JobContext):
             _current_session["lookup_progress_prompt_until"] = 0.0
             _current_session["number_mode_lock"] = None
             _current_session["number_mode_turn_id"] = 0
-            _current_session["prefetch_manual_say_active"] = False
-            _current_session["prefetch_spoken_turn_id"] = 0
-            _current_session["prefetch_spoken_text"] = ""
-            _current_session["prefetch_suppress_llm_until"] = 0.0
+            _current_session["forced_response_manual_say_active"] = False
+            _current_session["forced_response_spoken_turn_id"] = 0
+            _current_session["forced_response_spoken_text"] = ""
+            _current_session["forced_response_suppress_llm_until"] = 0.0
             _current_session["lookup_pending"] = False
             _current_session["lookup_pending_started_at"] = 0.0
             _current_session["lookup_pending_order"] = None
             _current_session["last_lookup_state"] = "unknown"
             _current_session["last_lookup_order"] = None
-            _current_session["customer_no_order_number"] = False
             _current_session["pending_phone_candidate"] = None
-            _current_session["awaiting_phone_confirmation"] = False
             _current_session["phone_lookup_inflight"] = False
             _current_session["phone_forced_turn_id"] = 0
             _current_session["phone_forced_pending_turn_id"] = 0
@@ -5167,7 +5160,7 @@ async def entrypoint(ctx: JobContext):
 
                 # Skip silence prompts while any deterministic lookup flow is still active.
                 if (
-                    bool(_current_session.get("prefetch_manual_say_active"))
+                    bool(_current_session.get("forced_response_manual_say_active"))
                     or bool(_current_session.get("phone_lookup_inflight"))
                     or bool(_current_session.get("details_lookup_inflight"))
                 ):

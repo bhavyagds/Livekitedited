@@ -271,7 +271,7 @@ class TestElenaRegressions(unittest.TestCase):
             "invalid_number_recovery_silence_grace_seconds": 12.0,
         }
         self.elena._current_session["pending_phone_candidate"] = "6912345678"
-        self.elena._current_session["awaiting_phone_confirmation"] = True
+        self.elena._current_session["support_flow_state"] = self.elena.FLOW_AWAITING_PHONE_CONFIRMATION
         self.elena._current_session["last_user_turn_id"] = 0
         self.elena._current_session["phone_forced_turn_id"] = 0
         self.elena._current_session["phone_forced_pending_turn_id"] = 0
