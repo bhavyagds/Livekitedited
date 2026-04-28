@@ -4479,6 +4479,7 @@ async def entrypoint(ctx: JobContext):
             or flow_state == FLOW_AWAITING_PHONE_CONFIRMATION
         ):
             phone_candidate = _normalize_phone_for_lookup(user_text or "")
+            raw_digits = "".join(_extract_digit_parts(user_text or ""))
             if phone_candidate:
                 _current_session["pending_phone_candidate"] = phone_candidate
                 _set_support_flow_state(FLOW_AWAITING_PHONE_CONFIRMATION, reason="phone_candidate_captured")
@@ -4490,6 +4491,41 @@ async def entrypoint(ctx: JobContext):
                         "phone_candidate_captured",
                     )
                 )
+            elif raw_digits:
+                # User gave numeric input, but it's not a valid Greek mobile.
+                _current_session["pending_phone_candidate"] = None
+                _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="invalid_phone_digits")
+                _current_session["forced_response_spoken_turn_id"] = current_turn_id
+                _current_session["forced_response_suppress_llm_until"] = time.time() + 8.0
+                _clear_pending_lookup_wait_phrase("invalid_phone_digits")
+
+                async def _say_invalid_phone_prompt() -> None:
+                    if call_ended["value"] or _current_session.get("should_end"):
+                        room_log("INVALID_PHONE_PROMPT_SKIP", reason="call_ended", turn_id=current_turn_id)
+                        return
+                    lang = get_agent_language()
+                    if lang == "el":
+                        msg = (
+                            "Αυτό δεν φαίνεται να είναι έγκυρος αριθμός κινητού. "
+                            "Παρακαλώ πείτε έναν αριθμό κινητού που ξεκινάει με έξι εννέα, ψηφίο προς ψηφίο."
+                        )
+                    else:
+                        msg = (
+                            "That does not look like a valid mobile number. "
+                            "Please give me a mobile number starting with six nine, digit by digit."
+                        )
+                    _current_session["forced_response_manual_say_active"] = True
+                    _current_session["forced_response_spoken_text"] = msg
+                    try:
+                        await agent.say(msg, allow_interruptions=True)
+                        _current_session["forced_response_suppress_llm_until"] = time.time() + 8.0
+                        mark_agent_speaking()
+                        _snooze_silence_prompts(8.0, reason="invalid_phone_digits_prompt")
+                    finally:
+                        _current_session["forced_response_manual_say_active"] = False
+
+                asyncio.create_task(_say_invalid_phone_prompt())
+                room_log("INVALID_PHONE_DIGITS_REJECTED", digits=raw_digits, turn_id=current_turn_id)
             elif is_negative:
                 # Caller rejected previously repeated number; clear candidate.
                 _current_session["pending_phone_candidate"] = None
