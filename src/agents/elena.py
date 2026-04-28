@@ -499,6 +499,19 @@ class LatencyTracker:
 # Global latency tracker
 _latency_tracker = LatencyTracker()
 
+# Deterministic support flow states (business logic, not LLM inference)
+FLOW_IDLE = "idle"
+FLOW_ISSUE_COLLECTED = "issue_collected"
+FLOW_AWAITING_ORDER_NUMBER = "awaiting_order_number"
+FLOW_CHECKING_ORDER_NUMBER = "checking_order_number"
+FLOW_AWAITING_PHONE_NUMBER = "awaiting_phone_number"
+FLOW_AWAITING_PHONE_CONFIRMATION = "awaiting_phone_confirmation"
+FLOW_CHECKING_PHONE_NUMBER = "checking_phone_number"
+FLOW_ORDER_FOUND = "order_found"
+FLOW_ORDER_NOT_FOUND = "order_not_found"
+FLOW_PHONE_NOT_FOUND = "phone_not_found"
+FLOW_DONE = "done"
+
 # Global reference to current session for termination/logging
 _current_session: dict = {
     "agent": None,
@@ -557,7 +570,17 @@ _current_session: dict = {
     "pending_ticket_payload": None,
     "ticket_created": False,
     "ticket_reference": None,
+    "support_flow_state": FLOW_IDLE,
+    "support_issue": None,
+    "pending_order_candidate": None,
 }
+
+
+def _set_support_flow_state(new_state: str, reason: str = "") -> None:
+    """Centralized flow-state transition with logging."""
+    previous = str(_current_session.get("support_flow_state") or FLOW_IDLE)
+    _current_session["support_flow_state"] = new_state
+    room_log("SUPPORT_FLOW_STATE", previous=previous, current=new_state, reason=reason)
 
 
 def _safe_slug(value: str) -> str:
@@ -2125,12 +2148,15 @@ class ElenaFunctionContext(llm.FunctionContext):
         if not strict_order:
             expected = _expected_order_digits()
             room_log("TOOL_RESULT_BLOCKED", name="lookup_order", reason="invalid_order_id_format")
+            _set_support_flow_state(FLOW_AWAITING_ORDER_NUMBER, reason="invalid_order_format")
             if lang == "el":
                 return f"Ο αριθμός παραγγελίας πρέπει να είναι ακριβώς {expected} ψηφία. Μπορείτε να τον πείτε ξανά ψηφίο προς ψηφίο;"
             return f"The order number must be exactly {expected} digits. Could you say it again digit by digit?"
 
         # We now have a valid order id, so do not keep forcing phone mode.
         _current_session["customer_no_order_number"] = False
+        _current_session["pending_order_candidate"] = strict_order
+        _set_support_flow_state(FLOW_CHECKING_ORDER_NUMBER, reason="lookup_order_called")
         _set_lookup_pending(strict_order, reason="lookup_order_called")
         _current_session["last_lookup_tool_called_at"] = time.time()
         _current_session["last_lookup_tool_order"] = strict_order
@@ -2144,9 +2170,14 @@ class ElenaFunctionContext(llm.FunctionContext):
         _current_session["last_lookup_state"] = lookup_state
         _current_session["last_lookup_order"] = strict_order if lookup_state == "found" else ""
         if lookup_state == "found":
+            _set_support_flow_state(FLOW_ORDER_FOUND, reason="lookup_order_found")
             _current_session["details_confirmation_pending"] = True
             _current_session["details_confirmation_pending_until"] = time.time() + 120.0
         else:
+            if lookup_state == "not_found":
+                _set_support_flow_state(FLOW_AWAITING_ORDER_NUMBER, reason="lookup_order_not_found")
+            else:
+                _set_support_flow_state(FLOW_ORDER_NOT_FOUND, reason=f"lookup_order_{lookup_state}")
             _current_session["details_confirmation_pending"] = False
             _current_session["details_confirmation_pending_until"] = 0.0
             _current_session["full_order_details_allowed_until"] = 0.0
@@ -2273,6 +2304,7 @@ class ElenaFunctionContext(llm.FunctionContext):
             _current_session["pending_lookup_wait_phrase_set_at"] = 0.0
             _current_session["pending_phone_candidate"] = None
             _current_session["awaiting_phone_confirmation"] = False
+            _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="invalid_phone_pattern")
             invalid_recovery_grace = _as_float(
                 get_agent_setting("invalid_number_recovery_silence_grace_seconds", 12.0),
                 12.0,
@@ -2282,6 +2314,7 @@ class ElenaFunctionContext(llm.FunctionContext):
             _snooze_silence_prompts(invalid_recovery_grace, reason="invalid_phone_recovery")
             return _repeat_number_prompt_for_mode("phone", lang)
 
+        _set_support_flow_state(FLOW_CHECKING_PHONE_NUMBER, reason="lookup_order_by_phone_called")
         _set_lookup_pending(normalized_phone, reason="lookup_order_by_phone_called")
         _current_session["last_lookup_tool_called_at"] = time.time()
         _current_session["last_lookup_tool_order"] = normalized_phone
@@ -2301,9 +2334,11 @@ class ElenaFunctionContext(llm.FunctionContext):
         _current_session["last_lookup_order"] = strict_snapshot_order if (lookup_state == "found" and strict_snapshot_order) else ""
         
         if lookup_state == "found":
+            _set_support_flow_state(FLOW_ORDER_FOUND, reason="lookup_order_by_phone_found")
             _current_session["details_confirmation_pending"] = True
             _current_session["details_confirmation_pending_until"] = time.time() + 120.0
         else:
+            _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason=f"lookup_order_by_phone_{lookup_state}")
             _current_session["details_confirmation_pending"] = False
             _current_session["details_confirmation_pending_until"] = 0.0
             _current_session["full_order_details_allowed_until"] = 0.0
@@ -2618,6 +2653,9 @@ async def entrypoint(ctx: JobContext):
     _current_session["pending_ticket_payload"] = None
     _current_session["ticket_created"] = False
     _current_session["ticket_reference"] = None
+    _current_session["support_flow_state"] = FLOW_IDLE
+    _current_session["support_issue"] = None
+    _current_session["pending_order_candidate"] = None
     
     # =========================================================================
     # PARALLEL STARTUP - Run ALL independent operations concurrently for speed
@@ -4129,6 +4167,7 @@ async def entrypoint(ctx: JobContext):
         _current_session["phone_forced_turn_id"] = turn_id
         _current_session["prefetch_spoken_turn_id"] = turn_id
         _current_session["prefetch_suppress_llm_until"] = time.time() + forced_suppress_s
+        _set_support_flow_state(FLOW_CHECKING_PHONE_NUMBER, reason=f"forced_phone_lookup:{trigger_reason}")
         _set_lookup_pending(normalized_phone, reason="forced_lookup_order_by_phone")
         _pause_silence_for_tool("forced_lookup_order_by_phone")
 
@@ -4158,9 +4197,11 @@ async def entrypoint(ctx: JobContext):
                 strict_snapshot_order if (lookup_state == "found" and strict_snapshot_order) else ""
             )
             if lookup_state == "found":
+                _set_support_flow_state(FLOW_ORDER_FOUND, reason=f"forced_phone_lookup:{trigger_reason}")
                 _current_session["details_confirmation_pending"] = True
                 _current_session["details_confirmation_pending_until"] = time.time() + 120.0
             else:
+                _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason=f"forced_phone_lookup_{lookup_state}")
                 _current_session["details_confirmation_pending"] = False
                 _current_session["details_confirmation_pending_until"] = 0.0
                 _current_session["full_order_details_allowed_until"] = 0.0
@@ -4202,14 +4243,36 @@ async def entrypoint(ctx: JobContext):
             room_log("LATE_EVENT_DROPPED", source="user_speech_committed")
             return
         user_text = message.content
+        flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
+        normalized_order_candidate = _normalize_order_id_strict(user_text)
+
+        # Deterministic state bootstrap: treat the first open-ended complaint as issue context,
+        # then ask for order number unless caller explicitly says they don't have it.
+        if flow_state == FLOW_IDLE and user_text and not _is_short_utterance(user_text):
+            if not _mentions_no_order_number(user_text) and not normalized_order_candidate:
+                _current_session["support_issue"] = user_text
+                _set_support_flow_state(FLOW_AWAITING_ORDER_NUMBER, reason="issue_collected")
+                agent.chat_ctx.append(
+                    role="system",
+                    text=(
+                        "SUPPORT FLOW:\n"
+                        "- The issue has been collected.\n"
+                        "- Ask the caller for their order number next.\n"
+                        "- If they don't have an order number, ask for the phone number used in the order."
+                    ),
+                )
+
         if _mentions_no_order_number(user_text):
             _current_session["customer_no_order_number"] = True
+            _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="no_order_number")
             room_log("NUMBER_MODE_HINT", mode="phone", reason="no_order_number")
         elif normalized_order_candidate:
             # Caller provided a valid order id, so clear sticky phone preference.
             _current_session["customer_no_order_number"] = False
             _current_session["pending_phone_candidate"] = None
             _current_session["awaiting_phone_confirmation"] = False
+            _current_session["pending_order_candidate"] = normalized_order_candidate
+            _set_support_flow_state(FLOW_CHECKING_ORDER_NUMBER, reason="order_number_provided")
         current_turn_id = int(_current_session.get("last_user_turn_id") or 0) + 1
         _current_session["last_user_turn_id"] = current_turn_id
         # Clear stale pending forced-turn markers from previous turns.
@@ -4268,6 +4331,7 @@ async def entrypoint(ctx: JobContext):
             if phone_candidate:
                 _current_session["pending_phone_candidate"] = phone_candidate
                 _current_session["awaiting_phone_confirmation"] = True
+                _set_support_flow_state(FLOW_AWAITING_PHONE_CONFIRMATION, reason="phone_candidate_captured")
                 room_log("PHONE_CANDIDATE_CAPTURED", phone=phone_candidate, turn_id=current_turn_id)
                 agent.chat_ctx.append(
                     role="system",
@@ -4282,6 +4346,7 @@ async def entrypoint(ctx: JobContext):
                 # Caller rejected previously repeated number; clear candidate.
                 _current_session["pending_phone_candidate"] = None
                 _current_session["awaiting_phone_confirmation"] = False
+                _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="phone_confirmation_rejected")
 
             pending_phone = str(_current_session.get("pending_phone_candidate") or "")
             awaiting_phone_confirmation = bool(_current_session.get("awaiting_phone_confirmation"))
@@ -4289,6 +4354,7 @@ async def entrypoint(ctx: JobContext):
                 # Consume candidate immediately to avoid duplicate triggers on repeated "yes".
                 _current_session["pending_phone_candidate"] = None
                 _current_session["awaiting_phone_confirmation"] = False
+                _set_support_flow_state(FLOW_CHECKING_PHONE_NUMBER, reason="phone_confirmation_yes")
                 _current_session["prefetch_spoken_turn_id"] = current_turn_id
                 _current_session["prefetch_suppress_llm_until"] = time.time() + 30.0
                 _current_session["phone_forced_pending_turn_id"] = current_turn_id
@@ -4768,6 +4834,9 @@ async def entrypoint(ctx: JobContext):
             _current_session["pending_ticket_payload"] = None
             _current_session["ticket_created"] = False
             _current_session["ticket_reference"] = None
+            _current_session["support_flow_state"] = FLOW_IDLE
+            _current_session["support_issue"] = None
+            _current_session["pending_order_candidate"] = None
             set_runtime_language(None)
     # Handle participant disconnection
     @ctx.room.on("participant_disconnected")
