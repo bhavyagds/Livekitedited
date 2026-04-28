@@ -15,6 +15,7 @@ import {
   X,
   User,
   Activity,
+  Brain,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useState } from 'react'
@@ -23,6 +24,7 @@ const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
   { name: 'Knowledge Base', href: '/knowledge-base', icon: Database },
   { name: 'Prompts', href: '/prompts', icon: FileText },
+  { name: 'Memory', href: '/memory', icon: Brain },
   { name: 'Calls', href: '/calls', icon: Phone },
   { name: 'Sessions', href: '/sessions', icon: Activity },
   { name: 'Analytics', href: '/analytics', icon: BarChart3 },

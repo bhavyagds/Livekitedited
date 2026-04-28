@@ -399,3 +399,23 @@ class SIPProvider(Base):
         Index("idx_sip_providers_active", "is_active"),
         Index("idx_sip_providers_sync_status", "sync_status"),
     )
+
+
+class LongTermMemory(Base):
+    """Long-term memory entries for agent training context."""
+    __tablename__ = "long_term_memory"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[str] = mapped_column(Text, nullable=False)
+    comment: Mapped[Optional[str]] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[Optional[str]] = mapped_column(String(255))
+    updated_by: Mapped[Optional[str]] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        Index("idx_long_term_memory_active", "is_active"),
+        Index("idx_long_term_memory_created", "created_at"),
+    )

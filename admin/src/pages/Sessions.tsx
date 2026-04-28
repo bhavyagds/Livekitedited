@@ -8,6 +8,7 @@ import {
   removeParticipant,
   getCalls,
   getCallTranscript,
+  createMemoryItem,
   type LiveSession,
 } from '@/lib/api'
 import {
@@ -25,6 +26,8 @@ import {
   X,
   User,
   Activity,
+  Plus,
+  Brain,
 } from 'lucide-react'
 
 function formatDuration(seconds: number): string {
@@ -43,6 +46,93 @@ function formatTimestamp(timestamp: number): string {
   return date.toLocaleTimeString()
 }
 
+// ─── Add-to-memory modal ─────────────────────────────────────────────────────
+function AddToMemoryModal({
+  line,
+  role,
+  onClose,
+  onSaved,
+}: {
+  line: string
+  role: 'user' | 'agent'
+  onClose: () => void
+  onSaved: () => void
+}) {
+  const [question, setQuestion] = useState(role === 'user' ? line.replace(/^User:\s*/i, '') : '')
+  const [answer, setAnswer] = useState(role === 'agent' ? line.replace(/^Agent:\s*/i, '') : '')
+  const [comment, setComment] = useState('')
+
+  const mutation = useMutation({
+    mutationFn: () => createMemoryItem({ question: question.trim(), answer: answer.trim(), comment: comment.trim() || undefined }),
+    onSuccess: () => { onSaved(); onClose() },
+  })
+
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[60] p-4">
+      <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full">
+        <div className="flex items-center justify-between p-5 border-b">
+          <div className="flex items-center gap-2">
+            <Brain className="w-5 h-5 text-purple-600" />
+            <h3 className="font-semibold text-slate-900">Add to Memory</h3>
+          </div>
+          <button onClick={onClose} className="p-1 hover:bg-slate-100 rounded">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          <div className="text-xs text-slate-500 bg-slate-50 rounded-lg p-3 border">
+            <span className="font-semibold">Selected line:</span> {line}
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 mb-1 uppercase tracking-wide">Question</label>
+            <textarea
+              className="w-full border rounded-lg px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-purple-500 min-h-[60px]"
+              placeholder="What should Elena be asked?"
+              value={question}
+              onChange={(e) => setQuestion(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 mb-1 uppercase tracking-wide">Answer</label>
+            <textarea
+              className="w-full border rounded-lg px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-purple-500 min-h-[60px]"
+              placeholder="How should Elena respond?"
+              value={answer}
+              onChange={(e) => setAnswer(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 mb-1 uppercase tracking-wide">
+              Comment <span className="text-slate-400 font-normal">(optional)</span>
+            </label>
+            <input
+              className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+              placeholder="Admin note…"
+              value={comment}
+              onChange={(e) => setComment(e.target.value)}
+            />
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-2 px-5 pb-5">
+          <Button variant="outline" onClick={onClose} disabled={mutation.isPending}>Cancel</Button>
+          <Button
+            onClick={() => mutation.mutate()}
+            disabled={!question.trim() || !answer.trim() || mutation.isPending}
+            className="bg-purple-600 hover:bg-purple-700 text-white"
+          >
+            {mutation.isPending
+              ? <Loader2 className="w-4 h-4 animate-spin mr-2" />
+              : <Plus className="w-4 h-4 mr-2" />}
+            Save to Memory
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function Sessions() {
   const queryClient = useQueryClient()
   const [successMessage, setSuccessMessage] = useState('')
@@ -51,6 +141,8 @@ export default function Sessions() {
     callId: string
     transcript: string | null
   } | null>(null)
+  const [memoryModal, setMemoryModal] = useState<{ line: string; role: 'user' | 'agent' } | null>(null)
+  const [memorySavedMsg, setMemorySavedMsg] = useState(false)
 
   // Fetch active sessions
   const { data: sessionsData, isLoading: sessionsLoading, refetch: refetchSessions } = useQuery({
@@ -354,23 +446,40 @@ export default function Sessions() {
               </button>
             </div>
             <div className="p-4 overflow-y-auto flex-1">
+              {memorySavedMsg && (
+                <div className="flex items-center gap-2 mb-3 p-3 bg-purple-50 border border-purple-200 rounded-lg text-purple-700 text-sm">
+                  <Brain className="w-4 h-4 shrink-0" />
+                  Saved to Memory!
+                </div>
+              )}
               {selectedTranscript.transcript ? (
-                <div className="space-y-2 font-mono text-sm">
+                <div className="space-y-1 font-mono text-sm">
                   {selectedTranscript.transcript.split('\n').map((line, i) => {
                     const isUser = line.startsWith('User:')
                     const isAgent = line.startsWith('Agent:')
+                    const role: 'user' | 'agent' = isUser ? 'user' : 'agent'
+                    if (!line.trim()) return null
                     return (
                       <div
                         key={i}
-                        className={`p-2 rounded ${
+                        className={`group flex items-start gap-2 p-2 rounded ${
                           isUser
                             ? 'bg-blue-50 text-blue-900'
                             : isAgent
                             ? 'bg-green-50 text-green-900'
-                            : 'bg-slate-50'
+                            : 'bg-slate-50 text-slate-700'
                         }`}
                       >
-                        {line}
+                        <span className="flex-1 leading-snug">{line}</span>
+                        {(isUser || isAgent) && (
+                          <button
+                            onClick={() => setMemoryModal({ line, role })}
+                            title="Add to Memory"
+                            className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-white/60"
+                          >
+                            <Plus className="w-3.5 h-3.5 text-purple-500" />
+                          </button>
+                        )}
                       </div>
                     )
                   })}
@@ -388,6 +497,19 @@ export default function Sessions() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Add-to-Memory modal */}
+      {memoryModal && (
+        <AddToMemoryModal
+          line={memoryModal.line}
+          role={memoryModal.role}
+          onClose={() => setMemoryModal(null)}
+          onSaved={() => {
+            setMemorySavedMsg(true)
+            setTimeout(() => setMemorySavedMsg(false), 3000)
+          }}
+        />
       )}
     </div>
   )

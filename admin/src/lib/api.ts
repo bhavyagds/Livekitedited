@@ -951,3 +951,65 @@ export async function getHealth(): Promise<HealthStatus> {
   const response = await api.get<HealthStatus>('/health')
   return response.data
 }
+
+// =============================================================================
+// LONG TERM MEMORY API
+// =============================================================================
+
+export interface MemoryItem {
+  id: string
+  question: string
+  answer: string
+  comment?: string
+  is_active: boolean
+  created_by?: string
+  updated_by?: string
+  created_at?: string
+  updated_at?: string
+}
+
+export interface MemoryItemsResponse {
+  items: MemoryItem[]
+  total: number
+}
+
+export async function getMemoryItems(activeOnly = false): Promise<MemoryItemsResponse> {
+  const response = await api.get<MemoryItemsResponse>('/memory', {
+    params: { active_only: activeOnly },
+  })
+  return response.data
+}
+
+export async function getMemoryItem(itemId: string): Promise<MemoryItem> {
+  const response = await api.get<MemoryItem>(`/memory/${itemId}`)
+  return response.data
+}
+
+export async function createMemoryItem(item: {
+  question: string
+  answer: string
+  comment?: string
+}): Promise<{ success: boolean; item: MemoryItem }> {
+  const response = await api.post('/memory', item)
+  return response.data
+}
+
+export async function updateMemoryItem(
+  itemId: string,
+  item: {
+    question?: string
+    answer?: string
+    comment?: string
+    is_active?: boolean
+  }
+): Promise<{ success: boolean; message: string }> {
+  const response = await api.put(`/memory/${itemId}`, item)
+  return response.data
+}
+
+export async function deleteMemoryItem(
+  itemId: string
+): Promise<{ success: boolean; message: string }> {
+  const response = await api.delete(`/memory/${itemId}`)
+  return response.data
+}

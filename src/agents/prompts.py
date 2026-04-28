@@ -45,6 +45,7 @@ _cache = {
     "kb_content": {},  # language -> content
     "prompts_content": {},  # language -> content
     "settings": {},  # key -> value
+    "long_term_memory": "",  # formatted context string
     "last_fetch": 0,
     "ttl": 10,  # Refresh frequently so admin changes apply quickly across containers
 }
@@ -119,10 +120,11 @@ async def _fetch_from_db(force: bool = False):
         kb_task = asyncio.create_task(db.get_all_kb_content())
         prompts_task = asyncio.create_task(db.get_all_prompts_content())
         settings_task = asyncio.create_task(db.get_all_settings())
+        memory_task = asyncio.create_task(db.get_active_memory_context())
         
         # Wait for all queries to complete simultaneously
-        kb_items, prompts_items, settings = await asyncio.gather(
-            kb_task, prompts_task, settings_task,
+        kb_items, prompts_items, settings, memory_context = await asyncio.gather(
+            kb_task, prompts_task, settings_task, memory_task,
             return_exceptions=True
         )
         
@@ -136,6 +138,9 @@ async def _fetch_from_db(force: bool = False):
         if isinstance(settings, Exception):
             logger.warning(f"Settings fetch failed: {settings}")
             settings = {}
+        if isinstance(memory_context, Exception):
+            logger.warning(f"Memory fetch failed: {memory_context}")
+            memory_context = ""
         
         # Update cache
         for item in kb_items:
@@ -145,6 +150,7 @@ async def _fetch_from_db(force: bool = False):
             _cache["prompts_content"][item["language"]] = item["content"]
         
         _cache["settings"] = settings
+        _cache["long_term_memory"] = memory_context if isinstance(memory_context, str) else ""
         _cache["last_fetch"] = current_time
         
         fetch_duration = time.time() - fetch_start
@@ -325,11 +331,23 @@ DO NOT say "I don't have information" if the answer is below.""")
         parts.append(kb_content)
         parts.append("="*60 + "\n")
 
+    # Add long-term memory context if available
+    memory_context = _cache.get("long_term_memory", "")
+    if memory_context:
+        parts.append("\n\n" + "="*60)
+        parts.append("""LONG-TERM MEMORY - TRAINED KNOWLEDGE:
+The following Q&A pairs have been specifically saved by admins as trained knowledge.
+Use these answers precisely when the corresponding questions arise.""")
+        parts.append("="*60)
+        parts.append(memory_context)
+        parts.append("="*60 + "\n")
+        logger.info(f"🧠 Injected long-term memory: {len(memory_context)} chars")
+
     # Repeat language guardrail at the end so it remains the strongest instruction.
     parts.append(lang_instruction)
     
     system_prompt = "\n\n".join(parts)
-    logger.info(f"📋 Built system prompt: {len(system_prompt)} chars, KB: {'yes' if kb_content else 'no'}")
+    logger.info(f"📋 Built system prompt: {len(system_prompt)} chars, KB: {'yes' if kb_content else 'no'}, Memory: {'yes' if memory_context else 'no'}")
     
     return system_prompt
 
@@ -371,11 +389,23 @@ DO NOT say "I don't have information" if the answer is below.""")
         parts.append(kb_content)
         parts.append("="*60 + "\n")
 
+    # Add long-term memory context if available
+    memory_context = _cache.get("long_term_memory", "")
+    if memory_context:
+        parts.append("\n\n" + "="*60)
+        parts.append("""LONG-TERM MEMORY - TRAINED KNOWLEDGE:
+The following Q&A pairs have been specifically saved by admins as trained knowledge.
+Use these answers precisely when the corresponding questions arise.""")
+        parts.append("="*60)
+        parts.append(memory_context)
+        parts.append("="*60 + "\n")
+        logger.info(f"🧠 Injected long-term memory: {len(memory_context)} chars")
+
     # Repeat language guardrail at the end so it remains the strongest instruction.
     parts.append(lang_instruction)
     
     system_prompt = "\n\n".join(parts)
-    logger.info(f"📋 Built system prompt (async): {len(system_prompt)} chars, KB: {'yes' if kb_content else 'no'}")
+    logger.info(f"📋 Built system prompt (async): {len(system_prompt)} chars, KB: {'yes' if kb_content else 'no'}, Memory: {'yes' if memory_context else 'no'}")
     
     return system_prompt
 
