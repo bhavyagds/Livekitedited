@@ -941,7 +941,7 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
     amount = (total_match.group(1).replace(",", ".") if total_match else "")
 
     if lang == "el":
-        intro = "Ευχαριστώ για την αναμονή. Βρήκα την παραγγελία σας."
+        intro = "Ευχαριστώ για την αναμονή. Βρήκα την παραγγελία σας,"
         if status == "completed":
             status_phrase = "έχει ολοκληρωθεί"
         elif status == "cancelled":
@@ -950,23 +950,28 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
             status_phrase = f"είναι σε κατάσταση {status}"
         else:
             status_phrase = "βρέθηκε"
+        
         parts = [intro]
         if order_number:
-            parts.append(f"Ο αριθμός παραγγελίας {_digits_spaced(order_number)} {status_phrase}.")
+            parts.append(f"ο αριθμός παραγγελίας {_digits_spaced(order_number)} {status_phrase},")
         else:
-            parts.append(f"Η παραγγελία σας {status_phrase}.")
+            parts.append(f"η παραγγελία σας {status_phrase},")
+        
         if spoken_date:
-            parts.append(f"Η παράδοση είναι προγραμματισμένη για {spoken_date}.")
+            parts.append(f"η παράδοση είναι προγραμματισμένη για {spoken_date},")
+        
         if amount:
             whole, _, frac = amount.partition(".")
             if frac:
-                parts.append(f"Το σύνολο είναι {int(whole)} ευρώ και {int(frac[:2]):02d} λεπτά.")
+                parts.append(f"το σύνολο είναι {int(whole)} ευρώ και {int(frac[:2]):02d} λεπτά,")
             else:
-                parts.append(f"Το σύνολο είναι {int(whole)} ευρώ.")
-        parts.append("Θέλετε περισσότερες λεπτομέρειες για αυτή την παραγγελία;")
-        return re.sub(r"\s{2,}", " ", " ".join(parts)).strip()
+                parts.append(f"το σύνολο είναι {int(whole)} ευρώ,")
+        
+        parts.append("θέλετε περισσότερες λεπτομέρειες για αυτή την παραγγελία;")
+        # Join with space and collapse all whitespace to ensure a single-line fluid response
+        return re.sub(r"\s+", " ", " ".join(parts)).strip()
 
-    intro = "Thanks for waiting. I found your order."
+    intro = "Thanks for waiting. I found your order,"
     if status == "completed":
         status_phrase = "is completed"
     elif status == "cancelled":
@@ -975,21 +980,26 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
         status_phrase = f"is currently {status}"
     else:
         status_phrase = "was found"
+    
     parts = [intro]
     if order_number:
-        parts.append(f"Order number {_digits_spaced(order_number)} {status_phrase}.")
+        parts.append(f"order number {_digits_spaced(order_number)} {status_phrase},")
     else:
-        parts.append(f"Your order {status_phrase}.")
+        parts.append(f"your order {status_phrase},")
+    
     if spoken_date:
-        parts.append(f"Delivery is scheduled for {spoken_date}.")
+        parts.append(f"delivery is scheduled for {spoken_date},")
+    
     if amount:
         whole, _, frac = amount.partition(".")
         if frac:
-            parts.append(f"The total is {int(whole)} euros and {int(frac[:2]):02d} cents.")
+            parts.append(f"the total is {int(whole)} euros and {int(frac[:2]):02d} cents,")
         else:
-            parts.append(f"The total is {int(whole)} euros.")
-    parts.append("Would you like more details about this order?")
-    return re.sub(r"\s{2,}", " ", " ".join(parts)).strip()
+            parts.append(f"the total is {int(whole)} euros,")
+            
+    parts.append("would you like more details about this order?")
+    # Join with space and collapse all whitespace to ensure a single-line fluid response
+    return re.sub(r"\s+", " ", " ".join(parts)).strip()
 
 
 def _build_phone_lookup_voice_summary(result_text: str, language: str) -> str:
