@@ -2453,10 +2453,8 @@ class ElenaFunctionContext(llm.FunctionContext):
         _current_session["last_lookup_tool_called_at"] = time.time()
         _current_session["last_lookup_tool_order"] = strict_order
         room_log("TOOL_CALL", name="lookup_order", order_number=strict_order)
-        wait_msg = "???? ?????, ????? ??? ?????????? ???." if get_agent_language() == "el" else "Just a moment, I am searching for your order."
-        live_agent = _current_session.get("agent")
-        if live_agent:
-            await live_agent.say(wait_msg, allow_interruptions=False)
+        wait_msg = "Μισό λεπτό, ψάχνω την παραγγελία σας." if get_agent_language() == "el" else "Just a moment, I am searching for your order."
+        await agent.say(wait_msg, allow_interruptions=False)
         try:
             result = await self._run_tool_with_silence_pause(
                 "lookup_order",
@@ -2684,9 +2682,7 @@ class ElenaFunctionContext(llm.FunctionContext):
         _current_session["last_lookup_tool_order"] = normalized_phone
         room_log("TOOL_CALL", name="lookup_order_by_phone", phone=normalized_phone)
         wait_msg = "Μισό λεπτό, ψάχνω την παραγγελία σας." if get_agent_language() == "el" else "Just a moment, I am searching for your order."
-        live_agent = _current_session.get("agent")
-        if live_agent:
-            await live_agent.say(wait_msg, allow_interruptions=False)
+        await agent.say(wait_msg, allow_interruptions=False)
         try:
             result = await self._run_tool_with_silence_pause(
                 "lookup_order_by_phone",
@@ -2959,24 +2955,6 @@ async def create_initial_context(cache_task: asyncio.Task = None) -> llm.ChatCon
     
     # Use async version to ensure KB and prompts are loaded from DB
     system_prompt = await get_system_prompt_async(agent_lang)
-    memory_marker = "LONG-TERM MEMORY - TRAINED KNOWLEDGE:"
-    memory_injected = memory_marker in system_prompt
-    memory_chars = 0
-    if memory_injected:
-        # Keep this robust and local: avoid importing private cache internals.
-        marker_pos = system_prompt.find(memory_marker)
-        if marker_pos >= 0:
-            memory_chars = len(system_prompt) - marker_pos
-    room_log(
-        "MEMORY_CONTEXT_STATUS",
-        injected=memory_injected,
-        memory_chars=memory_chars,
-    )
-    logger.info(
-        "Memory context status: injected=%s chars=%s",
-        memory_injected,
-        memory_chars,
-    )
     
     logger.info(f"Using {agent_lang} system prompt (from database), length: {len(system_prompt)} chars")
     ctx.append(role="system", text=system_prompt)
@@ -3077,8 +3055,7 @@ async def entrypoint(ctx: JobContext):
     
     # 1. Start cache refresh FIRST (this is the slowest operation - ~10s)
     from src.agents.prompts import _fetch_from_db
-    # Force refresh per room so latest admin memory is always included in this call context.
-    cache_task = asyncio.create_task(_fetch_from_db(force=True))
+    cache_task = asyncio.create_task(_fetch_from_db())
     
     # 2. Start context creation immediately - it will wait for cache internally
     # This runs in parallel with room connection
@@ -4486,9 +4463,7 @@ async def entrypoint(ctx: JobContext):
         _pause_silence_for_tool("forced_lookup_order_by_phone")
         
         wait_msg = "Μισό λεπτό, ψάχνω την παραγγελία σας." if get_agent_language() == "el" else "Just a moment, I am searching for your order."
-        live_agent = _current_session.get("agent")
-        if live_agent:
-            await live_agent.say(wait_msg, allow_interruptions=False)
+        await agent.say(wait_msg, allow_interruptions=False)
 
         try:
             room_log(
@@ -4556,87 +4531,6 @@ async def entrypoint(ctx: JobContext):
             if int(_current_session.get("phone_forced_pending_turn_id") or 0) == turn_id:
                 _current_session["phone_forced_pending_turn_id"] = 0
             _resume_silence_for_tool("forced_lookup_order_by_phone")
-
-    async def _force_lookup_by_order(turn_id: int, order_number: str, trigger_reason: str) -> None:
-        """Deterministically run lookup_order and speak the result."""
-        if call_ended["value"] or _current_session.get("should_end"):
-            room_log("ORDER_LOOKUP_FORCED_SKIP", reason="call_ended", turn_id=turn_id)
-            return
-
-        strict_order = _normalize_order_id_strict(order_number or "")
-        if not strict_order:
-            room_log(
-                "ORDER_LOOKUP_FORCED_SKIP",
-                reason="invalid_order_pattern",
-                turn_id=turn_id,
-                order_number=_truncate(order_number, max_len=64),
-            )
-            return
-
-        forced_suppress_s = _as_float(
-            get_agent_setting("forced_order_llm_suppress_seconds", 90.0),
-            90.0,
-            min_value=15.0,
-            max_value=300.0,
-        )
-        _current_session["forced_response_spoken_turn_id"] = turn_id
-        _current_session["forced_response_suppress_llm_until"] = time.time() + forced_suppress_s
-        _set_support_flow_state(FLOW_CHECKING_ORDER_NUMBER, reason=f"forced_order_lookup:{trigger_reason}")
-        _set_lookup_pending(strict_order, reason="forced_order_lookup_started")
-        _current_session["last_lookup_tool_called_at"] = time.time()
-        _current_session["last_lookup_tool_order"] = strict_order
-        _pause_silence_for_tool("forced_lookup_order")
-
-        try:
-            room_log("TOOL_CALL", name="lookup_order", order_number=strict_order, forced=True, trigger=trigger_reason)
-            result = await order_lookup.lookup_order(strict_order)
-            room_log("TOOL_RESULT", name="lookup_order", result=_truncate(result), forced=True, trigger=trigger_reason)
-
-            lookup_state = _classify_lookup_result(result)
-            _current_session["last_lookup_state"] = lookup_state
-            _current_session["last_lookup_order"] = strict_order if lookup_state == "found" else ""
-            if lookup_state == "found":
-                _set_support_flow_state(FLOW_ORDER_FOUND, reason=f"forced_order_lookup:{trigger_reason}")
-                _current_session["details_confirmation_pending"] = True
-                _current_session["details_confirmation_pending_until"] = time.time() + 120.0
-            else:
-                _set_support_flow_state(FLOW_AWAITING_ORDER_NUMBER, reason=f"forced_order_lookup_{lookup_state}")
-                _current_session["details_confirmation_pending"] = False
-                _current_session["details_confirmation_pending_until"] = 0.0
-                _current_session["full_order_details_allowed_until"] = 0.0
-                _current_session["number_mode_lock"] = "order"
-                _current_session["pending_phone_candidate"] = None
-                _reset_phone_digit_buffer("back_to_order_flow")
-
-                tracker = _current_session.get("silence_tracker")
-                silence_timeout = 12.0
-                if isinstance(tracker, dict):
-                    silence_timeout = float(tracker.get("silence_timeout") or 12.0)
-                _snooze_silence_prompts(
-                    silence_timeout + 5.0,
-                    reason="order_lookup_not_found_grace",
-                )
-
-            spoken_summary = _build_order_voice_summary(result, get_agent_language()) or result
-            _current_session["forced_response_manual_say_active"] = True
-            _current_session["forced_response_spoken_text"] = spoken_summary
-            room_log("ORDER_LOOKUP_FORCED_SPEAKING", order_number=strict_order, turn_id=turn_id)
-            await agent.say(spoken_summary, allow_interruptions=True)
-            _current_session["forced_response_suppress_llm_until"] = time.time() + forced_suppress_s
-            mark_agent_speaking()
-            _snooze_silence_prompts(10.0, reason="post_forced_order_lookup_spoken")
-        except Exception as e:
-            room_log(
-                "ORDER_LOOKUP_FORCED_ERROR",
-                order_number=strict_order,
-                trigger=trigger_reason,
-                error=_truncate(str(e), max_len=200),
-            )
-        finally:
-            _current_session["forced_response_manual_say_active"] = False
-            _clear_lookup_pending(reason="forced_order_lookup_finished")
-            _clear_pending_lookup_wait_phrase("forced_order_lookup_finished")
-            _resume_silence_for_tool("forced_lookup_order")
 
     async def _speak_phone_confirmation_prompt(
         turn_id: int,
@@ -4743,11 +4637,6 @@ async def entrypoint(ctx: JobContext):
             room_log("LATE_EVENT_DROPPED", source="user_speech_committed")
             return
         user_text = message.content
-        user_text_for_transcript = _format_user_text_for_transcript(user_text)
-        # Record transcript immediately so early-return deterministic flows
-        # (phone confirmation/lookup guards) do not drop user turns.
-        asyncio.create_task(send_user_transcript(user_text_for_transcript))
-        conversation_transcript.append(f"User: {user_text_for_transcript}")
         current_turn_id = int(_current_session.get("last_user_turn_id") or 0) + 1
         _current_session["last_user_turn_id"] = current_turn_id
         flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
@@ -5137,14 +5026,6 @@ async def entrypoint(ctx: JobContext):
             _current_session["pending_phone_candidate"] = None
             _reset_phone_digit_buffer("back_to_order_flow")
             _set_support_flow_state(FLOW_CHECKING_ORDER_NUMBER, reason="order_number_provided")
-            _current_session["number_mode_lock"] = "order"
-            _current_session["number_mode_turn_id"] = current_turn_id
-            _current_session["forced_response_spoken_turn_id"] = current_turn_id
-            _current_session["forced_response_suppress_llm_until"] = time.time() + 20.0
-            asyncio.create_task(
-                _force_lookup_by_order(current_turn_id, normalized_order_candidate, "order_number_provided")
-            )
-            return
         _current_session["number_mode_lock"] = None
         _current_session["number_mode_turn_id"] = 0
         flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
@@ -5370,6 +5251,9 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.debug(f"Order lookup forcing skipped: {e}")
 
+        user_text_for_transcript = _format_user_text_for_transcript(user_text)
+        asyncio.create_task(send_user_transcript(user_text_for_transcript))
+
         # Reset silence timer - user is responding
         reset_silence_timer()
         if _is_digit_collection_utterance(user_text):
@@ -5389,6 +5273,8 @@ async def entrypoint(ctx: JobContext):
             )
             _snooze_silence_prompts(short_grace, reason="short_utterance")
 
+        # Add to transcript
+        conversation_transcript.append(f"User: {user_text_for_transcript}")
         if abuse_detection_enabled:
             # Check for abusive language
             abuse_detected, abuse_response = check_and_respond_to_abuse(
@@ -6018,7 +5904,6 @@ def run_agent():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     run_agent()
-
 
 
 
