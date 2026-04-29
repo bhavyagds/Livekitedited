@@ -867,6 +867,11 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
     lookup_state = _classify_lookup_result(text)
 
     if lookup_state == "not_found":
+        # If the tool already provided a helpful, complete sentence or a question 
+        # (like suggesting phone lookup), preserve it verbatim instead of using a generic fallback.
+        if "?" in text or (lang == "el" and "θέλετε" in text.lower()) or len(text) > 45:
+            return text
+            
         if lang == "el":
             return (
                 "Δεν μπορώ να βρω αυτή την παραγγελία. "
@@ -2310,7 +2315,7 @@ class ElenaFunctionContext(llm.FunctionContext):
             _current_session["details_confirmation_pending_until"] = 0.0
             _current_session["full_order_details_allowed_until"] = 0.0
             
-        summary = _build_order_voice_summary(result, get_agent_language()) or result
+        summary = _build_phone_lookup_voice_summary(result, get_agent_language()) or result
         if _as_bool(get_agent_setting("order_lookup_wait_phrase_enabled", True), default=True):
             return f"{self._pick_lookup_wait_phrase()} {summary}"
         return summary

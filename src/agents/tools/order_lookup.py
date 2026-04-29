@@ -4,7 +4,9 @@ Handles order status lookups via Shopify API with caching for fast responses.
 """
 
 import logging
-from typing import Annotated
+import re
+import time
+from typing import Annotated, Optional
 
 from livekit.agents import llm
 
@@ -68,13 +70,16 @@ async def lookup_order(
         Brief order status, asks if they want more details
     """
     shopify = get_shopify_service()
+    agent_lang = get_agent_language()
     
     # Clean the order number
     cleaned = shopify.clean_order_number(order_number)
     
     # Validate format
     if not shopify.validate_order_number(cleaned):
-        logger.warning(f"Invalid order number: {order_number} -> {cleaned}")
+        logger.warning(f"Invalid order number format: {order_number} -> {cleaned}")
+        if agent_lang == "el":
+            return f"Αυτό δεν μοιάζει με έγκυρο αριθμό παραγγελίας. Μπορείτε να μου δώσετε τον 4-ψήφιο ή 5-ψήφιο αριθμό από την επιβεβαίωσή σας;"
         return f"That doesn't look like a valid order number. Can you give me the 4 or 5 digit number from your confirmation?"
     
     # Look up order (uses cache if available - instant!)
@@ -83,16 +88,20 @@ async def lookup_order(
     
     if order is None:
         logger.info(f"Order not found: {cleaned}")
-        return f"I couldn't find order {cleaned}. Could you double-check the number?"
+        if agent_lang == "el":
+            return (
+                f"Λυπάμαι, αλλά δεν βρήκα την παραγγελία {cleaned}. "
+                "Θέλετε να δοκιμάσω να την βρω με τον αριθμό του τηλεφώνου σας;"
+            )
+        return (
+            f"I'm sorry, but I couldn't find order {cleaned}. "
+            "Would you like me to try looking it up with your phone number instead?"
+        )
     
     # Store for "more details" requests
     _last_order_cache["last"] = order
     _last_order_cache["number"] = cleaned
     
-    # Get language from database settings (not env)
-    agent_lang = get_agent_language()
-    logger.info(f"Order lookup using language: {agent_lang}")
-
     # Localize order fields to match the user's language
     await shopify.localize_order(order, agent_lang)
     
@@ -109,33 +118,23 @@ async def get_order_details(
     """
     Get FULL details about an order.
     Use this when customer asks for more information after initial lookup.
-    
-    Includes: all items ordered, prices, delivery address, customer info, refund status.
-    
-    Args:
-        order_number: Order number or 'last' for most recent lookup
-        
-    Returns:
-        Complete order details
     """
     shopify = get_shopify_service()
+    agent_lang = get_agent_language()
     
     # Check if asking about last order
     if order_number.lower() == "last" and "last" in _last_order_cache:
         order = _last_order_cache["last"]
-        logger.info(f"Returning full details for last order: {order.order_number}")
     else:
         # Look up the specific order
         cleaned = shopify.clean_order_number(order_number)
         order = await shopify.lookup_order_cached(cleaned)
         
         if order is None:
-            return f"I couldn't find order {cleaned}."
+            if agent_lang == "el":
+                return f"Δεν βρέθηκαν λεπτομέρειες για την παραγγελία {cleaned}."
+            return f"I couldn't find details for order {cleaned}."
     
-    # Get language from database settings (not env)
-    agent_lang = get_agent_language()
-    logger.info(f"Order details using language: {agent_lang}")
-
     # Localize order fields to match the user's language
     await shopify.localize_order(order, agent_lang)
     
@@ -150,19 +149,15 @@ async def lookup_order_by_phone(
     """
     Look up orders by customer phone number.
     Use this when the customer doesn't have their order number.
-    
-    Args:
-        phone: The phone number to search for
-        
-    Returns:
-        Summary of orders found for this phone number
     """
     shopify = get_shopify_service()
     agent_lang = get_agent_language()
     
     cleaned = shopify.clean_phone_number(phone)
     if not cleaned or len(cleaned) < 8:
-        return f"I'm sorry, I couldn't understand that phone number. Could you please say it again?"
+        if agent_lang == "el":
+            return "Λυπάμαι, δεν κατάλαβα αυτόν τον αριθμό τηλεφώνου. Μπορείτε να τον πείτε ξανά ψηφίο προς ψηφίο;"
+        return "I'm sorry, I couldn't understand that phone number. Could you please say it again digit by digit?"
         
     logger.info(f"Looking up orders for phone: {cleaned}")
     orders = await shopify.lookup_order_by_phone(cleaned)
@@ -170,15 +165,15 @@ async def lookup_order_by_phone(
     if not orders:
         if agent_lang == "el":
             return (
-                f"Δεν βρέθηκε καμία παραγγελία συνδεδεμένη με αυτόν τον αριθμό τηλεφώνου: {phone}. "
-                "Μπορείτε να ελέγξετε ξανά τον αριθμό και να τον πείτε ψηφίο προς ψηφίο;"
+                f"Δεν βρέθηκε καμία παραγγελία συνδεδεμένη με τον αριθμό {phone}. "
+                "Θέλετε να δοκιμάσετε με έναν άλλον αριθμό ή να σας συνδέσω με έναν εκπρόσωπο;"
             )
         return (
-            f"I couldn't find any orders attached to this phone number: {phone}. "
-            "Please double-check the number and say it again digit by digit."
+            f"I couldn't find any orders attached to the phone number {phone}. "
+            "Would you like to try another number or should I connect you with a representative?"
         )
     
-    # Store the first/most recent order as "last" for potential detailed lookup
+    # Store the first/most recent order as "last"
     _last_order_cache["last"] = orders[0]
     _last_order_cache["number"] = orders[0].order_number
     
@@ -192,12 +187,11 @@ async def lookup_order_by_phone(
             return f"Βρήκα μία παραγγελία για εσάς. {summary}"
         return f"I found one order for you. {summary}"
     else:
-        # Multiple orders
         count = len(orders)
         most_recent = orders[0]
         status = most_recent.status
         if agent_lang == "el":
-            return f"Βρήκα {count} παραγγελίες για αυτόν τον αριθμό τηλεφώνου. Η πιο πρόσφατη παραγγελία σας με αριθμό {most_recent.order_number} είναι σε κατάσταση {status}. Θέλετε περισσότερες λεπτομέρειες;"
+            return f"Βρήκα {count} παραγγελίες για αυτό το τηλέφωνο. Η πιο πρόσφατη με αριθμό {most_recent.order_number} είναι σε κατάσταση {status}. Θέλετε περισσότερες λεπτομέρειες;"
         return f"I found {count} orders for this phone number. Your most recent order {most_recent.order_number} is currently {status}. Would you like more details?"
 
 
