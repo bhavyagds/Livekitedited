@@ -2453,6 +2453,8 @@ class ElenaFunctionContext(llm.FunctionContext):
         _current_session["last_lookup_tool_called_at"] = time.time()
         _current_session["last_lookup_tool_order"] = strict_order
         room_log("TOOL_CALL", name="lookup_order", order_number=strict_order)
+        wait_msg = "Μισό λεπτό, ψάχνω την παραγγελία σας." if get_agent_language() == "el" else "Just a moment, I am searching for your order."
+        await agent.say(wait_msg, allow_interruptions=False)
         try:
             result = await self._run_tool_with_silence_pause(
                 "lookup_order",
@@ -2679,6 +2681,8 @@ class ElenaFunctionContext(llm.FunctionContext):
         _current_session["last_lookup_tool_called_at"] = time.time()
         _current_session["last_lookup_tool_order"] = normalized_phone
         room_log("TOOL_CALL", name="lookup_order_by_phone", phone=normalized_phone)
+        wait_msg = "Μισό λεπτό, ψάχνω την παραγγελία σας." if get_agent_language() == "el" else "Just a moment, I am searching for your order."
+        await agent.say(wait_msg, allow_interruptions=False)
         try:
             result = await self._run_tool_with_silence_pause(
                 "lookup_order_by_phone",
@@ -2876,6 +2880,27 @@ class ElenaFunctionContext(llm.FunctionContext):
         )
         room_log("TOOL_RESULT", name="get_brand_info", result=_truncate(result))
         return result
+
+    @llm.ai_callable()
+    async def save_agent_memory(
+        self,
+        question: Annotated[str, llm.TypeInfo(description="The question asked by the user, or topic")],
+        answer: Annotated[str, llm.TypeInfo(description="The answer given or the key information")],
+        comments: Annotated[str, llm.TypeInfo(description="Any extra comments or feedback provided by user")] = None,
+    ) -> str:
+        """Save a long-term memory about the user's question, answer, and comments for future training. Use this when you get feedback or an interesting Q/A."""
+        lang = get_agent_language()
+        try:
+            from src.services.database import get_database_service
+            db = get_database_service()
+            success = await db.add_agent_memory(question, answer, comments, lang)
+            if success:
+                room_log("TOOL_CALL", name="save_agent_memory", question=question, answer=answer)
+                return "Successfully saved to memory."
+            return "Failed to save to memory."
+        except Exception as e:
+            logger.error(f"Error saving memory in tool: {e}")
+            return "Failed to save memory due to error."
 
     @llm.ai_callable()
     async def end_session(self) -> str:
@@ -4436,6 +4461,9 @@ async def entrypoint(ctx: JobContext):
         _current_session["last_lookup_tool_called_at"] = time.time()
         _current_session["last_lookup_tool_order"] = normalized_phone
         _pause_silence_for_tool("forced_lookup_order_by_phone")
+        
+        wait_msg = "Μισό λεπτό, ψάχνω την παραγγελία σας." if get_agent_language() == "el" else "Just a moment, I am searching for your order."
+        await agent.say(wait_msg, allow_interruptions=False)
 
         try:
             room_log(

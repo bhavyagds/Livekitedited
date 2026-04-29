@@ -128,11 +128,11 @@ def normalize_punctuation_for_tts(text: str) -> str:
 
 
 def _digits_to_greek_words(raw_digits: str) -> str:
-    return " ".join(_EL_DIGIT_WORDS.get(ch, ch) for ch in raw_digits)
+    return " ".join(raw_digits)
 
 
 def _digits_to_english_words(raw_digits: str) -> str:
-    return " ".join(_EN_DIGIT_WORDS.get(ch, ch) for ch in raw_digits)
+    return " ".join(raw_digits)
 
 
 def _english_spoken_id_from_raw(raw_value: str) -> str:
@@ -183,12 +183,7 @@ def normalize_numeric_ids_for_tts(text: str, language: str | None = None) -> str
         return text
 
     def _to_greek_number_words(raw_digits: str) -> str:
-        try:
-            from src.utils.greek_numbers import number_to_greek
-
-            return number_to_greek(int(raw_digits))
-        except Exception:
-            return _digits_to_greek_words(raw_digits)
+        return " ".join(raw_digits)
 
     def _ctx_repl(match: re.Match) -> str:
         label = match.group(1)

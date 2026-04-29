@@ -25,6 +25,23 @@ from sqlalchemy.sql import func
 
 from src.models.base import Base
 
+class AgentMemory(Base):
+    """Long-term memory for agent training (Question/Answer/Comments)."""
+    __tablename__ = "agent_memories"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[str] = mapped_column(Text, nullable=False)
+    comments: Mapped[Optional[str]] = mapped_column(Text)
+    language: Mapped[str] = mapped_column(String(5), default="en")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        Index("idx_agent_memories_created", "created_at"),
+        Index("idx_agent_memories_language", "language"),
+    )
+
 
 class AdminUser(Base):
     """Admin users table."""

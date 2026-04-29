@@ -2330,6 +2330,28 @@ class DatabaseService:
             traceback.print_exc()
             return {"daily": [], "hourly_today": {}, "top_callers": [], "period_days": days}
 
+    # =========================================================================
+    # AGENT MEMORY
+    # =========================================================================
+
+    async def add_agent_memory(self, question: str, answer: str, comments: str = None, language: str = "en") -> bool:
+        """Add a long-term memory entry for the agent."""
+        try:
+            from src.models.admin import AgentMemory
+            async with get_db() as session:
+                memory = AgentMemory(
+                    question=question,
+                    answer=answer,
+                    comments=comments,
+                    language=language,
+                )
+                session.add(memory)
+                await session.flush()
+            return True
+        except Exception as e:
+            logger.error(f"Error adding agent memory: {e}")
+            return False
+
 
 # Singleton instance
 db = DatabaseService()
