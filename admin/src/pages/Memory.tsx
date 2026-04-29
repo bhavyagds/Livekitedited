@@ -416,13 +416,6 @@ export default function Memory() {
         />
       )}
 
-      {/* Confirm-delete overlay (also works when clicking away) */}
-      {confirmDelete && (
-        <div
-          className="fixed inset-0 z-40"
-          onClick={() => setConfirmDelete(null)}
-        />
-      )}
     </div>
   )
 }

@@ -2959,6 +2959,24 @@ async def create_initial_context(cache_task: asyncio.Task = None) -> llm.ChatCon
     
     # Use async version to ensure KB and prompts are loaded from DB
     system_prompt = await get_system_prompt_async(agent_lang)
+    memory_marker = "LONG-TERM MEMORY - TRAINED KNOWLEDGE:"
+    memory_injected = memory_marker in system_prompt
+    memory_chars = 0
+    if memory_injected:
+        # Keep this robust and local: avoid importing private cache internals.
+        marker_pos = system_prompt.find(memory_marker)
+        if marker_pos >= 0:
+            memory_chars = len(system_prompt) - marker_pos
+    room_log(
+        "MEMORY_CONTEXT_STATUS",
+        injected=memory_injected,
+        memory_chars=memory_chars,
+    )
+    logger.info(
+        "Memory context status: injected=%s chars=%s",
+        memory_injected,
+        memory_chars,
+    )
     
     logger.info(f"Using {agent_lang} system prompt (from database), length: {len(system_prompt)} chars")
     ctx.append(role="system", text=system_prompt)
@@ -3059,7 +3077,8 @@ async def entrypoint(ctx: JobContext):
     
     # 1. Start cache refresh FIRST (this is the slowest operation - ~10s)
     from src.agents.prompts import _fetch_from_db
-    cache_task = asyncio.create_task(_fetch_from_db())
+    # Force refresh per room so latest admin memory is always included in this call context.
+    cache_task = asyncio.create_task(_fetch_from_db(force=True))
     
     # 2. Start context creation immediately - it will wait for cache internally
     # This runs in parallel with room connection
