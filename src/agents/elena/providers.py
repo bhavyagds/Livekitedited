@@ -5,7 +5,10 @@ import asyncio
 from livekit.plugins import openai, silero
 from livekit.agents import stt
 from typing import Optional, Any
-from src.agents.elena import _require_setting, room_log, get_agent_language, _current_session, get_agent_setting, _as_bool, _as_float, _as_int
+from src.agents.elena.context import _current_session
+from src.agents.elena.logger import room_log
+from src.agents.elena.helpers import _as_bool, _as_float, _as_int
+from src.agents.prompts import get_agent_language, get_agent_setting
 
 logger = logging.getLogger(__name__)
 

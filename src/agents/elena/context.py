@@ -1,3 +1,18 @@
+FLOW_IDLE = "idle"
+FLOW_AWAITING_ORDER_NUMBER = "awaiting_order_number"
+FLOW_CHECKING_ORDER_NUMBER = "checking_order_number"
+FLOW_AWAITING_PHONE_NUMBER = "awaiting_phone_number"
+FLOW_AWAITING_PHONE_CONFIRMATION = "awaiting_phone_confirmation"
+FLOW_CHECKING_PHONE_NUMBER = "checking_phone_number"
+FLOW_ORDER_FOUND = "order_found"
+FLOW_ORDER_NOT_FOUND = "order_not_found"
+
+PHONE_FLOW_STATES = {
+    FLOW_AWAITING_PHONE_NUMBER,
+    FLOW_AWAITING_PHONE_CONFIRMATION,
+    FLOW_CHECKING_PHONE_NUMBER,
+}
+
 _current_session: dict = {
     "agent": None,
     "room": None,
@@ -56,5 +71,3 @@ _current_session: dict = {
     "support_flow_state": FLOW_IDLE,
     "support_issue": None,
 }
-
-

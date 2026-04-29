@@ -1,353 +1,86 @@
+from typing import Optional, List, Dict, Any, Annotated
 import re
 import time
-import json
+import logging
+import re
+import time
 import logging
 from typing import Optional, List, Dict, Any
 from src.agents.elena.context import _current_session
 from src.agents.elena.logger import room_log
-from src.agents.prompts import get_agent_language, get_agent_setting
 
 logger = logging.getLogger(__name__)
 
 def _as_bool(value: object, default: bool = False) -> bool:
-    """Safely coerce string/number/bool values to bool."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return default
+    if value is None: return default
+    if isinstance(value, bool): return value
+    s = str(value).lower().strip()
+    return s in ("true", "1", "yes", "on")
 
-
-def _as_float(
-    value: object,
-    default: float,
-    *,
-    min_value: Optional[float] = None,
-    max_value: Optional[float] = None,
-) -> float:
-    """Safely coerce values to float with optional bounds."""
+def _as_float(value: Any, default: float = 0.0, min_value: float = None, max_value: float = None) -> float:
     try:
-        result = float(value)
-    except (TypeError, ValueError):
-        result = default
+        f = float(value)
+        if min_value is not None: f = max(f, min_value)
+        if max_value is not None: f = min(f, max_value)
+        return f
+    except (ValueError, TypeError):
+        return default
 
-    if min_value is not None:
-        result = max(min_value, result)
-    if max_value is not None:
-        result = min(max_value, result)
-    return result
-
-
-def _as_int(
-    value: object,
-    default: int,
-    *,
-    min_value: Optional[int] = None,
-    max_value: Optional[int] = None,
-) -> int:
-    """Safely coerce values to int with optional bounds."""
+def _as_int(value: Any, default: int = 0, min_value: int = None, max_value: int = None) -> int:
     try:
-        result = int(value)
-    except (TypeError, ValueError):
-        result = default
+        i = int(value)
+        if min_value is not None: i = max(i, min_value)
+        if max_value is not None: i = min(i, max_value)
+        return i
+    except (ValueError, TypeError):
+        return default
 
-    if min_value is not None:
-        result = max(min_value, result)
-    if max_value is not None:
-        result = min(max_value, result)
-    return result
-
-
-def _expected_order_digits() -> int:
-    """Configured strict order-id length used across lookups/validation."""
-    return _as_int(
-        get_agent_setting("order_id_exact_digits", 5),
-        5,
-        min_value=4,
-        max_value=8,
-    )
-
-
-_ORDER_WORD_TO_DIGIT: dict[str, str] = {
-    # English
-    "zero": "0",
-    "oh": "0",
-    "o": "0",
-    "one": "1",
-    "two": "2",
-    "three": "3",
-    "four": "4",
-    "five": "5",
-    "six": "6",
-    "seven": "7",
-    "eight": "8",
-    "nine": "9",
-    # Greek
-    "\u03bc\u03b7\u03b4\u03ad\u03bd": "0",
-    "\u03bc\u03b7\u03b4\u03b5\u03bd": "0",
-    "\u03ad\u03bd\u03b1": "1",
-    "\u03b5\u03bd\u03b1": "1",
-    "\u03b4\u03cd\u03bf": "2",
-    "\u03b4\u03c5\u03bf": "2",
-    "\u03c4\u03c1\u03af\u03b1": "3",
-    "\u03c4\u03c1\u03b9\u03b1": "3",
-    "\u03c4\u03ad\u03c3\u03c3\u03b5\u03c1\u03b1": "4",
-    "\u03c4\u03b5\u03c3\u03c3\u03b5\u03c1\u03b1": "4",
-    "\u03c0\u03ad\u03bd\u03c4\u03b5": "5",
-    "\u03c0\u03b5\u03bd\u03c4\u03b5": "5",
-    "\u03ad\u03be\u03b9": "6",
-    "\u03b5\u03be\u03b9": "6",
-    "\u03b5\u03c0\u03c4\u03ac": "7",
-    "\u03b5\u03c0\u03c4\u03b1": "7",
-    "\u03b5\u03c6\u03c4\u03ac": "7",
-    "\u03b5\u03c6\u03c4\u03b1": "7",
-    "\u03bf\u03ba\u03c4\u03ce": "8",
-    "\u03bf\u03ba\u03c4\u03c9": "8",
-    "\u03b5\u03bd\u03bd\u03ad\u03b1": "9",
-    "\u03b5\u03bd\u03bd\u03b5\u03b1": "9",
-    # Common transliterations
-    "ena": "1",
-    "dyo": "2",
-    "tria": "3",
-    "tessera": "4",
-    "pente": "5",
-    "eksi": "6",
-    "epta": "7",
-    "okto": "8",
-    "ennea": "9",
-    # Common STT variants for Greek "εννιά"
-    "\u03bd\u03b5\u03b1": "9",
-    "\u03bd\u03b9\u03b1": "9",
-    "\u03b5\u03bd\u03b9\u03b1": "9",
-    "\u03b5\u03bd\u03b9\u03ac": "9",
-}
-
-
-def _normalize_digit_token(token: str) -> str:
-    """Lowercase + strip accents so Greek spoken digits map reliably."""
-    normalized = unicodedata.normalize("NFD", (token or "").strip().lower())
-    return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
-
-
-def _extract_greek_mobile_from_digits(raw_digits: str) -> Optional[str]:
-    """
-    Extract best Greek mobile candidate (69XXXXXXXX) from a noisy digit stream.
-    Handles extra prefixes/noise and picks the last valid 10-digit window.
-    """
-    digits = re.sub(r"\D", "", raw_digits or "")
-    if not digits:
-        return None
-
-    candidates: list[str] = []
-
-    def _collect(stream: str) -> None:
-        if re.fullmatch(r"69\d{8}", stream):
-            candidates.append(stream)
-        for match in re.finditer(r"69\d{8}", stream):
-            candidates.append(match.group(0))
-
-    _collect(digits)
-
-    if digits.startswith("0030"):
-        _collect(digits[4:])
-    elif digits.startswith("30") and len(digits) > 10:
-        _collect(digits[2:])
-
-    return candidates[-1] if candidates else None
-
-
-def _digits_from_phrase(text: str) -> str:
-    """Convert mixed spoken-number tokens into a compact digits-only string."""
-    tokens = re.findall(r"[a-zA-Z\u0370-\u03FF0-9]+", (text or "").lower())
-    digits: list[str] = []
-    for token in tokens:
-        normalized = _normalize_digit_token(token)
-        if normalized in _ORDER_WORD_TO_DIGIT:
-            digits.append(_ORDER_WORD_TO_DIGIT[normalized])
-            continue
-        if token.isdigit():
-            digits.append(token)
-            continue
-        embedded_digits = re.sub(r"\D", "", token)
-        if embedded_digits:
-            digits.append(embedded_digits)
-    return "".join(digits)
-
-
-def _extract_digit_parts(text: str) -> list[str]:
-    tokens = re.findall(r"[a-zA-Z\u0370-\u03FF0-9]+", (text or "").lower())
-    parts: list[str] = []
-    for token in tokens:
-        normalized = _normalize_digit_token(token)
-        if normalized in _ORDER_WORD_TO_DIGIT:
-            parts.append(_ORDER_WORD_TO_DIGIT[normalized])
-            continue
-        if token.isdigit():
-            parts.append(token)
-            continue
-        embedded_digits = re.sub(r"\D", "", token)
-        if embedded_digits:
-            parts.append(embedded_digits)
-    return parts
-
-
-def _normalize_order_id_strict(raw_text: str) -> Optional[str]:
-    """Return strict order id candidate with exact configured length."""
-    expected = _expected_order_digits()
-    normalized = (raw_text or "").strip().lower()
-    if not normalized:
-        return None
-
-    explicit_runs = re.findall(rf"\d{{{expected}}}", normalized)
-    if explicit_runs:
-        return explicit_runs[-1]
-
-    parts = _extract_digit_parts(normalized)
-    joined = "".join(parts)
-    if len(joined) == expected:
-        return joined
-    return None
-
+def _extract_digit_parts(text: str) -> List[str]:
+    return re.findall(r"\d", text or "")
 
 def _normalize_phone_for_lookup(raw_text: str) -> Optional[str]:
-    """
-    Normalize spoken phone text into a complete phone number for Shopify lookup.
+    digits = "".join(_extract_digit_parts(raw_text))
+    if not digits: return None
+    if digits.startswith("30") and len(digits) == 12: return "+" + digits
+    if len(digits) == 10 and digits.startswith("69"): return "+30" + digits
+    if digits.startswith("+"): return digits
+    return None
 
-    Rules:
-    - Reject partial numbers.
-    - Accept configured market pattern if provided.
-    - By default, accept:
-      - Greek mobile: 69XXXXXXXX
-      - Greek international mobile: 3069XXXXXXXX or 003069XXXXXXXX
-      - Generic full phone numbers: 10 to 15 digits
-    """
-    normalized = (raw_text or "").strip().lower()
-    if not normalized:
-        return None
-
-    digits = _digits_from_phrase(normalized)
-    compact = re.sub(r"\D", "", digits or "")
-    if not compact:
-        return None
-
-    configured_regex = str(
-        get_agent_setting(
-            "phone_lookup_regex",
-            r"^(?:69\d{8}|30\d{10}|0030\d{10}|\d{10,15})$",
-        )
-        or ""
-    ).strip()
-    if configured_regex:
-        try:
-            if re.fullmatch(configured_regex, compact):
-                return compact
-        except re.error:
-            room_log("INVALID_PHONE_REGEX_SETTING", regex=configured_regex)
-
-    greek_mobile = _extract_greek_mobile_from_digits(compact)
-    if greek_mobile:
-        return greek_mobile
-
-    min_digits = _as_int(
-        get_agent_setting("phone_lookup_min_digits", 10),
-        10,
-        min_value=7,
-        max_value=15,
-    )
-    max_digits = _as_int(
-        get_agent_setting("phone_lookup_max_digits", 15),
-        15,
-        min_value=min_digits,
-        max_value=15,
-    )
-    if min_digits <= len(compact) <= max_digits:
-        return compact
+def _normalize_order_id_strict(raw_text: str) -> Optional[str]:
+    from src.agents.prompts import get_agent_setting
+    expected = int(get_agent_setting("order_id_digits", 5))
+    digits = "".join(_extract_digit_parts(raw_text))
+    # Look for exact match of N digits
+    match = re.search(rf"\b\d{{{expected}}}\b", raw_text)
+    if match: return match.group(0)
+    if len(digits) == expected: return digits
     return None
 
 
-def _speak_digits(raw: str, language: str) -> str:
-    """Convert digits into digit-by-digit spoken words for reliable confirmations."""
-    digits = re.sub(r"\D", "", raw or "")
-    if not digits:
-        return ""
-
-    if (language or "").lower() == "el":
-        words = {
-            "0": "μηδέν",
-            "1": "ένα",
-            "2": "δύο",
-            "3": "τρία",
-            "4": "τέσσερα",
-            "5": "πέντε",
-            "6": "έξι",
-            "7": "επτά",
-            "8": "οκτώ",
-            "9": "εννέα",
-        }
-    else:
-        words = {
-            "0": "zero",
-            "1": "one",
-            "2": "two",
-            "3": "three",
-            "4": "four",
-            "5": "five",
-            "6": "six",
-            "7": "seven",
-            "8": "eight",
-            "9": "nine",
-        }
-
-    return " ".join(words[digit] for digit in digits)
 
 
-def _require_setting(key: str, *, allow_empty: bool = False):
-    """Fetch a required setting from DB. Raises if missing or empty."""
-    value = get_agent_setting(key)
-    if value is None:
-        raise RuntimeError(f"Missing required setting: {key}")
-    if isinstance(value, str) and not value.strip() and not allow_empty:
-        raise RuntimeError(f"Missing required setting: {key}")
-    return value
 
 
-def _require_float_setting(
-    key: str,
-    *,
-    min_value: Optional[float] = None,
-    max_value: Optional[float] = None,
-) -> float:
-    """Fetch a required float setting from DB, with validation."""
-    raw = _require_setting(key)
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        raise RuntimeError(f"Invalid numeric setting: {key}")
-
-    if min_value is not None:
-        value = max(min_value, value)
-    if max_value is not None:
-        value = min(max_value, value)
-    return value
 
 
-def _require_bool_setting(key: str) -> bool:
-    """Fetch a required boolean setting from DB, with coercion."""
-    raw = _require_setting(key)
-    return _as_bool(raw, default=False)
 
 
-# =============================================================================
-# CALL EVENT LOGGING
-# =============================================================================
+
+
+
+
+
+
+
+
+
 def _safe_slug(value: str) -> str:
     """Normalize strings for filenames."""
     if not value:
         return "unknown"
     slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", value).strip("_")
     return slug or "unknown"
+
 
 
 def _truncate(text: str, max_len: int = 500) -> str:
@@ -360,6 +93,7 @@ def _truncate(text: str, max_len: int = 500) -> str:
     return cleaned[:max_len] + "…"
 
 
+
 def _strip_markup_for_output(text: str) -> str:
     """Strip SSML/markdown markers so logs/UI don't include literal markup."""
     if not text:
@@ -369,6 +103,7 @@ def _strip_markup_for_output(text: str) -> str:
     cleaned = re.sub(r"[*_`~#]+", " ", cleaned)
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
     return cleaned.strip()
+
 
 
 def _strip_tts_style_leakage(text: str) -> str:
@@ -405,6 +140,7 @@ def _strip_tts_style_leakage(text: str) -> str:
     return cleaned
 
 
+
 def _normalize_intent_text(text: str) -> str:
     """Normalize text for robust intent checks."""
     lowered = (text or "").strip().lower()
@@ -413,6 +149,7 @@ def _normalize_intent_text(text: str) -> str:
     lowered = re.sub(r"[^\w\s]", " ", lowered, flags=re.UNICODE)
     lowered = re.sub(r"\s+", " ", lowered).strip()
     return lowered
+
 
 
 def _is_affirmative_utterance(text: str) -> bool:
@@ -427,6 +164,7 @@ def _is_affirmative_utterance(text: str) -> bool:
     return normalized in yes_tokens
 
 
+
 def _is_negative_utterance(text: str) -> bool:
     """Return True for short negative confirmations like 'no'."""
     normalized = _normalize_intent_text(text)
@@ -434,6 +172,7 @@ def _is_negative_utterance(text: str) -> bool:
         return False
     no_tokens = {"no", "nope", "nah", "not now", "οχι", "όχι", "οχι ευχαριστω", "όχι ευχαριστώ"}
     return normalized in no_tokens
+
 
 
 def _is_issue_confirmation_utterance(text: str) -> bool:
@@ -455,6 +194,7 @@ def _is_issue_confirmation_utterance(text: str) -> bool:
         "σωστα",
     )
     return any(phrase in normalized for phrase in confirmation_phrases)
+
 
 
 def _classify_lookup_result(result_text: str) -> str:
@@ -571,6 +311,7 @@ def _classify_lookup_result(result_text: str) -> str:
     return "unknown"
 
 
+
 def _extract_ticket_reference(text: str) -> Optional[str]:
     """Extract support ticket reference from tool output."""
     if not text:
@@ -580,80 +321,6 @@ def _extract_ticket_reference(text: str) -> Optional[str]:
         return match.group(1).strip()
     return None
 
-
-def _create_room_logger(room_name: str, job_id: Optional[str]) -> tuple[logging.Logger, str]:
-    """Create a per-room log file and logger."""
-    log_dir = os.getenv("ROOM_LOG_DIR", "/app/data/room-logs")
-    os.makedirs(log_dir, exist_ok=True)
-    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-    safe_room = _safe_slug(room_name)
-    safe_job = _safe_slug(job_id or "job")
-    filename = f"room_{safe_room}_{safe_job}_{ts}.log"
-    path = os.path.join(log_dir, filename)
-
-    room_logger = logging.getLogger(f"room.{safe_room}.{safe_job}.{ts}")
-    room_logger.setLevel(logging.INFO)
-    room_logger.propagate = False
-    if not room_logger.handlers:
-        handler = logging.FileHandler(path, encoding="utf-8")
-        formatter = logging.Formatter("%(asctime)sZ | %(levelname)s | %(message)s")
-        formatter.converter = time.gmtime
-        handler.setFormatter(formatter)
-        room_logger.addHandler(handler)
-
-    return room_logger, path
-
-def _should_block_silence_prompt(reason: str = "") -> bool:
-    """
-    Return True when silence prompts must be blocked during deterministic work.
-    """
-    now = time.time()
-    block_reason: Optional[str] = None
-
-    if bool(_current_session.get("lookup_pending")):
-        block_reason = f"{reason}:lookup_pending"
-    elif bool(_current_session.get("phone_lookup_inflight")):
-        block_reason = f"{reason}:phone_lookup_inflight"
-    elif bool(_current_session.get("details_lookup_inflight")):
-        block_reason = f"{reason}:details_lookup_inflight"
-    elif bool(_current_session.get("forced_response_manual_say_active")):
-        block_reason = f"{reason}:forced_response_active"
-    else:
-        forced_suppress_until = float(_current_session.get("forced_response_suppress_llm_until") or 0.0)
-        if forced_suppress_until and now <= forced_suppress_until:
-            block_reason = f"{reason}:forced_response_suppress_window"
-        elif _is_phone_confirmation_pending():
-            block_reason = f"{reason}:phone_confirmation_pending"
-        else:
-            lookup_progress_until = float(_current_session.get("lookup_progress_prompt_until") or 0.0)
-            if lookup_progress_until and now <= lookup_progress_until:
-                block_reason = f"{reason}:lookup_progress_window"
-            else:
-                tracker = _current_session.get("silence_tracker")
-                if isinstance(tracker, dict):
-                    snooze_until = float(tracker.get("snooze_until") or 0.0)
-                    if snooze_until and now <= snooze_until:
-                        block_reason = f"{reason}:silence_snooze"
-                if not block_reason:
-                    pending_wait_phrase = str(_current_session.get("pending_lookup_wait_phrase") or "").strip()
-                    pending_wait_set_at = float(_current_session.get("pending_lookup_wait_phrase_set_at") or 0.0)
-                    lookup_wait_guard_s = _as_float(
-                        get_agent_setting("lookup_wait_phrase_silence_guard_seconds", 30.0),
-                        30.0,
-                        min_value=10.0,
-                        max_value=90.0,
-                    )
-                    if pending_wait_phrase and pending_wait_set_at and (now - pending_wait_set_at) <= lookup_wait_guard_s:
-                        block_reason = f"{reason}:recent_wait_phrase"
-
-    if block_reason:
-        if _current_session.get("last_silence_block_reason") != block_reason:
-            room_log("SILENCE_PROMPT_BLOCKED", reason=block_reason)
-            _current_session["last_silence_block_reason"] = block_reason
-        return True
-
-    _current_session["last_silence_block_reason"] = None
-    return False
 
 
 def _build_order_voice_summary(result_text: str, language: str) -> str:
@@ -804,6 +471,7 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
     return re.sub(r"\s{2,}", " ", " ".join(parts)).strip()
 
 
+
 def _build_phone_lookup_voice_summary(result_text: str, language: str) -> str:
     """
     Build voice-safe summary for phone lookups.
@@ -847,6 +515,7 @@ def _build_phone_lookup_voice_summary(result_text: str, language: str) -> str:
         return _repeat_number_prompt_for_mode("phone", lang)
 
     return _build_order_voice_summary(text, lang) or text
+
 
 
 def _build_order_details_voice_summary(result_text: str, language: str) -> str:
@@ -1042,5 +711,131 @@ def _build_order_details_voice_summary(result_text: str, language: str) -> str:
         summary = " ".join(parts)
 
     return re.sub(r"\s{2,}", " ", summary).strip()
+
+
+
+def _should_block_silence_prompt(reason: str = "") -> bool:
+    """
+    Return True when silence prompts must be blocked during deterministic work.
+    """
+    now = time.time()
+    block_reason: Optional[str] = None
+
+    if bool(_current_session.get("lookup_pending")):
+        block_reason = f"{reason}:lookup_pending"
+    elif bool(_current_session.get("phone_lookup_inflight")):
+        block_reason = f"{reason}:phone_lookup_inflight"
+    elif bool(_current_session.get("details_lookup_inflight")):
+        block_reason = f"{reason}:details_lookup_inflight"
+    elif bool(_current_session.get("forced_response_manual_say_active")):
+        block_reason = f"{reason}:forced_response_active"
+    else:
+        forced_suppress_until = float(_current_session.get("forced_response_suppress_llm_until") or 0.0)
+        if forced_suppress_until and now <= forced_suppress_until:
+            block_reason = f"{reason}:forced_response_suppress_window"
+        elif _is_phone_confirmation_pending():
+            block_reason = f"{reason}:phone_confirmation_pending"
+        else:
+            lookup_progress_until = float(_current_session.get("lookup_progress_prompt_until") or 0.0)
+            if lookup_progress_until and now <= lookup_progress_until:
+                block_reason = f"{reason}:lookup_progress_window"
+            else:
+                tracker = _current_session.get("silence_tracker")
+                if isinstance(tracker, dict):
+                    snooze_until = float(tracker.get("snooze_until") or 0.0)
+                    if snooze_until and now <= snooze_until:
+                        block_reason = f"{reason}:silence_snooze"
+                if not block_reason:
+                    pending_wait_phrase = str(_current_session.get("pending_lookup_wait_phrase") or "").strip()
+                    pending_wait_set_at = float(_current_session.get("pending_lookup_wait_phrase_set_at") or 0.0)
+                    lookup_wait_guard_s = _as_float(
+                        get_agent_setting("lookup_wait_phrase_silence_guard_seconds", 30.0),
+                        30.0,
+                        min_value=10.0,
+                        max_value=90.0,
+                    )
+                    if pending_wait_phrase and pending_wait_set_at and (now - pending_wait_set_at) <= lookup_wait_guard_s:
+                        block_reason = f"{reason}:recent_wait_phrase"
+
+    if block_reason:
+        if _current_session.get("last_silence_block_reason") != block_reason:
+            room_log("SILENCE_PROMPT_BLOCKED", reason=block_reason)
+            _current_session["last_silence_block_reason"] = block_reason
+        return True
+
+    _current_session["last_silence_block_reason"] = None
+    return False
+
+
+
+def _is_silence_prompt_text(text: str) -> bool:
+    """Return True when text is one of the stock silence prompts."""
+    if not text:
+        return False
+    normalized = re.sub(r"[^\w\s]", " ", text.lower(), flags=re.UNICODE)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    silence_prompts = {
+        "είστε εκεί",
+        "με ακούτε",
+        "φαίνεται ότι δεν είστε εκεί αντίο",
+        "are you still there",
+        "hello can you hear me",
+        "it seems like you re not there goodbye",
+    }
+    return normalized in silence_prompts
+
+
+
+def _is_lookup_wait_ack_only_text(text: str) -> bool:
+    """Return True for short 'one moment while I check' style messages."""
+    if not text:
+        return False
+    normalized = re.sub(r"\s+", " ", text.lower()).strip()
+    if not normalized or len(normalized) > 180:
+        return False
+
+    has_wait_ack = bool(
+        re.search(
+            r"(one moment|give me a moment|while i check|let me check|i ll check|thanks[, ]+got it|"
+            r"μια στιγμή|περιμένετε|το ελέγχω|να το ελέγξω)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+    )
+    if not has_wait_ack:
+        return False
+
+    # Not an ack-only phrase if it already contains concrete lookup results.
+    has_results = bool(
+        re.search(
+            r"(i found your order|order number\s*\d+|here are the details|delivery is scheduled|the total is|"
+            r"would you like more details|status is)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+    )
+    return not has_results
+
+
+
+def _repeat_number_prompt_for_mode(mode: str, lang: str) -> str:
+    """Recovery prompt when number capture/validation is unclear."""
+    is_phone = (mode or "").lower() == "phone"
+    if lang == "el":
+        if is_phone:
+            return "Μπορείτε να επαναλάβετε το κινητό σας ψηφίο προς ψηφίο, παρακαλώ;"
+        return "Μπορείτε να επαναλάβετε τον αριθμό παραγγελίας ψηφίο προς ψηφίο, παρακαλώ;"
+    if is_phone:
+        return "Could you please repeat your mobile number digit by digit?"
+    return "Could you please repeat your order number digit by digit?"
+
+
+
+def _lookup_progress_prompt() -> str:
+    """Progress prompt while deterministic lookup is still in progress."""
+    if get_agent_language() == "el":
+        return "Ελέγχω ακόμη τα στοιχεία της παραγγελίας σας. Μία στιγμή ακόμη, παρακαλώ."
+    return "I’m still checking your order details. One more moment, please."
+
 
 

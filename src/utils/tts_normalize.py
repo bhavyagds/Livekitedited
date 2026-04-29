@@ -34,7 +34,7 @@ _EL_ID_CONTEXT_RE = re.compile(
     r"αριθμ(?:ός|ο)?(?:\s*παραγγελ(?:ίας|ιας))?|"
     r"παραγγελ(?:ία|ια)|"
     r"τηλέφων(?:ο|ου)|κινητ(?:ό|ο)|phone|mobile"
-    r")\s*[:#]?\s*(\d{4,16})\b"
+    r")(?:\s+είναι)?\s*[:#]?\s*(\d{4,16})\b"
 )
 _EL_HASH_NUMBER_RE = re.compile(r"#\s*(\d{4,16})\b")
 _EL_LONG_DIGITS_RE = re.compile(r"(?<![\d.,])(\d{5,16})(?![\d.,])")
@@ -46,7 +46,7 @@ _EN_ID_CONTEXT_RE = re.compile(
     r"phone(?:\s*number)?|mobile(?:\s*number)?|"
     r"zip(?:\s*code)?|postal(?:\s*code)?|"
     r"confirmation(?:\s*number)?|reference(?:\s*number)?|tracking(?:\s*number)?"
-    r")\s*[:#]?\s*(\+?\d(?:[\s-]*\d){3,20})\b"
+    r")(?:\s+is)?\s*[:#]?\s*(\+?\d(?:[\s-]*\d){3,20})\b"
 )
 _EN_HASH_NUMBER_RE = re.compile(r"#\s*(\d{4,16})\b")
 
