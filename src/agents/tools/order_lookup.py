@@ -5,7 +5,6 @@ Handles order status lookups via Shopify API with caching for fast responses.
 
 import logging
 from contextvars import ContextVar
-import re
 from typing import Annotated
 
 from livekit.agents import llm
@@ -17,10 +16,7 @@ from src.config import settings
 logger = logging.getLogger(__name__)
 
 # Store last looked up order per async context to reduce cross-call leakage.
-_last_order_cache_var: ContextVar[dict | None] = ContextVar(
-    "order_lookup_last_order_cache",
-    default=None,
-)
+_last_order_cache_var: ContextVar[dict] = ContextVar("order_lookup_last_order_cache", default={})
 
 
 def _get_last_order_cache() -> dict:
@@ -59,13 +55,6 @@ def _phone_digit_bounds() -> tuple[int, int]:
         return min_digits, max_digits
     except Exception:
         return 10, 15
-
-
-def _phone_lookup_regex() -> str:
-    try:
-        return str(get_agent_setting("phone_lookup_regex", "") or "").strip()
-    except Exception:
-        return ""
 
 
 class OrderLookupTool:
@@ -140,15 +129,7 @@ async def lookup_order(
 
     if order is None:
         logger.info(f"Order not found: {cleaned}")
-        if agent_lang == "el":
-            return (
-                "Δεν μπόρεσα να βρω αυτή την παραγγελία. "
-                "Μπορείτε να ελέγξετε ξανά τον αριθμό από την επιβεβαίωση παραγγελίας σας;"
-            )
-        return (
-            "I couldn't find that order. "
-            "Please double-check the order number from your confirmation."
-        )
+        return "I couldn't find that order. Please double-check the order number from your confirmation."
 
     _set_last_order_cache(order)
 
@@ -177,7 +158,6 @@ async def get_order_details(
         Complete order details
     """
     shopify = get_shopify_service()
-    agent_lang = get_agent_language()
     cache = _get_last_order_cache()
 
     if order_number.lower() == "last" and "last" in cache:
@@ -185,22 +165,12 @@ async def get_order_details(
         logger.info(f"Returning full details for last order: {order.order_number}")
     else:
         cleaned = shopify.clean_order_number(order_number)
-        expected = _expected_order_digits()
-        if not cleaned or not cleaned.isdigit() or len(cleaned) != expected:
-            if agent_lang == "el":
-                return (
-                    f"Ο αριθμός παραγγελίας πρέπει να έχει ακριβώς {expected} ψηφία. "
-                    "Μπορείτε να τον επαναλάβετε ψηφίο προς ψηφίο;"
-                )
-            return (
-                f"The order number must be exactly {expected} digits. "
-                "Could you repeat it digit by digit?"
-            )
         order = await shopify.lookup_order_cached(cleaned)
 
         if order is None:
             return f"I couldn't find order {cleaned}."
 
+    agent_lang = get_agent_language()
     logger.info(f"Order details using language: {agent_lang}")
 
     await shopify.localize_order(order, agent_lang)
@@ -227,26 +197,18 @@ async def lookup_order_by_phone(
 
     cleaned = shopify.clean_phone_number(phone)
     min_digits, max_digits = _phone_digit_bounds()
-    configured_regex = _phone_lookup_regex()
-    invalid_phone_message_el = (
-        "Αυτό δεν φαίνεται να είναι πλήρης αριθμός τηλεφώνου. "
-        f"Παρακαλώ επαναλάβετε ολόκληρο τον αριθμό, τουλάχιστον {min_digits} ψηφία, ψηφίο προς ψηφίο."
-    )
-    invalid_phone_message_en = (
-        "That does not look like a complete phone number. "
-        f"Please repeat the full number, at least {min_digits} digits, digit by digit."
-    )
 
     if not cleaned or not cleaned.isdigit() or not (min_digits <= len(cleaned) <= max_digits):
         logger.warning(f"Invalid phone number: {phone} -> {cleaned}")
-        return invalid_phone_message_el if agent_lang == "el" else invalid_phone_message_en
-    if configured_regex:
-        try:
-            if not re.fullmatch(configured_regex, cleaned):
-                logger.warning("Phone regex mismatch: %s (regex=%s)", cleaned, configured_regex)
-                return invalid_phone_message_el if agent_lang == "el" else invalid_phone_message_en
-        except re.error:
-            logger.warning("Invalid phone_lookup_regex setting: %s", configured_regex)
+        if agent_lang == "el":
+            return (
+                "Αυτό δεν φαίνεται να είναι πλήρης αριθμός τηλεφώνου. "
+                f"Παρακαλώ επαναλάβετε ολόκληρο τον αριθμό, τουλάχιστον {min_digits} ψηφία, ψηφίο προς ψηφίο."
+            )
+        return (
+            "That does not look like a complete phone number. "
+            f"Please repeat the full number, at least {min_digits} digits, digit by digit."
+        )
 
     logger.info(f"Looking up orders for phone: {cleaned}")
     orders = await shopify.lookup_order_by_phone(cleaned)
