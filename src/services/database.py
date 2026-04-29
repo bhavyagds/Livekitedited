@@ -2469,7 +2469,13 @@ class DatabaseService:
             return False
 
     async def get_active_memory_context(self) -> str:
-        """Get active memory entries as context text for prompts."""
+        """Get active memory entries as context text for prompts.
+
+        Format includes optional per-item instruction from the admin comment:
+        Q: ...
+        A: ...
+        INSTRUCTION: ...
+        """
         try:
             items = await self.get_memory_items(active_only=True)
             if not items:
@@ -2478,6 +2484,9 @@ class DatabaseService:
             for item in items:
                 lines.append(f"Q: {item['question']}")
                 lines.append(f"A: {item['answer']}")
+                comment = (item.get("comment") or "").strip()
+                if comment:
+                    lines.append(f"INSTRUCTION: {comment}")
                 lines.append("")
             return "\n".join(lines).strip()
         except Exception as e:
