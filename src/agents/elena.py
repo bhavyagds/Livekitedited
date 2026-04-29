@@ -2474,6 +2474,14 @@ class ElenaFunctionContext(llm.FunctionContext):
                 _current_session["number_mode_lock"] = "order"
                 _current_session["pending_phone_candidate"] = None
                 _reset_phone_digit_buffer("back_to_order_flow")
+                tracker = _current_session.get("silence_tracker")
+                silence_timeout = 12.0
+                if isinstance(tracker, dict):
+                    silence_timeout = float(tracker.get("silence_timeout") or 12.0)
+                _snooze_silence_prompts(
+                    silence_timeout + 5.0,
+                    reason="order_lookup_not_found_grace",
+                )
 
             summary = _build_order_voice_summary(result, get_agent_language()) or result
             return summary
@@ -4882,6 +4890,47 @@ async def entrypoint(ctx: JobContext):
                 )
 
         has_digits = bool(_extract_digit_parts(user_text))
+        raw_digits = "".join(_extract_digit_parts(user_text or ""))
+        expected_digits = _expected_order_digits()
+        if flow_state == FLOW_AWAITING_ORDER_NUMBER and raw_digits:
+            normalized_order = _normalize_order_id_strict(user_text or "")
+            if not normalized_order:
+                _current_session["number_mode_lock"] = "order"
+                _set_support_flow_state(
+                    FLOW_AWAITING_ORDER_NUMBER,
+                    reason="invalid_order_digits",
+                )
+                _current_session["forced_response_manual_say_active"] = True
+                _current_session["forced_response_spoken_turn_id"] = current_turn_id
+                _current_session["forced_response_suppress_llm_until"] = time.time() + 8.0
+                _clear_lookup_pending("invalid_order_digits")
+                _clear_pending_lookup_wait_phrase("invalid_order_digits")
+                _snooze_silence_prompts(8.0, reason="invalid_order_digits")
+
+                async def _say_invalid_order_digits() -> None:
+                    live_agent = _current_session.get("agent")
+                    if not live_agent:
+                        _current_session["forced_response_manual_say_active"] = False
+                        return
+                    try:
+                        if get_agent_language() == "el":
+                            msg = (
+                                f"Ο αριθμός παραγγελίας πρέπει να έχει ακριβώς "
+                                f"{expected_digits} ψηφία. Μπορείτε να τον επαναλάβετε "
+                                f"ψηφίο προς ψηφίο;"
+                            )
+                        else:
+                            msg = (
+                                f"The order number must be exactly {expected_digits} digits. "
+                                f"Could you repeat it digit by digit?"
+                            )
+                        await live_agent.say(msg, allow_interruptions=True)
+                    finally:
+                        _current_session["forced_response_manual_say_active"] = False
+
+                asyncio.create_task(_say_invalid_order_digits())
+                return
+
         if (
             flow_state == FLOW_AWAITING_ORDER_NUMBER
             and not _mentions_no_order_number(user_text)
@@ -5142,7 +5191,6 @@ async def entrypoint(ctx: JobContext):
                 and number_mode != "phone"
                 and not order_lookup_blocked_by_flow
             ):
-                _set_lookup_pending(detected_order_number, reason="order_number_detected")
                 now = time.time()
                 last_forced_order = str(_current_session.get("last_forced_lookup_order") or "")
                 last_forced_at = float(_current_session.get("last_forced_lookup_at") or 0.0)
@@ -5587,61 +5635,31 @@ async def entrypoint(ctx: JobContext):
                     or bool(_current_session.get("details_lookup_inflight"))
                 )
                 if lookup_active:
-                    tracker = _current_session.get("silence_tracker")
                     pending_started = float(_current_session.get("lookup_pending_started_at") or 0.0)
-                    max_progress_s = _as_float(
-                        get_agent_setting("lookup_progress_max_seconds", 45.0),
-                        45.0,
-                        min_value=10.0,
-                        max_value=120.0,
+                    max_lookup_block_s = _as_float(
+                        get_agent_setting("lookup_silence_block_max_seconds", 60.0),
+                        60.0,
+                        min_value=15.0,
+                        max_value=180.0,
                     )
 
-                    # Stale safety: if pending is too old, clear it and stop progress prompts.
-                    if pending_started and (now - pending_started) > max_progress_s:
+                    # If lookup state is stale, clear it silently.
+                    if pending_started and (time.time() - pending_started) > max_lookup_block_s:
                         room_log(
-                            "LOOKUP_PROGRESS_STALE_CLEARED",
-                            age_s=round(now - pending_started, 2),
+                            "LOOKUP_SILENCE_BLOCK_STALE_CLEARED",
+                            age_s=round(time.time() - pending_started, 2),
                         )
-                        _clear_lookup_pending("lookup_progress_stale")
+                        _clear_lookup_pending("lookup_silence_block_stale")
                         _current_session["phone_lookup_inflight"] = False
                         _current_session["details_lookup_inflight"] = False
-                        continue
+                        tracker = _current_session.get("silence_tracker")
+                        if isinstance(tracker, dict):
+                            tracker["last_user_speech"] = time.time()
+                            tracker["last_agent_speech"] = time.time()
+                            tracker["prompt_count"] = 0
 
-                    # Do not speak progress if agent is already speaking.
-                    if silence_tracker.get("agent_is_speaking"):
-                        continue
-
-                    first_progress_delay = _as_float(
-                        get_agent_setting("lookup_progress_first_prompt_delay_seconds", 10.0),
-                        10.0,
-                        min_value=5.0,
-                        max_value=30.0,
-                    )
-                    if pending_started and (now - pending_started) < first_progress_delay:
-                        continue
-
-                    if isinstance(tracker, dict):
-                        progress_count = int(tracker.get("lookup_progress_prompt_count") or 0)
-                        max_progress_prompts = _as_int(
-                            get_agent_setting("lookup_progress_max_prompts", 1),
-                            1,
-                            min_value=0,
-                            max_value=3,
-                        )
-                        if progress_count >= max_progress_prompts:
-                            continue
-
-                        last_progress_at = float(tracker.get("last_lookup_progress_prompt_at") or 0.0)
-                        progress_interval = _as_float(
-                            get_agent_setting("lookup_progress_repeat_seconds", 15.0),
-                            15.0,
-                            min_value=10.0,
-                            max_value=45.0,
-                        )
-                        if now - last_progress_at >= progress_interval:
-                            tracker["last_lookup_progress_prompt_at"] = now
-                            tracker["lookup_progress_prompt_count"] = progress_count + 1
-                            await agent.say(_lookup_progress_prompt(), allow_interruptions=True)
+                    # Important:
+                    # While lookup is active, silence monitor must not speak.
                     continue
 
                 # Pause silence prompts while tool calls are executing.
