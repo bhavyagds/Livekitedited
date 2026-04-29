@@ -4743,6 +4743,11 @@ async def entrypoint(ctx: JobContext):
             room_log("LATE_EVENT_DROPPED", source="user_speech_committed")
             return
         user_text = message.content
+        user_text_for_transcript = _format_user_text_for_transcript(user_text)
+        # Record transcript immediately so early-return deterministic flows
+        # (phone confirmation/lookup guards) do not drop user turns.
+        asyncio.create_task(send_user_transcript(user_text_for_transcript))
+        conversation_transcript.append(f"User: {user_text_for_transcript}")
         current_turn_id = int(_current_session.get("last_user_turn_id") or 0) + 1
         _current_session["last_user_turn_id"] = current_turn_id
         flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
@@ -5365,9 +5370,6 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.debug(f"Order lookup forcing skipped: {e}")
 
-        user_text_for_transcript = _format_user_text_for_transcript(user_text)
-        asyncio.create_task(send_user_transcript(user_text_for_transcript))
-
         # Reset silence timer - user is responding
         reset_silence_timer()
         if _is_digit_collection_utterance(user_text):
@@ -5387,8 +5389,6 @@ async def entrypoint(ctx: JobContext):
             )
             _snooze_silence_prompts(short_grace, reason="short_utterance")
 
-        # Add to transcript
-        conversation_transcript.append(f"User: {user_text_for_transcript}")
         if abuse_detection_enabled:
             # Check for abusive language
             abuse_detected, abuse_response = check_and_respond_to_abuse(
