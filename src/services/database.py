@@ -32,6 +32,7 @@ from src.models.admin import (
     SIPEvent,
     SIPTrunkStatus,
     SIPProvider,
+    AgentMemory,
 )
 from src.models.base import Base
 
@@ -2334,10 +2335,183 @@ class DatabaseService:
     # AGENT MEMORY
     # =========================================================================
 
+    async def get_memory_items(self, active_only: bool = False) -> List[Dict]:
+        """
+        Get long-term memory entries for admin UI.
+        Note: AgentMemory model currently has no is_active flag, so active_only is ignored.
+        """
+        try:
+            async with get_db() as session:
+                result = await session.execute(
+                    select(AgentMemory).order_by(desc(AgentMemory.updated_at), desc(AgentMemory.created_at))
+                )
+                rows = result.scalars().all()
+                return [
+                    {
+                        "id": str(m.id),
+                        "question": m.question,
+                        "answer": m.answer,
+                        "comment": m.comments,
+                        "is_active": True,
+                        "language": m.language,
+                        "created_by": None,
+                        "updated_by": None,
+                        "created_at": m.created_at.isoformat() if m.created_at else None,
+                        "updated_at": m.updated_at.isoformat() if m.updated_at else None,
+                    }
+                    for m in rows
+                ]
+        except Exception as e:
+            logger.error(f"Error getting memory items: {e}")
+            return []
+
+    async def get_memory_item(self, item_id: str) -> Optional[Dict]:
+        """Get a single long-term memory entry by ID."""
+        try:
+            async with get_db() as session:
+                result = await session.execute(
+                    select(AgentMemory).where(AgentMemory.id == uuid.UUID(item_id))
+                )
+                m = result.scalar_one_or_none()
+                if not m:
+                    return None
+                return {
+                    "id": str(m.id),
+                    "question": m.question,
+                    "answer": m.answer,
+                    "comment": m.comments,
+                    "is_active": True,
+                    "language": m.language,
+                    "created_by": None,
+                    "updated_by": None,
+                    "created_at": m.created_at.isoformat() if m.created_at else None,
+                    "updated_at": m.updated_at.isoformat() if m.updated_at else None,
+                }
+        except Exception as e:
+            logger.error(f"Error getting memory item {item_id}: {e}")
+            return None
+
+    async def create_memory_item(
+        self,
+        question: str,
+        answer: str,
+        comment: Optional[str] = None,
+        created_by: Optional[str] = None,
+        language: str = "en",
+    ) -> Optional[Dict]:
+        """Create a long-term memory entry."""
+        try:
+            async with get_db() as session:
+                memory = AgentMemory(
+                    question=question,
+                    answer=answer,
+                    comments=comment,
+                    language=language or "en",
+                )
+                session.add(memory)
+                await session.flush()
+                return {
+                    "id": str(memory.id),
+                    "question": memory.question,
+                    "answer": memory.answer,
+                    "comment": memory.comments,
+                    "is_active": True,
+                    "language": memory.language,
+                    "created_by": created_by,
+                    "updated_by": created_by,
+                    "created_at": memory.created_at.isoformat() if memory.created_at else None,
+                    "updated_at": memory.updated_at.isoformat() if memory.updated_at else None,
+                }
+        except Exception as e:
+            logger.error(f"Error creating memory item: {e}")
+            return None
+
+    async def update_memory_item(
+        self,
+        item_id: str,
+        updated_by: Optional[str] = None,
+        question: Optional[str] = None,
+        answer: Optional[str] = None,
+        comment: Optional[str] = None,
+        is_active: Optional[bool] = None,
+    ) -> bool:
+        """
+        Update a long-term memory entry.
+        Note: AgentMemory model currently has no is_active flag, so is_active is ignored.
+        """
+        try:
+            async with get_db() as session:
+                result = await session.execute(
+                    select(AgentMemory).where(AgentMemory.id == uuid.UUID(item_id))
+                )
+                memory = result.scalar_one_or_none()
+                if not memory:
+                    return False
+
+                if question is not None:
+                    memory.question = question
+                if answer is not None:
+                    memory.answer = answer
+                if comment is not None:
+                    memory.comments = comment
+                _ = updated_by  # Reserved for future schema fields.
+                _ = is_active
+                await session.flush()
+                return True
+        except Exception as e:
+            logger.error(f"Error updating memory item {item_id}: {e}")
+            return False
+
+    async def delete_memory_item(self, item_id: str) -> bool:
+        """Delete a long-term memory entry."""
+        try:
+            async with get_db() as session:
+                result = await session.execute(
+                    select(AgentMemory).where(AgentMemory.id == uuid.UUID(item_id))
+                )
+                memory = result.scalar_one_or_none()
+                if not memory:
+                    return False
+                await session.delete(memory)
+                await session.flush()
+                return True
+        except Exception as e:
+            logger.error(f"Error deleting memory item {item_id}: {e}")
+            return False
+
+    async def get_active_memory_context(self) -> str:
+        """
+        Build memory context string injected into Elena system prompt.
+        Uses all stored AgentMemory entries (no is_active field exists yet).
+        """
+        try:
+            async with get_db() as session:
+                result = await session.execute(
+                    select(AgentMemory).order_by(desc(AgentMemory.updated_at), desc(AgentMemory.created_at))
+                )
+                memories = result.scalars().all()
+
+                lines: List[str] = []
+                for m in memories:
+                    q = (m.question or "").strip()
+                    a = (m.answer or "").strip()
+                    c = (m.comments or "").strip()
+                    if not q or not a:
+                        continue
+                    lines.append(f"Q: {q}")
+                    lines.append(f"A: {a}")
+                    if c:
+                        lines.append(f"INSTRUCTION: {c}")
+                    lines.append("")
+
+                return "\n".join(lines).strip()
+        except Exception as e:
+            logger.error(f"Error getting active memory context: {e}")
+            return ""
+
     async def add_agent_memory(self, question: str, answer: str, comments: str = None, language: str = "en") -> bool:
         """Add a long-term memory entry for the agent."""
         try:
-            from src.models.admin import AgentMemory
             async with get_db() as session:
                 memory = AgentMemory(
                     question=question,
