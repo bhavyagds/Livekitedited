@@ -12,6 +12,7 @@ import Sessions from '@/pages/Sessions'
 import SIPSettings from '@/pages/SIPSettings'
 import Settings from '@/pages/Settings'
 import Logs from '@/pages/Logs'
+import Memory from '@/pages/Memory'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, token, user } = useAuthStore()
@@ -140,6 +141,14 @@ export default function App() {
         element={
           <ProtectedRoute>
             <Logs />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/memory"
+        element={
+          <ProtectedRoute>
+            <Memory />
           </ProtectedRoute>
         }
       />

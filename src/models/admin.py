@@ -25,23 +25,6 @@ from sqlalchemy.sql import func
 
 from src.models.base import Base
 
-class AgentMemory(Base):
-    """Long-term memory for agent training (Question/Answer/Comments)."""
-    __tablename__ = "agent_memories"
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    question: Mapped[str] = mapped_column(Text, nullable=False)
-    answer: Mapped[str] = mapped_column(Text, nullable=False)
-    comments: Mapped[Optional[str]] = mapped_column(Text)
-    language: Mapped[str] = mapped_column(String(5), default="en")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-
-    __table_args__ = (
-        Index("idx_agent_memories_created", "created_at"),
-        Index("idx_agent_memories_language", "language"),
-    )
-
 
 class AdminUser(Base):
     """Admin users table."""
@@ -415,4 +398,24 @@ class SIPProvider(Base):
         Index("idx_sip_providers_name", "name"),
         Index("idx_sip_providers_active", "is_active"),
         Index("idx_sip_providers_sync_status", "sync_status"),
+    )
+
+
+class LongTermMemory(Base):
+    """Long-term memory entries for agent training context."""
+    __tablename__ = "long_term_memory"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[str] = mapped_column(Text, nullable=False)
+    comment: Mapped[Optional[str]] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[Optional[str]] = mapped_column(String(255))
+    updated_by: Mapped[Optional[str]] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        Index("idx_long_term_memory_active", "is_active"),
+        Index("idx_long_term_memory_created", "created_at"),
     )
