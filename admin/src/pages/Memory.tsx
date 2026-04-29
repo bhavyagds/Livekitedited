@@ -181,7 +181,6 @@ export default function Memory() {
   const [successMsg, setSuccessMsg] = useState('')
   const [errorMsg, setErrorMsg] = useState('')
   const [showAddModal, setShowAddModal] = useState(false)
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
 
   const showSuccess = (msg: string) => { setSuccessMsg(msg); setErrorMsg(''); setTimeout(() => setSuccessMsg(''), 4000) }
   const showError = (msg: string) => { setErrorMsg(msg); setSuccessMsg(''); setTimeout(() => setErrorMsg(''), 5000) }
@@ -219,7 +218,6 @@ export default function Memory() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['memory-items'] })
       showSuccess('Memory item deleted')
-      setConfirmDelete(null)
     },
     onError: () => showError('Failed to delete memory item'),
   })
@@ -372,31 +370,18 @@ export default function Memory() {
 
                       {/* Delete */}
                       <td className="px-4 py-3 align-top text-center">
-                        {confirmDelete === item.id ? (
-                          <div className="flex items-center gap-1 justify-center">
-                            <button
-                              onClick={() => deleteMutation.mutate(item.id)}
-                              className="p-1 text-red-600 hover:bg-red-50 rounded"
-                              disabled={deleteMutation.isPending}
-                            >
-                              <Check className="w-4 h-4" />
-                            </button>
-                            <button
-                              onClick={() => setConfirmDelete(null)}
-                              className="p-1 text-slate-400 hover:bg-slate-100 rounded"
-                            >
-                              <X className="w-4 h-4" />
-                            </button>
-                          </div>
-                        ) : (
-                          <button
-                            onClick={() => setConfirmDelete(item.id)}
-                            className="p-1 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
-                            title="Delete"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        )}
+                        <button
+                          onClick={() => {
+                            if (deleteMutation.isPending) return
+                            const ok = window.confirm('Delete this memory entry?')
+                            if (ok) deleteMutation.mutate(item.id)
+                          }}
+                          className="p-1 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
+                          title="Delete"
+                          disabled={deleteMutation.isPending}
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
                       </td>
                     </tr>
                   ))}
