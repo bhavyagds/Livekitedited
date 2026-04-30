@@ -335,9 +335,10 @@ DO NOT say "I don't have information" if the answer is below.""")
     memory_context = _cache.get("long_term_memory", "")
     if memory_context:
         parts.append("\n\n" + "="*60)
-        parts.append("""LONG-TERM MEMORY - TRAINED KNOWLEDGE:
-The following Q&A pairs have been specifically saved by admins as trained knowledge.
-Use these answers precisely when the corresponding questions arise.""")
+        parts.append("""LONG-TERM MEMORY & BEHAVIORAL TRAINING:
+The following are specific behavioral patterns and trained responses provided by admins.
+Treat these as strong guidelines for your persona, style, and logic. 
+Generalize from these examples to handle similar situations with the same behavior.""")
         parts.append("="*60)
         parts.append(memory_context)
         parts.append("="*60 + "\n")
@@ -400,13 +401,14 @@ DO NOT say "I don't have information" if the answer is below.""")
     memory_context = _cache.get("long_term_memory", "")
     if memory_context:
         parts.append("\n\n" + "="*60)
-        parts.append("""LONG-TERM MEMORY - TRAINED KNOWLEDGE:
-The following Q&A pairs have been specifically saved by admins as trained knowledge.
-Use these answers precisely when the corresponding questions arise.""")
+        parts.append("""LONG-TERM MEMORY & BEHAVIORAL TRAINING:
+The following are specific behavioral patterns and trained responses provided by admins.
+Treat these as strong guidelines for your persona, style, and logic. 
+Generalize from these examples to handle similar situations with the same behavior.""")
         parts.append("="*60)
         parts.append(memory_context)
         parts.append("="*60 + "\n")
-        logger.info(f"🧠 Injected long-term memory: {len(memory_context)} chars")
+        logger.info(f"🧠 Injected long-term memory (async): {len(memory_context)} chars")
 
     # Add tool usage guardrails
     parts.append("""TOOL USAGE GUARDRAIL:

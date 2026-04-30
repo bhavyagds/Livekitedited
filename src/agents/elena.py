@@ -97,7 +97,7 @@ def _as_int(
 
 
 def _expected_order_digits() -> int:
-    """Configured strict order-id length used across lookups/validation."""
+    """Configured minimum order-id length used across lookups/validation."""
     return _as_int(
         get_agent_setting("order_id_exact_digits", 5),
         5,
@@ -230,20 +230,25 @@ def _extract_digit_parts(text: str) -> list[str]:
 
 
 def _normalize_order_id_strict(raw_text: str) -> Optional[str]:
-    """Return strict order id candidate with exact configured length."""
-    expected = _expected_order_digits()
+    """Return strict order id candidate with at least the minimum configured length."""
+    min_len = _expected_order_digits()
     normalized = (raw_text or "").strip().lower()
     if not normalized:
         return None
 
-    explicit_runs = re.findall(rf"\d{{{expected}}}", normalized)
-    if explicit_runs:
-        return explicit_runs[-1]
-
+    # Find the longest sequence of digits in the text
     parts = _extract_digit_parts(normalized)
     joined = "".join(parts)
-    if len(joined) == expected:
+    
+    # Validation: must be at least min_len and not a phone number (usually 10+ digits)
+    if len(joined) >= min_len and len(joined) < 10:
         return joined
+    
+    # Also check for sequences within the text if joined failed
+    matches = re.findall(r"\d{4,9}", normalized)
+    if matches:
+        return matches[-1]
+        
     return None
 
 
@@ -1171,12 +1176,12 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
     if lookup_state == "not_found":
         if lang == "el":
             return (
-                "Δεν μπορώ να βρω αυτή την παραγγελία. "
-                "Μπορείτε να ελέγξετε ξανά τον αριθμό από την επιβεβαίωση παραγγελίας σας;"
+                "Λυπάμαι, αλλά δεν μπόρεσα να βρω την παραγγελία σας με τα στοιχεία που δώσατε. "
+                "Παρακαλώ ελέγξτε ξανά τον αριθμό παραγγελίας από την επιβεβαίωση που λάβατε στο μέιλ σας."
             )
         return (
-            "I couldn't find that order. "
-            "Please double-check the order number from your confirmation."
+            "I'm sorry, but I couldn't find your order with the details provided. "
+            "Please double-check the order number from the confirmation email you received."
         )
     if lookup_state == "unknown":
         if lang == "el":
@@ -1193,13 +1198,20 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
         digits = re.sub(r"\D", "", raw or "")
         if not digits:
             return ""
+        
+        # For long numbers (phone numbers, order IDs), always speak digit-by-digit
+        if len(digits) > 4:
+            return _speak_digits(digits, lang)
+            
         if lang == "el":
             try:
                 from src.utils.greek_numbers import number_to_greek
                 return number_to_greek(int(digits))
             except Exception:
-                return digits
-        return digits
+                return _speak_digits(digits, lang)
+        
+        # For English, if not digit-by-digit, at least space them out for TTS
+        return " ".join(digits)
 
     def _month_name(month: int) -> str:
         if lang == "el":
@@ -2428,31 +2440,43 @@ class ElenaFunctionContext(llm.FunctionContext):
     ) -> str:
         """Look up an order. Returns brief status first. Use get_order_details for more info."""
         lang = get_agent_language()
+        
+        # 1. Redirection Guard: If the input looks like a phone number, redirect to lookup_order_by_phone
+        clean_input = re.sub(r"\D", "", order_number or "")
+        if len(clean_input) >= 10:
+            room_log("TOOL_REDIRECT", name="lookup_order", target="lookup_order_by_phone", input=order_number)
+            logger.info(f"🔄 Redirecting lookup_order to lookup_order_by_phone for {order_number}")
+            return await self.lookup_order_by_phone(order_number)
+
+        # 2. Validation Guard: Ensure it's not a mismatched mode if we're locked
         lock_mode = str(_current_session.get("number_mode_lock") or "")
         lock_turn = int(_current_session.get("number_mode_turn_id") or 0)
         latest_turn = int(_current_session.get("last_user_turn_id") or 0)
         if lock_mode == "phone" and lock_turn == latest_turn:
-            room_log("TOOL_RESULT_BLOCKED", name="lookup_order", reason="number_mode_mismatch")
-            expected = _expected_order_digits()
-            if lang == "el":
-                return f"Αυτό μοιάζει με αριθμό τηλεφώνου. Δώστε μου τον {expected}-ψήφιο αριθμό παραγγελίας από την επιβεβαίωσή σας."
-            return f"That looks like a phone number. Please share your {expected}-digit order number from the confirmation."
+            if not _normalize_order_id_strict(order_number):
+                room_log("TOOL_RESULT_BLOCKED", name="lookup_order", reason="number_mode_mismatch")
+                expected = _expected_order_digits()
+                if lang == "el":
+                    return f"Αυτό δεν μοιάζει με αριθμό παραγγελίας. Δώστε μου τον αριθμό παραγγελίας σας (τουλάχιστον {expected} ψηφία)."
+                return f"That doesn't look like an order number. Please share your order number (at least {expected} digits)."
 
         strict_order = _normalize_order_id_strict(order_number)
         if not strict_order:
             expected = _expected_order_digits()
-            room_log("TOOL_RESULT_BLOCKED", name="lookup_order", reason="invalid_order_id_format")
+            room_log("TOOL_RESULT_BLOCKED", name="lookup_order", reason="invalid_order_id_format", input=order_number)
             _set_support_flow_state(FLOW_AWAITING_ORDER_NUMBER, reason="invalid_order_format")
             if lang == "el":
-                return f"Ο αριθμός παραγγελίας πρέπει να είναι ακριβώς {expected} ψηφία. Μπορείτε να τον πείτε ξανά ψηφίο προς ψηφίο;"
-            return f"The order number must be exactly {expected} digits. Could you say it again digit by digit?"
+                return f"Ο αριθμός παραγγελίας πρέπει να είναι τουλάχιστον {expected} ψηφία. Μπορείτε να τον πείτε ξανά;"
+            return f"The order number must be at least {expected} digits. Could you say it again?"
 
         # We now have a valid order id, so move flow authority back to order lookup.
         _set_support_flow_state(FLOW_CHECKING_ORDER_NUMBER, reason="lookup_order_called")
         _set_lookup_pending(strict_order, reason="lookup_order_called")
         _current_session["last_lookup_tool_called_at"] = time.time()
         _current_session["last_lookup_tool_order"] = strict_order
+        _current_session["last_lookup_progress_at"] = time.time()
         room_log("TOOL_CALL", name="lookup_order", order_number=strict_order)
+        logger.info(f"🔎 Starting order lookup for #{strict_order}")
         wait_msg = "Μισό λεπτό, ψάχνω την παραγγελία σας." if get_agent_language() == "el" else "Just a moment, I am searching for your order."
         await agent.say(wait_msg, allow_interruptions=False)
         try:
@@ -2576,6 +2600,15 @@ class ElenaFunctionContext(llm.FunctionContext):
     ) -> str:
         """Look up orders by customer phone number. Use when order number is unknown."""
         lang = get_agent_language()
+
+        # 1. Redirection Guard: If input looks like an order ID (min 4 digits, but not a phone)
+        clean_input = re.sub(r"\D", "", phone or "")
+        min_order_len = _expected_order_digits()
+        if len(clean_input) >= min_order_len and len(clean_input) < 10:
+            room_log("TOOL_REDIRECT", name="lookup_order_by_phone", target="lookup_order", input=phone)
+            logger.info(f"🔄 Redirecting lookup_order_by_phone to lookup_order for {phone}")
+            return await self.lookup_order(phone)
+
         current_turn = int(_current_session.get("last_user_turn_id") or 0)
         forced_turn = int(_current_session.get("phone_forced_turn_id") or 0)
         forced_pending_turn = int(_current_session.get("phone_forced_pending_turn_id") or 0)
@@ -2595,14 +2628,18 @@ class ElenaFunctionContext(llm.FunctionContext):
             if lang == "el":
                 return "Το ελέγχω ήδη και θα σας απαντήσω αμέσως."
             return "I am already checking that phone number and will respond in a moment."
+
+        # 2. Validation Guard: Ensure it's not a mismatched mode if we're locked
         lock_mode = str(_current_session.get("number_mode_lock") or "")
         lock_turn = int(_current_session.get("number_mode_turn_id") or 0)
         latest_turn = int(_current_session.get("last_user_turn_id") or 0)
         if lock_mode == "order" and lock_turn == latest_turn:
-            room_log("TOOL_RESULT_BLOCKED", name="lookup_order_by_phone", reason="number_mode_mismatch")
-            if lang == "el":
-                return "Αυτό μοιάζει με αριθμό παραγγελίας. Δώστε μου το τηλέφωνό σας ψηφίο προς ψηφίο."
-            return "That looks like an order number. Please share your phone number digit by digit."
+            # Only block if it doesn't look like a valid phone number
+            if not _normalize_phone_for_lookup(phone):
+                room_log("TOOL_RESULT_BLOCKED", name="lookup_order_by_phone", reason="number_mode_mismatch")
+                if lang == "el":
+                    return "Αυτό δεν μοιάζει με αριθμό τηλεφώνου. Δώστε μου το τηλέφωνό σας ψηφίο προς ψηφίο."
+                return "That doesn't look like a phone number. Please share your phone number digit by digit."
 
         normalized_phone = _normalize_phone_for_lookup(phone)
         if not normalized_phone:
@@ -2676,12 +2713,15 @@ class ElenaFunctionContext(llm.FunctionContext):
         _set_support_flow_state(FLOW_CHECKING_PHONE_NUMBER, reason="lookup_order_by_phone_called")
         _current_session["phone_lookup_inflight"] = True
         _set_lookup_pending(normalized_phone, reason="phone_lookup_started")
-        _snooze_silence_prompts(45.0, reason="phone_lookup_started")
-        _current_session["lookup_progress_prompt_until"] = time.time() + 45.0
+        _snooze_silence_prompts(60.0, reason="phone_lookup_started")
+        _current_session["lookup_progress_prompt_until"] = time.time() + 60.0
         _current_session["last_lookup_tool_called_at"] = time.time()
         _current_session["last_lookup_tool_order"] = normalized_phone
+        _current_session["last_lookup_progress_at"] = time.time()
         room_log("TOOL_CALL", name="lookup_order_by_phone", phone=normalized_phone)
         wait_msg = "Μισό λεπτό, ψάχνω την παραγγελία σας." if get_agent_language() == "el" else "Just a moment, I am searching for your order."
+        logger.info(f"🔍 Starting phone lookup for {normalized_phone}, saying: {wait_msg}")
+        _current_session["last_lookup_progress_at"] = time.time()
         await agent.say(wait_msg, allow_interruptions=False)
         try:
             result = await self._run_tool_with_silence_pause(
@@ -5008,12 +5048,12 @@ async def entrypoint(ctx: JobContext):
                     if get_agent_language() == "el":
                         msg = (
                             "Κατανοητό. Μπορείτε να μου δώσετε τον αριθμό τηλεφώνου "
-                            "που χρησιμοποιήσατε για την παραγγελία, ψηφίο προς ψηφίο;"
+                            "που χρησιμοποιήσατε για την παραγγελία, ψηφίο προς ψηφίο?"
                         )
                     else:
                         msg = (
                             "No problem. Please give me the phone number used for the order, "
-                            "digit by digit."
+                            "digit by digit?"
                         )
                     await live_agent.say(msg, allow_interruptions=True)
                 finally:
@@ -5665,29 +5705,41 @@ async def entrypoint(ctx: JobContext):
                 if lookup_active:
                     pending_started = float(_current_session.get("lookup_pending_started_at") or 0.0)
                     max_lookup_block_s = _as_float(
-                        get_agent_setting("lookup_silence_block_max_seconds", 60.0),
-                        60.0,
+                        get_agent_setting("lookup_silence_block_max_seconds", 90.0),
+                        90.0,
                         min_value=15.0,
-                        max_value=180.0,
+                        max_value=300.0,
                     )
 
+                    # Periodic progress updates while searching
+                    last_progress = float(_current_session.get("last_lookup_progress_at") or 0.0)
+                    progress_interval = _as_float(get_agent_setting("lookup_progress_interval_seconds", 15.0), 15.0)
+                    
+                    if last_progress and (now - last_progress) >= progress_interval:
+                        _current_session["last_lookup_progress_at"] = now
+                        # Fallback to agent language if session language is not available
+                        current_lang = session_language["value"] if "session_language" in locals() else agent_lang
+                        progress_msg = "I'm still searching for your order, thank you for your patience." if current_lang == "en" else "Ακόμη ψάχνω για την παραγγελία σας, ευχαριστώ για την υπομονή σας."
+                        logger.info(f"⏳ Sending periodic search update: {progress_msg}")
+                        await agent.say(progress_msg, allow_interruptions=False)
+
                     # If lookup state is stale, clear it silently.
-                    if pending_started and (time.time() - pending_started) > max_lookup_block_s:
+                    if pending_started and (now - pending_started) > max_lookup_block_s:
                         room_log(
                             "LOOKUP_SILENCE_BLOCK_STALE_CLEARED",
-                            age_s=round(time.time() - pending_started, 2),
+                            age_s=round(now - pending_started, 2),
                         )
                         _clear_lookup_pending("lookup_silence_block_stale")
                         _current_session["phone_lookup_inflight"] = False
                         _current_session["details_lookup_inflight"] = False
                         tracker = _current_session.get("silence_tracker")
                         if isinstance(tracker, dict):
-                            tracker["last_user_speech"] = time.time()
-                            tracker["last_agent_speech"] = time.time()
+                            tracker["last_user_speech"] = now
+                            tracker["last_agent_speech"] = now
                             tracker["prompt_count"] = 0
 
                     # Important:
-                    # While lookup is active, silence monitor must not speak.
+                    # While lookup is active, silence monitor must not speak "are you there".
                     continue
 
                 # Pause silence prompts while tool calls are executing.

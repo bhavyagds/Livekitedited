@@ -2482,7 +2482,8 @@ class DatabaseService:
     async def get_active_memory_context(self) -> str:
         """
         Build memory context string injected into Elena system prompt.
-        Uses all stored AgentMemory entries (no is_active field exists yet).
+        Formats memories as behavioral guidelines and historical examples
+        to help the LLM generalize behavior.
         """
         try:
             async with get_db() as session:
@@ -2491,20 +2492,30 @@ class DatabaseService:
                 )
                 memories = result.scalars().all()
 
-                lines: List[str] = []
+                if not memories:
+                    return ""
+
+                sections: List[str] = []
+                
+                # Group by language if needed, or just list as examples
+                sections.append("### BEHAVIORAL GUIDELINES & EXAMPLES")
+                sections.append("The following examples illustrate how you should behave and answer in specific situations. Learn from these patterns to provide consistent service:")
+                sections.append("")
+
                 for m in memories:
                     q = (m.question or "").strip()
                     a = (m.answer or "").strip()
                     c = (m.comments or "").strip()
                     if not q or not a:
                         continue
-                    lines.append(f"Q: {q}")
-                    lines.append(f"A: {a}")
+                    
+                    sections.append(f"SCENARIO: User asks/says: \"{q}\"")
+                    sections.append(f"EXPECTED RESPONSE: \"{a}\"")
                     if c:
-                        lines.append(f"INSTRUCTION: {c}")
-                    lines.append("")
+                        sections.append(f"GUIDELINE: {c}")
+                    sections.append("-" * 20)
 
-                return "\n".join(lines).strip()
+                return "\n".join(sections).strip()
         except Exception as e:
             logger.error(f"Error getting active memory context: {e}")
             return ""
