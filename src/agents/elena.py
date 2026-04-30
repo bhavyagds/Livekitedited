@@ -2436,11 +2436,16 @@ class ElenaFunctionContext(llm.FunctionContext):
     @llm.ai_callable()
     async def lookup_order(
         self,
-        order_number: Annotated[str, llm.TypeInfo(description="The order number (4-5 digits)")],
+        order_number: Annotated[str, llm.TypeInfo(description="The order number (min 4 digits)")],
     ) -> str:
         """Look up an order. Returns brief status first. Use get_order_details for more info."""
         lang = get_agent_language()
-        
+
+        # 0. Empty/Non-numeric Guard: If user says they don't have it, don't try to validate
+        if not any(char.isdigit() for char in order_number or ""):
+            room_log("TOOL_EMPTY_INPUT", name="lookup_order", input=order_number)
+            return "No digits were provided. If the customer does not have their order number, please ask for their phone number instead."
+
         # 1. Redirection Guard: If the input looks like a phone number, redirect to lookup_order_by_phone
         clean_input = re.sub(r"\D", "", order_number or "")
         if len(clean_input) >= 10:
@@ -2600,6 +2605,11 @@ class ElenaFunctionContext(llm.FunctionContext):
     ) -> str:
         """Look up orders by customer phone number. Use when order number is unknown."""
         lang = get_agent_language()
+
+        # 0. Empty/Non-numeric Guard: If user says they don't have it, don't try to validate
+        if not any(char.isdigit() for char in phone or ""):
+            room_log("TOOL_EMPTY_INPUT", name="lookup_order_by_phone", input=phone)
+            return "No digits were provided. If the customer does not have their phone number, please ask them to check their confirmation email or provide an order ID."
 
         # 1. Redirection Guard: If input looks like an order ID (min 4 digits, but not a phone)
         clean_input = re.sub(r"\D", "", phone or "")
