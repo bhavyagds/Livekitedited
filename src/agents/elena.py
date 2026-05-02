@@ -2580,23 +2580,32 @@ class ElenaFunctionContext(llm.FunctionContext):
         _set_lookup_pending(requested_order, reason="get_order_details_called")
         _current_session["last_lookup_tool_called_at"] = time.time()
         _current_session["last_lookup_tool_order"] = requested_order
+        _current_session["last_lookup_progress_at"] = time.time()
+        _current_session["details_lookup_inflight"] = True
         room_log("TOOL_CALL", name="get_order_details", order_number=requested_order)
-        result = await self._run_tool_with_silence_pause(
-            "get_order_details",
-            order_lookup.get_order_details(requested_order),
-        )
-        room_log("TOOL_RESULT", name="get_order_details", result=_truncate(result))
-        spoken_summary = _build_order_details_voice_summary(result, get_agent_language())
-        if not spoken_summary:
-            spoken_summary = _build_order_voice_summary(result, get_agent_language()) or (
-                "Δεν βρήκα λεπτομέρειες για αυτή την παραγγελία."
-                if get_agent_language() == "el"
-                else "I could not find details for this order."
+        try:
+            result = await self._run_tool_with_silence_pause(
+                "get_order_details",
+                order_lookup.get_order_details(requested_order),
             )
-        room_log("ORDER_DETAILS_FORMATTED", order_number=order_number, result=_truncate(spoken_summary))
-        if _as_bool(get_agent_setting("order_lookup_wait_phrase_enabled", True), default=True):
-            self._pick_lookup_wait_phrase()
-        return spoken_summary
+            room_log("TOOL_RESULT", name="get_order_details", result=_truncate(result))
+            spoken_summary = _build_order_details_voice_summary(result, get_agent_language())
+            if not spoken_summary:
+                spoken_summary = _build_order_voice_summary(result, get_agent_language()) or (
+                    "Δεν βρήκα λεπτομέρειες για αυτή την παραγγελία."
+                    if get_agent_language() == "el"
+                    else "I could not find details for this order."
+                )
+            room_log("ORDER_DETAILS_FORMATTED", order_number=order_number, result=_truncate(spoken_summary))
+            if _as_bool(get_agent_setting("order_lookup_wait_phrase_enabled", True), default=True):
+                self._pick_lookup_wait_phrase()
+            return spoken_summary
+        finally:
+            _current_session["details_lookup_inflight"] = False
+            _clear_lookup_pending("get_order_details_finished")
+            _clear_pending_lookup_wait_phrase("get_order_details_finished")
+            _current_session["lookup_progress_prompt_until"] = 0.0
+            _snooze_silence_prompts(5.0, reason="get_order_details_finished")
 
     @llm.ai_callable()
     async def lookup_order_by_phone(
@@ -4280,11 +4289,13 @@ async def entrypoint(ctx: JobContext):
         # Immediately stop silence detection when user starts talking
         # This prevents "are you there?" from interrupting the user mid-speech
         silence_tracker["is_waiting_for_response"] = False
+        silence_tracker["user_is_speaking"] = True
         silence_tracker["last_user_speech"] = time.time()
     
     @agent.on("user_stopped_speaking")
     def on_user_stopped_speaking():
         _latency_tracker.user_stopped_speaking()
+        silence_tracker["user_is_speaking"] = False
         schedule_thinking_state()
 
     async def send_user_transcript(text: str, *, interim: bool = False):
@@ -4807,12 +4818,14 @@ async def entrypoint(ctx: JobContext):
 
             if local_flow_state == FLOW_AWAITING_PHONE_NUMBER:
                 if not raw_digits:
-                    if get_agent_language() == "el":
-                        msg = "Παρακαλώ πείτε τον αριθμό τηλεφώνου που χρησιμοποιήσατε για την παραγγελία, ψηφίο προς ψηφίο."
-                    else:
-                        msg = "Please provide the phone number used for the order, digit by digit."
-                    _schedule_manual_prompt(msg, reason="awaiting_phone_digits")
-                    return True
+                    if _is_short_utterance(user_text) or not (user_text or "").strip():
+                        if get_agent_language() == "el":
+                            msg = "Παρακαλώ πείτε τον αριθμό τηλεφώνου που χρησιμοποιήσατε για την παραγγελία, ψηφίο προς ψηφίο."
+                        else:
+                            msg = "Please provide the phone number used for the order, digit by digit."
+                        _schedule_manual_prompt(msg, reason="awaiting_phone_digits")
+                        return True
+                    return False
 
                 combined_digits = _append_phone_digits_from_turn(user_text)
                 phone_candidate = _normalize_phone_for_lookup(combined_digits)
@@ -5726,12 +5739,14 @@ async def entrypoint(ctx: JobContext):
                     progress_interval = _as_float(get_agent_setting("lookup_progress_interval_seconds", 15.0), 15.0)
                     
                     if last_progress and (now - last_progress) >= progress_interval:
-                        _current_session["last_lookup_progress_at"] = now
-                        # Fallback to agent language if session language is not available
-                        current_lang = session_language["value"] if "session_language" in locals() else agent_lang
-                        progress_msg = "I'm still searching for your order, thank you for your patience." if current_lang == "en" else "Ακόμη ψάχνω για την παραγγελία σας, ευχαριστώ για την υπομονή σας."
-                        logger.info(f"⏳ Sending periodic search update: {progress_msg}")
-                        await agent.say(progress_msg, allow_interruptions=False)
+                        # Guard: don't interrupt if user is speaking or a manual prompt is active
+                        if not silence_tracker.get("user_is_speaking") and not _current_session.get("forced_response_manual_say_active"):
+                            _current_session["last_lookup_progress_at"] = now
+                            # Fallback to agent language if session language is not available
+                            current_lang = session_language["value"] if "session_language" in locals() else agent_lang
+                            progress_msg = "I'm still searching for your order, thank you for your patience." if current_lang == "en" else "Ακόμη ψάχνω για την παραγγελία σας, ευχαριστώ για την υπομονή σας."
+                            logger.info(f"⏳ Sending periodic search update: {progress_msg}")
+                            await agent.say(progress_msg, allow_interruptions=False)
 
                     # If lookup state is stale, clear it silently.
                     if pending_started and (now - pending_started) > max_lookup_block_s:

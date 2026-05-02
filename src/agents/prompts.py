@@ -349,7 +349,8 @@ Generalize from these examples to handle similar situations with the same behavi
 1. VERBATIM REPORTING: When you use a tool (like lookup_order or get_order_details), report the findings EXACTLY as provided by the tool.
 2. NO HALLUCINATION: Do not "bluff" or make up details (dates, statuses, amounts) that are not explicitly stated in the tool output.
 3. NO EMOJIS: Never use emojis in your voice responses. They cause issues with the voice engine and transcript.
-4. BE PRECISE: If the tool says "processing", say "being prepared". If it says a date, say that exact date. Do not summarize unless asked.""")
+4. BE PRECISE: If the tool says "processing", say "being prepared". If it says a date, say that exact date. Do not summarize unless asked.
+5. TOOL ERROR HANDLING: If a tool returns a specific error (e.g. "order number must be exactly 5 digits"), do NOT rephrase it as a generic "issue retrieving details". Report the specific error from the tool verbatim so the user can correct their input.""")
 
     # Repeat language guardrail at the end so it remains the strongest instruction.
     parts.append(lang_instruction)
@@ -415,7 +416,8 @@ Generalize from these examples to handle similar situations with the same behavi
 1. VERBATIM REPORTING: When you use a tool (like lookup_order or get_order_details), report the findings EXACTLY as provided by the tool.
 2. NO HALLUCINATION: Do not "bluff" or make up details (dates, statuses, amounts) that are not explicitly stated in the tool output.
 3. NO EMOJIS: Never use emojis in your voice responses. They cause issues with the voice engine and transcript.
-4. BE PRECISE: If the tool says "processing", say "being prepared". If it says a date, say that exact date. Do not summarize unless asked.""")
+4. BE PRECISE: If the tool says "processing", say "being prepared". If it says a date, say that exact date. Do not summarize unless asked.
+5. TOOL ERROR HANDLING: If a tool returns a specific error (e.g. "order number must be exactly 5 digits"), do NOT rephrase it as a generic "issue retrieving details". Report the specific error from the tool verbatim so the user can correct their input.""")
 
     # Repeat language guardrail at the end so it remains the strongest instruction.
     parts.append(lang_instruction)
