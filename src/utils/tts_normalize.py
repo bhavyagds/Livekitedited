@@ -23,6 +23,11 @@ _SSML_TAG_RE = re.compile(r"</?[^>]+>")
 _MD_BULLET_RE = re.compile(r"^\s*(?:[-*]|\u2022)\s+", re.MULTILINE)
 _MD_MARKER_RE = re.compile(r"[*_`~#]+")
 _MULTI_SPACE_RE = re.compile(r"\s{2,}")
+_EMOJI_RE = re.compile(r"[\U00010000-\U0010ffff]", flags=re.UNICODE)
+_EN_DATE_RE = re.compile(
+    r"\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})\b",
+    re.IGNORECASE
+)
 
 # Read common Greek-call identifiers for better clarity.
 _EL_ID_CONTEXT_RE = re.compile(
@@ -105,6 +110,8 @@ def normalize_time_colons(text: str) -> str:
         text,
     )
     text = _TIME_PLAIN_RE.sub(r"\1 \2", text)
+    # Handle time ranges like 10:00 - 12:00 -> 10 00 to 12 00
+    text = re.sub(r"(\d{1,2}\s+\d{2})\s*[-–—]\s*(\d{1,2}\s+\d{2})", r"\1 to \2", text)
     return text
 
 
@@ -122,7 +129,12 @@ def normalize_punctuation_for_tts(text: str) -> str:
     text = _PUNCT_NO_NUM_RE.sub("", text)
     text = _DOT_NO_NUM_RE.sub("", text)
     text = _BRACKETS_RE.sub(" ", text)
+    # Don't strip dashes if they look like "to" (already handled in time) or are between words
+    # but for TTS, replacing most with space is safe.
     text = _DASHES_RE.sub(" ", text)
+    text = _EMOJI_RE.sub("", text)
+    # Strip any other non-essential symbols
+    text = re.sub(r"[^\w\s.,!?;:'\"-]", " ", text)
     text = _MULTI_SPACE_RE.sub(" ", text).strip()
     return text
 
@@ -132,7 +144,7 @@ def _digits_to_greek_words(raw_digits: str) -> str:
 
 
 def _digits_to_english_words(raw_digits: str) -> str:
-    return " ".join(raw_digits)
+    return " ".join(_EN_DIGIT_WORDS.get(d, d) for d in raw_digits)
 
 
 def _english_spoken_id_from_raw(raw_value: str) -> str:
@@ -177,6 +189,18 @@ def normalize_numeric_ids_for_tts(text: str, language: str | None = None) -> str
             lambda m: f"number {_digits_to_english_words(m.group(1))}",
             updated,
         )
+
+        def _date_repl(m: re.Match) -> str:
+            month = m.group(1)
+            day = m.group(2)
+            # Simple ordinal logic: 1st, 2nd, 3rd, everything else th (close enough for TTS clarity)
+            if day == "1" or day == "21" or day == "31": suffix = "st"
+            elif day == "2" or day == "22": suffix = "nd"
+            elif day == "3" or day == "23": suffix = "rd"
+            else: suffix = "th"
+            return f"{month} {day}{suffix}"
+
+        updated = _EN_DATE_RE.sub(_date_repl, updated)
         return updated
 
     if not lang.startswith("el"):

@@ -1286,8 +1286,9 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
     order_number = order_match.group(1) if order_match else ""
 
     # Handle both "is completed" and "is currently completed" forms.
-    status_match = re.search(r"(?i)\bis(?:\s+currently)?\s+([a-z_]+)\b", text)
-    status = (status_match.group(1).lower() if status_match else "")
+    # Allow capturing multiple words (e.g. "being prepared", "on the way") by including spaces in the group.
+    status_match = re.search(r"(?i)\bis(?:\s+currently)?\s+([a-z\s]{2,30}?)(?:\.|\s+delivery|\s+scheduled|$)", text)
+    status = (status_match.group(1).strip().lower() if status_match else "")
     if not status:
         if re.search(r"(?i)\bολοκληρ", text):
             status = "completed"
@@ -3552,14 +3553,15 @@ async def entrypoint(ctx: JobContext):
         """
         Extract likely order number within the configured digit range (e.g. 3-6 digits).
         Prioritizes chunks near order-related keywords to avoid false captures.
+        Uses word boundaries to avoid capturing substrings of longer numbers (like phones).
         """
         normalized = (text or "").lower().strip()
         if not normalized:
             return None
         min_d, max_d = _order_digit_range()
 
-        # 1. Try to find explicit digit sequences within range first
-        explicit_runs = re.findall(rf"\d{{{min_d},{max_d}}}", normalized)
+        # 1. Try to find explicit digit sequences within range first (using boundaries)
+        explicit_runs = re.findall(rf"\b\d{{{min_d},{max_d}}}\b", normalized)
         if explicit_runs:
             # Pick the longest match if multiple exist, or the last one if same length
             best = sorted(explicit_runs, key=len, reverse=True)[0]
@@ -4537,12 +4539,17 @@ async def entrypoint(ctx: JobContext):
             last_tool_call = float(_current_session.get("last_lookup_tool_called_at") or 0.0)
             if last_tool_call >= scheduled_at:
                 room_log("ORDER_WATCHDOG_SKIPPED", reason="llm_started_tool", turn_id=turn_id)
+                # Skip without clearing lookup_pending (LLM is currently using it)
+                _resume_silence_for_tool("order_watchdog_grace")
+                _current_session["forced_response_manual_say_active"] = False
                 return
 
             # If the flow already advanced past checking (e.g. order found), do nothing.
             current_flow = str(_current_session.get("support_flow_state") or FLOW_IDLE)
             if current_flow in {FLOW_ORDER_FOUND}:
                 room_log("ORDER_WATCHDOG_SKIPPED", reason="order_already_found", turn_id=turn_id)
+                _resume_silence_for_tool("order_watchdog_grace")
+                _current_session["forced_response_manual_say_active"] = False
                 return
 
             # Deduplication: skip if a newer turn has already started.
@@ -4595,6 +4602,8 @@ async def entrypoint(ctx: JobContext):
             live_agent = _current_session.get("agent")
             if live_agent:
                 await live_agent.say(spoken_summary, allow_interruptions=True)
+                await send_agent_transcript(spoken_summary)
+                agent.chat_ctx.append(role="assistant", text=spoken_summary)
                 mark_agent_speaking()
                 _snooze_silence_prompts(10.0, reason="order_watchdog_spoken")
         except Exception as e:
@@ -4606,139 +4615,118 @@ async def entrypoint(ctx: JobContext):
             _current_session["forced_response_manual_say_active"] = False
             _clear_lookup_pending(reason="order_watchdog_finished")
 
-
-
-    async def _force_lookup_by_phone(turn_id: int, phone: str, trigger_reason: str) -> None:
-        """Deterministically run lookup_order_by_phone and speak the result."""
-        if call_ended["value"] or _current_session.get("should_end"):
-            room_log("PHONE_LOOKUP_FORCED_SKIP", reason="call_ended", turn_id=turn_id)
-
-            return
-
-        flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
-        if flow_state != FLOW_CHECKING_PHONE_NUMBER:
-            room_log(
-                "PHONE_LOOKUP_FORCED_BLOCKED",
-                reason="phone_not_confirmed",
-                flow_state=flow_state,
-                phone=phone,
-            )
-            _clear_lookup_pending("phone_not_confirmed")
-            _current_session["phone_lookup_inflight"] = False
-            return
-
-        normalized_phone = _normalize_phone_for_lookup(phone or "")
-        if not normalized_phone:
-            room_log(
-                "PHONE_LOOKUP_FORCED_SKIP",
-                reason="invalid_phone_pattern",
-                turn_id=turn_id,
-                phone=_truncate(phone, max_len=64),
-            )
-            return
-
-        if bool(_current_session.get("phone_lookup_inflight")):
-            room_log("PHONE_LOOKUP_FORCED_SKIP", reason="already_inflight", turn_id=turn_id)
-            return
-
-        last_forced_turn = int(_current_session.get("phone_forced_turn_id") or 0)
-        if turn_id <= last_forced_turn:
-            room_log(
-                "PHONE_LOOKUP_FORCED_SKIP",
-                reason="duplicate_turn",
-                turn_id=turn_id,
-                last_forced_turn=last_forced_turn,
-            )
-            return
-
-        forced_suppress_s = _as_float(
-            get_agent_setting("forced_phone_llm_suppress_seconds", 90.0),
-            90.0,
-            min_value=15.0,
-            max_value=300.0,
-        )
-        _current_session["phone_forced_pending_turn_id"] = turn_id
-        _current_session["phone_lookup_inflight"] = True
-        _current_session["phone_forced_turn_id"] = turn_id
-        _current_session["forced_response_spoken_turn_id"] = turn_id
-        _current_session["forced_response_suppress_llm_until"] = time.time() + forced_suppress_s
-        _set_support_flow_state(FLOW_CHECKING_PHONE_NUMBER, reason=f"forced_phone_lookup:{trigger_reason}")
-        _set_lookup_pending(normalized_phone, reason="phone_lookup_started")
-        _snooze_silence_prompts(45.0, reason="phone_lookup_started")
-        _current_session["lookup_progress_prompt_until"] = time.time() + 45.0
-        _current_session["last_lookup_tool_called_at"] = time.time()
-        _current_session["last_lookup_tool_order"] = normalized_phone
-        _pause_silence_for_tool("forced_lookup_order_by_phone")
-        
-        wait_msg = "Μισό λεπτό, ψάχνω την παραγγελία σας." if get_agent_language() == "el" else "Just a moment, I am searching for your order."
-        await agent.say(wait_msg, allow_interruptions=False)
+    async def _force_lookup_by_phone(turn_id: int, phone: str, trigger_reason: str, scheduled_at: float = 0.0) -> None:
+        """
+        Watchdog/Force: run lookup_order_by_phone and speak the result.
+        If scheduled_at > 0, it acts as a watchdog (waiting for LLM first).
+        """
+        # Ensure silence monitor doesn't fire while we wait/work
+        _snooze_silence_prompts(30.0, reason="phone_watchdog_grace")
+        _pause_silence_for_tool("phone_watchdog_grace")
 
         try:
-            room_log(
-                "TOOL_CALL",
-                name="lookup_order_by_phone",
-                phone=normalized_phone,
-                forced=True,
-                trigger=trigger_reason,
+            if scheduled_at > 0.0:
+                # Watchdog mode: wait for LLM to act
+                watchdog_grace_s = 4.0
+                await asyncio.sleep(watchdog_grace_s)
+
+                if call_ended["value"] or _current_session.get("should_end"):
+                    return
+
+                # Check if the LLM already started a lookup via a tool
+                last_tool_call = float(_current_session.get("last_lookup_tool_called_at") or 0.0)
+                if last_tool_call >= scheduled_at:
+                    room_log("PHONE_WATCHDOG_SKIPPED", reason="llm_started_tool", turn_id=turn_id)
+                    # Important: skip WITHOUT clearing lookup_pending.
+                    _resume_silence_for_tool("phone_watchdog_grace")
+                    _current_session["phone_lookup_inflight"] = False
+                    _current_session["forced_response_manual_say_active"] = False
+                    return
+
+                # If flow already advanced (e.g. order found), skip watchdog
+                current_flow = str(_current_session.get("support_flow_state") or FLOW_IDLE)
+                if current_flow in {FLOW_ORDER_FOUND}:
+                    room_log("PHONE_WATCHDOG_SKIPPED", reason="order_already_found", turn_id=turn_id)
+                    _resume_silence_for_tool("phone_watchdog_grace")
+                    _current_session["phone_lookup_inflight"] = False
+                    _current_session["forced_response_manual_say_active"] = False
+                    return
+
+            # Proceed with forced lookup
+            if call_ended["value"] or _current_session.get("should_end"):
+                return
+
+            normalized_phone = _normalize_phone_for_lookup(phone or "")
+            if not normalized_phone:
+                room_log("PHONE_LOOKUP_FORCED_SKIP", reason="invalid_phone", phone=phone)
+                return
+
+            if bool(_current_session.get("phone_lookup_inflight")):
+                room_log("PHONE_LOOKUP_FORCED_SKIP", reason="already_inflight", turn_id=turn_id)
+                return
+
+            last_forced_turn = int(_current_session.get("phone_forced_turn_id") or 0)
+            if turn_id < last_forced_turn:
+                return
+
+            room_log("PHONE_WATCHDOG_FIRED", turn_id=turn_id, phone=normalized_phone, trigger=trigger_reason)
+            logger.info(f"🚨 Phone watchdog fired for {normalized_phone} (reason: {trigger_reason})")
+
+            forced_suppress_s = _as_float(
+                get_agent_setting("forced_phone_llm_suppress_seconds", 90.0),
+                90.0,
+                min_value=15.0,
+                max_value=300.0,
             )
+            _current_session["phone_forced_pending_turn_id"] = turn_id
+            _current_session["phone_lookup_inflight"] = True
+            _current_session["phone_forced_turn_id"] = turn_id
+            _current_session["forced_response_spoken_turn_id"] = turn_id
+            _current_session["forced_response_suppress_llm_until"] = time.time() + forced_suppress_s
+            _current_session["forced_response_manual_say_active"] = True
+            _set_support_flow_state(FLOW_CHECKING_PHONE_NUMBER, reason=f"forced_phone_lookup:{trigger_reason}")
+            _set_lookup_pending(normalized_phone, reason="phone_watchdog_started")
+            _snooze_silence_prompts(45.0, reason="phone_watchdog_started")
+            _pause_silence_for_tool("phone_watchdog_work")
+
+            wait_msg = "Μισό λεπτό, ψάχνω την παραγγελία σας." if get_agent_language() == "el" else "Just a moment, I am searching for your order."
+            live_agent = _current_session.get("agent")
+            if live_agent and scheduled_at > 0.0: # Only say wait msg if we are taking over from LLM
+                 await live_agent.say(wait_msg, allow_interruptions=False)
+                 await send_agent_transcript(wait_msg)
+                 agent.chat_ctx.append(role="assistant", text=wait_msg)
+
             result = await order_lookup.lookup_order_by_phone(normalized_phone)
-            room_log(
-                "TOOL_RESULT",
-                name="lookup_order_by_phone",
-                result=_truncate(result),
-                forced=True,
-                trigger=trigger_reason,
-            )
+            room_log("PHONE_WATCHDOG_RESULT", result=_truncate(result), phone=normalized_phone)
 
             lookup_state = _classify_lookup_result(result)
             _current_session["last_lookup_state"] = lookup_state
-            snapshot = order_lookup.get_last_order_snapshot() or {}
-            snapshot_order = str(snapshot.get("order_number") or "")
-            strict_snapshot_order = _normalize_order_id_strict(snapshot_order) if snapshot_order else None
-            _current_session["last_lookup_order"] = (
-                strict_snapshot_order if (lookup_state == "found" and strict_snapshot_order) else ""
-            )
+            
             if lookup_state == "found":
-                _set_support_flow_state(FLOW_ORDER_FOUND, reason=f"forced_phone_lookup:{trigger_reason}")
+                _set_support_flow_state(FLOW_ORDER_FOUND, reason="phone_watchdog_found")
                 _current_session["details_confirmation_pending"] = True
                 _current_session["details_confirmation_pending_until"] = time.time() + 120.0
             else:
-                _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason=f"forced_phone_lookup_{lookup_state}")
+                _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason=f"phone_watchdog_{lookup_state}")
                 _current_session["details_confirmation_pending"] = False
-                _current_session["details_confirmation_pending_until"] = 0.0
-                _current_session["full_order_details_allowed_until"] = 0.0
 
             spoken_summary = _build_phone_lookup_voice_summary(result, get_agent_language()) or result
-            room_log(
-                "PHONE_LOOKUP_FORCED_FORMATTED",
-                phone=normalized_phone,
-                result=_truncate(spoken_summary),
-            )
-            room_log("PHONE_LOOKUP_FORCED_SPEAKING", phone=normalized_phone, turn_id=turn_id)
-            _current_session["forced_response_manual_say_active"] = True
-            _current_session["forced_response_spoken_text"] = spoken_summary
-            await agent.say(spoken_summary, allow_interruptions=True)
-            _current_session["forced_response_suppress_llm_until"] = time.time() + forced_suppress_s
-            mark_agent_speaking()
-            _snooze_silence_prompts(10.0, reason="post_forced_phone_lookup_spoken")
-            room_log("PHONE_LOOKUP_FORCED_SPOKEN", phone=normalized_phone, turn_id=turn_id)
+            if live_agent:
+                await live_agent.say(spoken_summary, allow_interruptions=True)
+                await send_agent_transcript(spoken_summary)
+                agent.chat_ctx.append(role="assistant", text=spoken_summary)
+                mark_agent_speaking()
+                _snooze_silence_prompts(10.0, reason="phone_watchdog_spoken")
+
         except Exception as e:
-            room_log(
-                "PHONE_LOOKUP_FORCED_ERROR",
-                phone=normalized_phone,
-                trigger=trigger_reason,
-                error=_truncate(str(e), max_len=200),
-            )
+            room_log("PHONE_WATCHDOG_ERROR", error=str(e), phone=phone)
+            logger.error(f"Phone watchdog error: {e}")
         finally:
-            _resume_silence_for_tool("forced_lookup_order_by_phone")
-            _current_session["forced_response_manual_say_active"] = False
+            _resume_silence_for_tool("phone_watchdog_grace")
+            _resume_silence_for_tool("phone_watchdog_work")
             _current_session["phone_lookup_inflight"] = False
-            _clear_lookup_pending(reason="phone_lookup_finished")
-            _clear_pending_lookup_wait_phrase("phone_lookup_finished")
-            _reset_phone_digit_buffer("phone_lookup_finished")
-            _snooze_silence_prompts(15.0, reason="phone_lookup_finished")
-            if int(_current_session.get("phone_forced_pending_turn_id") or 0) == turn_id:
-                _current_session["phone_forced_pending_turn_id"] = 0
+            _current_session["forced_response_manual_say_active"] = False
+            _clear_lookup_pending(reason="phone_watchdog_finished")
 
     async def _speak_phone_confirmation_prompt(
         turn_id: int,
@@ -4831,6 +4819,8 @@ async def entrypoint(ctx: JobContext):
             _current_session["forced_response_manual_say_active"] = True
             _current_session["forced_response_spoken_text"] = confirmation_text
             await agent.say(confirmation_text, allow_interruptions=True)
+            await send_agent_transcript(confirmation_text)
+            agent.chat_ctx.append(role="assistant", text=confirmation_text)
             _current_session["forced_response_suppress_llm_until"] = time.time() + suppress_s
             mark_agent_speaking()
             _snooze_silence_prompts(confirmation_snooze_s, reason="phone_confirmation_prompt")
@@ -4908,7 +4898,8 @@ async def entrypoint(ctx: JobContext):
                 _current_session["forced_response_suppress_llm_until"] = time.time() + suppress_s
                 _current_session["forced_response_spoken_text"] = message_text
                 _clear_pending_lookup_wait_phrase(reason)
-                _clear_lookup_pending(reason)
+                # DO NOT clear_lookup_pending here! It suppresses silence prompts 
+                # while we are preparing/speaking the manual prompt.
                 _current_session["phone_lookup_inflight"] = False
                 _snooze_silence_prompts(snooze_s, reason=reason)
 
@@ -4947,7 +4938,7 @@ async def entrypoint(ctx: JobContext):
                 _current_session["forced_response_spoken_turn_id"] = current_turn_id
                 _current_session["forced_response_suppress_llm_until"] = time.time() + 30.0
                 _clear_pending_lookup_wait_phrase("phone_confirmation_prompt")
-                _clear_lookup_pending("phone_confirmation_prompt")
+                # Removed _clear_lookup_pending here to avoid dead state while confirmation speaks
                 _current_session["phone_lookup_inflight"] = False
                 _snooze_silence_prompts(30.0, reason="phone_confirmation_prompt")
                 asyncio.create_task(
@@ -5101,6 +5092,83 @@ async def entrypoint(ctx: JobContext):
             _schedule_manual_prompt(msg, reason="awaiting_phone_recovery")
             return True
 
+        # --- DETERMINISTIC WATCHDOGS (TOP PRIORITY) ---
+        # We detect numbers and start watchdogs immediately to block silence prompts
+        # before any flow handlers return early.
+        detected_order_number = _extract_order_number_candidate(user_text)
+        detected_phone = _normalize_phone_for_lookup(user_text)
+        number_mode = str(_current_session.get("number_mode_lock") or "")
+        
+        order_lookup_blocked_by_flow = (
+            flow_state in {FLOW_AWAITING_PHONE_CONFIRMATION, FLOW_CHECKING_PHONE_NUMBER}
+            and not detected_order_number
+        )
+        
+        # 1. Order Number Watchdog
+        if (
+            _should_force_order_lookup(user_text, detected_order_number)
+            and number_mode != "phone"
+            and not order_lookup_blocked_by_flow
+        ):
+            now = time.time()
+            last_forced_order = str(_current_session.get("last_forced_lookup_order") or "")
+            last_forced_at = float(_current_session.get("last_forced_lookup_at") or 0.0)
+            if (
+                detected_order_number != last_forced_order
+                or (now - last_forced_at) > 15.0
+            ):
+                _current_session["last_forced_lookup_order"] = detected_order_number
+                _current_session["last_forced_lookup_at"] = now
+                agent.chat_ctx.append(
+                    role="system",
+                    text=(
+                        "ORDER LOOKUP PRIORITY:\n"
+                        f"- The caller already provided order number {detected_order_number}.\n"
+                        "- In your next response, call lookup_order with this exact number immediately.\n"
+                        "- Do not ask for the order number again unless lookup_order says invalid or not found.\n"
+                        "- After the tool returns, provide the status without extra delay."
+                    ),
+                )
+                room_log("ORDER_LOOKUP_HINT_INJECTED", order_number=detected_order_number)
+                _set_lookup_pending(detected_order_number, reason="order_detected_awaiting_tool")
+                start_time = time.time()
+                asyncio.create_task(
+                    _force_lookup_order_by_number(current_turn_id, detected_order_number, start_time)
+                )
+
+        # 2. Phone Number Watchdog
+        elif (
+            detected_phone
+            and not order_lookup_blocked_by_flow
+            and (flow_state == FLOW_AWAITING_PHONE_NUMBER or _should_force_order_lookup(user_text, None))
+        ):
+            now = time.time()
+            last_forced_phone = str(_current_session.get("last_forced_lookup_phone") or "")
+            last_forced_phone_at = float(_current_session.get("last_forced_lookup_phone_at") or 0.0)
+            
+            if (
+                detected_phone != last_forced_phone
+                or (now - last_forced_phone_at) > 15.0
+            ):
+                _current_session["last_forced_lookup_phone"] = detected_phone
+                _current_session["last_forced_lookup_phone_at"] = now
+                agent.chat_ctx.append(
+                    role="system",
+                    text=(
+                        "PHONE LOOKUP PRIORITY:\n"
+                        f"- The caller provided phone number {detected_phone}.\n"
+                        "- In your next response, call lookup_order_by_phone with this phone number immediately.\n"
+                        "- Do not ask for confirmation or repeat the number unless the tool fails.\n"
+                        "- After the tool returns, provide the status without extra delay."
+                    ),
+                )
+                room_log("PHONE_LOOKUP_HINT_INJECTED", phone=detected_phone)
+                _set_lookup_pending(detected_phone, reason="phone_detected_awaiting_tool")
+                start_time = time.time()
+                asyncio.create_task(
+                    _force_lookup_by_phone(current_turn_id, detected_phone, "detected_in_speech", start_time)
+                )
+
         if phone_flow_active:
             handled = _handle_phone_flow_turn(
                 user_text=user_text,
@@ -5163,6 +5231,8 @@ async def entrypoint(ctx: JobContext):
                                 f"Could you repeat it digit by digit?"
                             )
                         await live_agent.say(msg, allow_interruptions=True)
+                        await send_agent_transcript(msg)
+                        agent.chat_ctx.append(role="assistant", text=msg)
                     finally:
                         _current_session["forced_response_manual_say_active"] = False
 
@@ -5418,12 +5488,16 @@ async def entrypoint(ctx: JobContext):
 
         try:
             detected_order_number = _extract_order_number_candidate(user_text)
+            detected_phone = _normalize_phone_for_lookup(user_text)
             number_mode = str(_current_session.get("number_mode_lock") or "")
             flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
+            
             order_lookup_blocked_by_flow = (
                 flow_state in {FLOW_AWAITING_PHONE_CONFIRMATION, FLOW_CHECKING_PHONE_NUMBER}
                 and not detected_order_number
             )
+            
+            # --- 1. Order Number Watchdog ---
             if (
                 _should_force_order_lookup(user_text, detected_order_number)
                 and number_mode != "phone"
@@ -5453,15 +5527,48 @@ async def entrypoint(ctx: JobContext):
                     # Mark as pending immediately to block silence prompts during the grace window
                     _set_lookup_pending(detected_order_number, reason="order_detected_awaiting_tool")
                     start_time = time.time()
-
-                    # Schedule watchdog: give the LLM 4 s to call lookup_order itself.
-                    # If it doesn't (known LLM reliability issue), the watchdog calls
-                    # the tool directly and speaks the result.
                     current_turn = int(_current_session.get("last_user_turn_id") or 0)
                     asyncio.create_task(
                         _force_lookup_order_by_number(current_turn, detected_order_number, start_time)
                     )
                     room_log("ORDER_WATCHDOG_SCHEDULED", turn_id=current_turn, order_number=detected_order_number)
+
+            # --- 2. Phone Number Watchdog ---
+            elif (
+                detected_phone
+                and not order_lookup_blocked_by_flow
+                and (flow_state == FLOW_AWAITING_PHONE_NUMBER or _should_force_order_lookup(user_text, None))
+            ):
+                now = time.time()
+                last_forced_phone = str(_current_session.get("last_forced_lookup_phone") or "")
+                last_forced_phone_at = float(_current_session.get("last_forced_lookup_phone_at") or 0.0)
+                
+                if (
+                    detected_phone != last_forced_phone
+                    or (now - last_forced_phone_at) > 15.0
+                ):
+                    _current_session["last_forced_lookup_phone"] = detected_phone
+                    _current_session["last_forced_lookup_phone_at"] = now
+                    agent.chat_ctx.append(
+                        role="system",
+                        text=(
+                            "PHONE LOOKUP PRIORITY:\n"
+                            f"- The caller provided phone number {detected_phone}.\n"
+                            "- In your next response, call lookup_order_by_phone with this phone number immediately.\n"
+                            "- Do not ask for confirmation or repeat the number unless the tool fails.\n"
+                            "- After the tool returns, provide the status without extra delay."
+                        ),
+                    )
+                    room_log("PHONE_LOOKUP_HINT_INJECTED", phone=detected_phone)
+
+                    # Mark as pending to block silence prompts
+                    _set_lookup_pending(detected_phone, reason="phone_detected_awaiting_tool")
+                    start_time = time.time()
+                    current_turn = int(_current_session.get("last_user_turn_id") or 0)
+                    asyncio.create_task(
+                        _force_lookup_by_phone(current_turn, detected_phone, "detected_in_speech", start_time)
+                    )
+                    room_log("PHONE_WATCHDOG_SCHEDULED", turn_id=current_turn, phone=detected_phone)
 
 
             elif order_lookup_blocked_by_flow and _should_force_order_lookup(user_text, detected_order_number):

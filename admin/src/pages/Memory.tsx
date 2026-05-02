@@ -348,6 +348,7 @@ export default function Memory() {
                       <td className="px-4 py-3 align-top">
                         <EditableCell
                           value={item.comment || ''}
+                          multiline
                           placeholder="Add a note…"
                           onSave={(v) => updateMutation.mutate({ id: item.id, comment: v })}
                         />

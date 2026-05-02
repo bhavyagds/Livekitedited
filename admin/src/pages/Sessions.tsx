@@ -141,7 +141,7 @@ export default function Sessions() {
     callId: string
     transcript: string | null
   } | null>(null)
-  const [memoryModal, setMemoryModal] = useState<{ line: string; role: 'user' | 'agent' } | null>(null)
+  const [memoryDraft, setMemoryDraft] = useState<{ question: string; answer: string; comment: string } | null>(null)
   const [memorySavedMsg, setMemorySavedMsg] = useState(false)
 
   // Fetch active sessions
@@ -203,6 +203,41 @@ export default function Sessions() {
       showError('Failed to load transcript')
     }
   }
+  
+  const handleLineSelect = (line: string, role: 'user' | 'agent') => {
+    const cleanLine = line.replace(/^(User|Agent):\s*(\[\d{2}:\d{2}:\d{2}\]\s*)?/i, '')
+    setMemoryDraft(prev => {
+      if (!prev) {
+        // First selection starts a new draft
+        return {
+          question: role === 'user' ? cleanLine : '',
+          answer: role === 'agent' ? cleanLine : '',
+          comment: ''
+        }
+      }
+      // Second selection fills the empty field
+      if (role === 'user' && !prev.question) return { ...prev, question: cleanLine }
+      if (role === 'agent' && !prev.answer) return { ...prev, answer: cleanLine }
+      
+      // If same role or both full, overwrite/update logically
+      if (role === 'user') return { ...prev, question: cleanLine }
+      return { ...prev, answer: cleanLine }
+    })
+  }
+
+  const memoryMutation = useMutation({
+    mutationFn: () => createMemoryItem({ 
+      question: memoryDraft?.question.trim() || '', 
+      answer: memoryDraft?.answer.trim() || '', 
+      comment: memoryDraft?.comment.trim() || undefined 
+    }),
+    onSuccess: () => {
+      setMemorySavedMsg(true)
+      setMemoryDraft(null)
+      setTimeout(() => setMemorySavedMsg(false), 3000)
+      queryClient.invalidateQueries({ queryKey: ['memory-items'] })
+    },
+  })
 
   const showSuccess = (msg: string) => {
     setSuccessMessage(msg)
@@ -484,11 +519,15 @@ export default function Sessions() {
                         </div>
                         {(isUser || isAgent) && (
                           <button
-                            onClick={() => setMemoryModal({ line, role })}
+                            onClick={() => handleLineSelect(line, role)}
                             title="Add to Memory"
-                            className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-white/60"
+                            className="shrink-0 opacity-100 transition-opacity p-0.5 rounded hover:bg-slate-200"
                           >
-                            <Plus className="w-3.5 h-3.5 text-purple-500" />
+                            <Plus className={`w-3.5 h-3.5 ${
+                              (role === 'user' && memoryDraft?.question) || (role === 'agent' && memoryDraft?.answer)
+                                ? 'text-green-500'
+                                : 'text-purple-500'
+                            }`} />
                           </button>
                         )}
                       </div>
@@ -501,8 +540,64 @@ export default function Sessions() {
                 </p>
               )}
             </div>
-            <div className="p-4 border-t">
-              <Button variant="outline" onClick={() => setSelectedTranscript(null)} className="w-full">
+
+            {/* Inline Memory Draft Form */}
+            {memoryDraft && (
+              <div className="p-4 border-t bg-slate-50 space-y-3">
+                <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center gap-2">
+                    <Brain className="w-4 h-4 text-purple-600" />
+                    <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">Draft Memory Item</span>
+                  </div>
+                  <button onClick={() => setMemoryDraft(null)} className="text-slate-400 hover:text-slate-600">
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase">Question (User)</label>
+                    <textarea
+                      className="w-full border rounded p-2 text-xs resize-none focus:ring-1 focus:ring-purple-500 min-h-[50px]"
+                      value={memoryDraft.question}
+                      onChange={e => setMemoryDraft({ ...memoryDraft, question: e.target.value })}
+                      placeholder="Pick a user line..."
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase">Answer (Agent)</label>
+                    <textarea
+                      className="w-full border rounded p-2 text-xs resize-none focus:ring-1 focus:ring-purple-500 min-h-[50px]"
+                      value={memoryDraft.answer}
+                      onChange={e => setMemoryDraft({ ...memoryDraft, answer: e.target.value })}
+                      placeholder="Pick an agent line..."
+                    />
+                  </div>
+                </div>
+                <div className="flex items-end gap-3">
+                  <div className="flex-1">
+                    <label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase">Comment</label>
+                    <input
+                      className="w-full border rounded px-2 py-1.5 text-xs focus:ring-1 focus:ring-purple-500"
+                      value={memoryDraft.comment}
+                      onChange={e => setMemoryDraft({ ...memoryDraft, comment: e.target.value })}
+                      placeholder="Optional note..."
+                    />
+                  </div>
+                  <Button 
+                    size="sm"
+                    className="bg-purple-600 hover:bg-purple-700 text-white"
+                    disabled={!memoryDraft.question.trim() || !memoryDraft.answer.trim() || memoryMutation.isPending}
+                    onClick={() => memoryMutation.mutate()}
+                  >
+                    {memoryMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Plus className="w-3 h-3 mr-1" />}
+                    Save
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            <div className="p-4 border-t flex gap-2">
+              <Button variant="outline" onClick={() => { setSelectedTranscript(null); setMemoryDraft(null) }} className="flex-1">
                 Close
               </Button>
             </div>
@@ -510,18 +605,6 @@ export default function Sessions() {
         </div>
       )}
 
-      {/* Add-to-Memory modal */}
-      {memoryModal && (
-        <AddToMemoryModal
-          line={memoryModal.line}
-          role={memoryModal.role}
-          onClose={() => setMemoryModal(null)}
-          onSaved={() => {
-            setMemorySavedMsg(true)
-            setTimeout(() => setMemorySavedMsg(false), 3000)
-          }}
-        />
-      )}
     </div>
   )
 }
