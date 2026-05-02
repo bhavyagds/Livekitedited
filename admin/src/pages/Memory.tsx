@@ -149,8 +149,8 @@ function AddMemoryModal({
             <label className="block text-xs font-semibold text-slate-600 mb-1 uppercase tracking-wide">
               Comment <span className="text-slate-400 font-normal">(optional)</span>
             </label>
-            <input
-              className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+            <textarea
+              className="w-full border rounded-lg px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-purple-500 min-h-[70px]"
               placeholder="Admin note or context…"
               value={comment}
               onChange={(e) => setComment(e.target.value)}

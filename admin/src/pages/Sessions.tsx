@@ -207,20 +207,19 @@ export default function Sessions() {
   const handleLineSelect = (line: string, role: 'user' | 'agent') => {
     const cleanLine = line.replace(/^(User|Agent):\s*(\[\d{2}:\d{2}:\d{2}\]\s*)?/i, '')
     setMemoryDraft(prev => {
-      if (!prev) {
-        // First selection starts a new draft
+      if (!prev || (prev.question && prev.answer)) {
+        // First selection starts a new draft with the question
         return {
-          question: role === 'user' ? cleanLine : '',
-          answer: role === 'agent' ? cleanLine : '',
+          question: cleanLine,
+          answer: '',
           comment: ''
         }
       }
-      // Second selection fills the empty field
-      if (role === 'user' && !prev.question) return { ...prev, question: cleanLine }
-      if (role === 'agent' && !prev.answer) return { ...prev, answer: cleanLine }
-      
-      // If same role or both full, overwrite/update logically
-      if (role === 'user') return { ...prev, question: cleanLine }
+      // Second selection fills the answer
+      if (!prev.answer) {
+        return { ...prev, answer: cleanLine }
+      }
+      // If both are full, overwrite the answer (or could overwrite question, but 1st->Q, 2nd->A is the pattern)
       return { ...prev, answer: cleanLine }
     })
   }
@@ -521,7 +520,7 @@ export default function Sessions() {
                           <button
                             onClick={() => handleLineSelect(line, role)}
                             title="Add to Memory"
-                            className="shrink-0 opacity-100 transition-opacity p-0.5 rounded hover:bg-slate-200"
+                            className="shrink-0 p-0.5 rounded hover:bg-slate-200 border border-slate-100 shadow-sm"
                           >
                             <Plus className={`w-3.5 h-3.5 ${
                               (role === 'user' && memoryDraft?.question) || (role === 'agent' && memoryDraft?.answer)
@@ -576,8 +575,8 @@ export default function Sessions() {
                 <div className="flex items-end gap-3">
                   <div className="flex-1">
                     <label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase">Comment</label>
-                    <input
-                      className="w-full border rounded px-2 py-1.5 text-xs focus:ring-1 focus:ring-purple-500"
+                    <textarea
+                      className="w-full border rounded p-2 text-xs resize-none focus:ring-1 focus:ring-purple-500 min-h-[50px]"
                       value={memoryDraft.comment}
                       onChange={e => setMemoryDraft({ ...memoryDraft, comment: e.target.value })}
                       placeholder="Optional note..."

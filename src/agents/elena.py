@@ -652,6 +652,9 @@ _current_session: dict = {
     "phone_digit_buffer": "",
     "phone_digit_buffer_updated_at": 0.0,
     "phone_lookup_inflight": False,
+    "phone_lookup_active_attempt_id": 0,
+    "phone_lookup_active_phone": None,
+    "phone_lookup_active_source": None,
     "phone_forced_turn_id": 0,
     "phone_forced_pending_turn_id": 0,
     "details_lookup_inflight": False,
@@ -1081,8 +1084,36 @@ def _reset_phone_collection_state(reason: str = "") -> None:
     _current_session["phone_digit_buffer"] = ""
     _current_session["phone_digit_buffer_updated_at"] = 0.0
     _current_session["phone_lookup_inflight"] = False
+    _current_session["phone_lookup_active_attempt_id"] = 0
+    _current_session["phone_lookup_active_phone"] = None
+    _current_session["phone_lookup_active_source"] = None
     _current_session["phone_forced_turn_id"] = 0
     _current_session["phone_forced_pending_turn_id"] = 0
+
+
+def _start_phone_lookup_attempt(phone: str, source: str) -> int:
+    """Start a single-flight phone lookup attempt and invalidate older attempts."""
+    attempt_id = int(_current_session.get("phone_lookup_active_attempt_id") or 0) + 1
+    _current_session["phone_lookup_active_attempt_id"] = attempt_id
+    _current_session["phone_lookup_active_phone"] = str(phone or "")
+    _current_session["phone_lookup_active_source"] = source
+    room_log(
+        "PHONE_LOOKUP_ATTEMPT_STARTED",
+        attempt_id=attempt_id,
+        phone=str(phone or ""),
+        source=source,
+    )
+    return attempt_id
+
+
+def _is_phone_lookup_attempt_active(attempt_id: int, phone: str = "") -> bool:
+    """True only for the latest active attempt (optionally matching phone)."""
+    active_id = int(_current_session.get("phone_lookup_active_attempt_id") or 0)
+    if attempt_id != active_id:
+        return False
+    if phone:
+        return str(_current_session.get("phone_lookup_active_phone") or "") == str(phone)
+    return True
 
 
 def _reset_support_session_state(reason: str = "") -> None:
@@ -2725,60 +2756,8 @@ class ElenaFunctionContext(llm.FunctionContext):
             _snooze_silence_prompts(invalid_recovery_grace, reason="invalid_phone_recovery")
             return _repeat_number_prompt_for_mode("phone", lang)
 
-        pending_phone = str(_current_session.get("pending_phone_candidate") or "").strip()
-        awaiting_confirmation = _is_phone_confirmation_pending()
-        flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
-
-        # Gate: If already in CHECKING state (confirmed via on_user_speech_committed), proceed directly
-        if flow_state == FLOW_CHECKING_PHONE_NUMBER:
-            # Fall through to the actual lookup below
-            pass
-        elif awaiting_confirmation and pending_phone and normalized_phone == pending_phone:
-            # Simplified gate: LLM re-called the tool with the same phone after asking for confirmation.
-            # Treat this as user having confirmed — proceed to lookup.
-            room_log(
-                "PHONE_GATE_RECONFIRMED_VIA_TOOL",
-                name="lookup_order_by_phone",
-                phone=normalized_phone,
-            )
-            _current_session["pending_phone_candidate"] = None
-            _set_support_flow_state(FLOW_CHECKING_PHONE_NUMBER, reason="phone_reconfirmed_via_tool")
-            # Fall through to the actual lookup below
-        elif not awaiting_confirmation:
-            # First encounter of this phone number — ask for confirmation once
-            _current_session["pending_phone_candidate"] = normalized_phone
-            _set_support_flow_state(FLOW_AWAITING_PHONE_CONFIRMATION, reason="lookup_order_by_phone_guard")
-            _clear_pending_lookup_wait_phrase("phone_confirmation_required")
-            _clear_lookup_pending("phone_confirmation_required")
-            _current_session["phone_lookup_inflight"] = False
-            room_log(
-                "TOOL_RESULT_BLOCKED",
-                name="lookup_order_by_phone",
-                reason="phone_confirmation_required_hard_gate",
-                phone=normalized_phone,
-                flow_state=flow_state,
-            )
-            spoken_phone = _speak_digits(normalized_phone, get_agent_language())
-            if lang == "el":
-                return f"Για επιβεβαίωση, ο αριθμός τηλεφώνου σας είναι {spoken_phone}. Είναι σωστός;"
-            return f"Just to confirm, your phone number is {spoken_phone}. Is that correct?"
-        else:
-            # Awaiting confirmation but user gave a different phone — restart confirmation
-            _current_session["pending_phone_candidate"] = normalized_phone
-            _clear_pending_lookup_wait_phrase("phone_candidate_changed")
-            _clear_lookup_pending("phone_candidate_changed")
-            _current_session["phone_lookup_inflight"] = False
-            room_log(
-                "PHONE_CANDIDATE_UPDATED",
-                name="lookup_order_by_phone",
-                old_phone=pending_phone or None,
-                new_phone=normalized_phone,
-            )
-            spoken_phone = _speak_digits(normalized_phone, get_agent_language())
-            if lang == "el":
-                return f"Για επιβεβαίωση, ο αριθμός τηλεφώνου σας είναι {spoken_phone}. Είναι σωστός;"
-            return f"Just to confirm, your phone number is {spoken_phone}. Is that correct?"
-
+        # removed hard gate here to allow parity with order number lookup
+        attempt_id = _start_phone_lookup_attempt(normalized_phone, "tool:lookup_order_by_phone")
         _set_support_flow_state(FLOW_CHECKING_PHONE_NUMBER, reason="lookup_order_by_phone_called")
         _current_session["phone_lookup_inflight"] = True
         _set_lookup_pending(normalized_phone, reason="phone_lookup_started")
@@ -2795,6 +2774,17 @@ class ElenaFunctionContext(llm.FunctionContext):
                 "lookup_order_by_phone",
                 order_lookup.lookup_order_by_phone(normalized_phone),
             )
+
+            if not _is_phone_lookup_attempt_active(attempt_id, normalized_phone):
+                room_log(
+                    "PHONE_LOOKUP_RESULT_DISCARDED",
+                    attempt_id=attempt_id,
+                    phone=normalized_phone,
+                    reason="stale_tool_attempt",
+                )
+                if lang == "el":
+                    return "Το ελέγχω ήδη με τα πιο πρόσφατα στοιχεία και θα σας απαντήσω αμέσως."
+                return "I am already checking with the latest phone number and will respond in a moment."
 
             room_log("TOOL_RESULT", name="lookup_order_by_phone", result=_truncate(result))
             lookup_state = _classify_lookup_result(result)
@@ -2820,11 +2810,12 @@ class ElenaFunctionContext(llm.FunctionContext):
             summary = _build_phone_lookup_voice_summary(result, get_agent_language()) or result
             return summary
         finally:
-            _current_session["phone_lookup_inflight"] = False
-            _clear_lookup_pending("phone_lookup_finished")
-            _clear_pending_lookup_wait_phrase("phone_lookup_finished")
-            _reset_phone_digit_buffer("phone_lookup_finished")
-            _snooze_silence_prompts(15.0, reason="phone_lookup_finished")
+            if _is_phone_lookup_attempt_active(attempt_id, normalized_phone):
+                _current_session["phone_lookup_inflight"] = False
+                _clear_lookup_pending("phone_lookup_finished")
+                _clear_pending_lookup_wait_phrase("phone_lookup_finished")
+                _reset_phone_digit_buffer("phone_lookup_finished")
+                _snooze_silence_prompts(15.0, reason="phone_lookup_finished")
 
     @llm.ai_callable()
     async def create_support_ticket(
@@ -3840,6 +3831,7 @@ async def entrypoint(ctx: JobContext):
     
     async def send_agent_transcript(text: str):
         """Send spoken agent text to frontend chat in realtime."""
+        nonlocal conversation_transcript
         try:
             if call_ended["value"] or _current_session.get("should_end"):
                 return
@@ -3863,6 +3855,8 @@ async def entrypoint(ctx: JobContext):
                 transcript_data.encode('utf-8'),
                 reliable=True,
             )
+            # Centralized recording for DB persistence
+            conversation_transcript.append(f"Agent: {cleaned}")
         except Exception as e:
             logger.error(f"Failed to send agent transcript: {e}")
 
@@ -4680,6 +4674,7 @@ async def entrypoint(ctx: JobContext):
             )
             _current_session["phone_forced_pending_turn_id"] = turn_id
             _current_session["phone_lookup_inflight"] = True
+            attempt_id = _start_phone_lookup_attempt(normalized_phone, f"forced:{trigger_reason}")
             _current_session["phone_forced_turn_id"] = turn_id
             _current_session["forced_response_spoken_turn_id"] = turn_id
             _current_session["forced_response_suppress_llm_until"] = time.time() + forced_suppress_s
@@ -4697,6 +4692,14 @@ async def entrypoint(ctx: JobContext):
                  agent.chat_ctx.append(role="assistant", text=wait_msg)
 
             result = await order_lookup.lookup_order_by_phone(normalized_phone)
+            if not _is_phone_lookup_attempt_active(attempt_id, normalized_phone):
+                room_log(
+                    "PHONE_WATCHDOG_RESULT_DISCARDED",
+                    attempt_id=attempt_id,
+                    phone=normalized_phone,
+                    reason="stale_forced_attempt",
+                )
+                return
             room_log("PHONE_WATCHDOG_RESULT", result=_truncate(result), phone=normalized_phone)
 
             lookup_state = _classify_lookup_result(result)
@@ -4724,9 +4727,10 @@ async def entrypoint(ctx: JobContext):
         finally:
             _resume_silence_for_tool("phone_watchdog_grace")
             _resume_silence_for_tool("phone_watchdog_work")
-            _current_session["phone_lookup_inflight"] = False
-            _current_session["forced_response_manual_say_active"] = False
-            _clear_lookup_pending(reason="phone_watchdog_finished")
+            if _is_phone_lookup_attempt_active(locals().get("attempt_id", 0), normalized_phone if 'normalized_phone' in locals() else ""):
+                _current_session["phone_lookup_inflight"] = False
+                _current_session["forced_response_manual_say_active"] = False
+                _clear_lookup_pending(reason="phone_watchdog_finished")
 
     async def _speak_phone_confirmation_prompt(
         turn_id: int,
@@ -4951,8 +4955,38 @@ async def entrypoint(ctx: JobContext):
                 return True
 
             if local_flow_state == FLOW_CHECKING_PHONE_NUMBER:
-                room_log("PHONE_FLOW_TURN_IGNORED", reason="lookup_already_running", turn_id=current_turn_id)
-                return True
+                # Keep order-flow parity: only ignore while lookup is truly in-flight.
+                # If checking state is stale, recover and trigger lookup immediately.
+                if bool(_current_session.get("phone_lookup_inflight")):
+                    room_log("PHONE_FLOW_TURN_IGNORED", reason="lookup_already_running", turn_id=current_turn_id)
+                    return True
+
+                pending_lookup_phone = str(_current_session.get("lookup_pending_order") or "").strip()
+                recovered_phone = (
+                    _normalize_phone_for_lookup(pending_phone)
+                    or _normalize_phone_for_lookup(pending_lookup_phone)
+                    or _normalize_phone_for_lookup(raw_digits)
+                )
+                if recovered_phone:
+                    _set_support_flow_state(FLOW_CHECKING_PHONE_NUMBER, reason="recover_stale_checking_phone")
+                    _set_lookup_pending(recovered_phone, reason="recover_stale_checking_phone")
+                    _current_session["phone_lookup_inflight"] = True
+                    room_log(
+                        "PHONE_FLOW_RECOVERY_TRIGGERED",
+                        turn_id=current_turn_id,
+                        phone=recovered_phone,
+                        source="stale_checking_state",
+                    )
+                    asyncio.create_task(
+                        _force_lookup_by_phone(current_turn_id, recovered_phone, "recover_stale_checking_phone")
+                    )
+                    return True
+
+                room_log("PHONE_FLOW_RECOVERY_RESET", reason="stale_checking_without_phone", turn_id=current_turn_id)
+                _current_session["phone_lookup_inflight"] = False
+                _clear_lookup_pending("stale_checking_without_phone")
+                _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="stale_checking_without_phone")
+                local_flow_state = FLOW_AWAITING_PHONE_NUMBER
 
             if local_flow_state == FLOW_AWAITING_PHONE_NUMBER:
                 if not raw_digits:
@@ -4968,10 +5002,14 @@ async def entrypoint(ctx: JobContext):
                 combined_digits = _append_phone_digits_from_turn(user_text)
                 phone_candidate = _normalize_phone_for_lookup(combined_digits)
                 if phone_candidate:
-                    return _schedule_phone_confirmation_from_turn(
-                        phone_candidate,
-                        "phone_candidate_captured",
+                    # Parity: Trigger lookup directly instead of confirmation
+                    _current_session["pending_phone_candidate"] = None
+                    _reset_phone_digit_buffer("phone_candidate_captured")
+                    _set_support_flow_state(FLOW_CHECKING_PHONE_NUMBER, reason="phone_candidate_captured")
+                    asyncio.create_task(
+                        _force_lookup_by_phone(current_turn_id, phone_candidate, "phone_candidate_captured")
                     )
+                    return True
 
                 min_digits = _as_int(
                     get_agent_setting("phone_lookup_min_digits", 10),
@@ -5007,10 +5045,14 @@ async def entrypoint(ctx: JobContext):
             # FLOW_AWAITING_PHONE_CONFIRMATION
             phone_candidate = _normalize_phone_for_lookup(user_text or "")
             if phone_candidate:
-                return _schedule_phone_confirmation_from_turn(
-                    phone_candidate,
-                    "phone_candidate_captured",
+                # Parity: Trigger lookup directly instead of re-confirming
+                _current_session["pending_phone_candidate"] = None
+                _reset_phone_digit_buffer("phone_candidate_captured_override")
+                _set_support_flow_state(FLOW_CHECKING_PHONE_NUMBER, reason="phone_candidate_captured_override")
+                asyncio.create_task(
+                    _force_lookup_by_phone(current_turn_id, phone_candidate, "phone_candidate_captured_override")
                 )
+                return True
 
             if pending_phone and is_affirmative:
                 _current_session["pending_phone_candidate"] = None
@@ -5081,10 +5123,15 @@ async def entrypoint(ctx: JobContext):
                         reason="blocked_stale_phone_confirmation",
                     )
                     return True
-                return _schedule_phone_confirmation_from_turn(
-                    pending_phone,
-                    "non_confirmation_reply",
+                
+                # Parity: Trigger lookup directly
+                _current_session["pending_phone_candidate"] = None
+                _reset_phone_digit_buffer("non_confirmation_reply_direct")
+                _set_support_flow_state(FLOW_CHECKING_PHONE_NUMBER, reason="non_confirmation_reply_direct")
+                asyncio.create_task(
+                    _force_lookup_by_phone(current_turn_id, pending_phone, "non_confirmation_reply_direct")
                 )
+                return True
             if get_agent_language() == "el":
                 msg = "Παρακαλώ πείτε ξανά τον αριθμό τηλεφώνου σας, ψηφίο προς ψηφίο."
             else:
@@ -5100,15 +5147,50 @@ async def entrypoint(ctx: JobContext):
         number_mode = str(_current_session.get("number_mode_lock") or "")
         
         order_lookup_blocked_by_flow = (
-            flow_state in {FLOW_AWAITING_PHONE_CONFIRMATION, FLOW_CHECKING_PHONE_NUMBER}
+            (
+                flow_state == FLOW_AWAITING_PHONE_CONFIRMATION
+                or (
+                    flow_state == FLOW_CHECKING_PHONE_NUMBER
+                    and bool(_current_session.get("phone_lookup_inflight"))
+                )
+            )
             and not detected_order_number
         )
+
+        # Hard fallback: if mode is already phone and we detect a valid phone number,
+        # start phone lookup immediately even if flow is still on order states.
+        if (
+            number_mode == "phone"
+            and detected_phone
+            and flow_state in {FLOW_AWAITING_ORDER_NUMBER, FLOW_CHECKING_ORDER_NUMBER}
+            and not bool(_current_session.get("phone_lookup_inflight"))
+        ):
+            room_log(
+                "PHONE_MODE_FORCE_TRIGGERED",
+                turn_id=current_turn_id,
+                flow_state=flow_state,
+                phone=detected_phone,
+            )
+            _set_support_flow_state(
+                FLOW_CHECKING_PHONE_NUMBER,
+                reason="phone_mode_force_triggered",
+            )
+            _set_lookup_pending(detected_phone, reason="phone_mode_force_triggered")
+            asyncio.create_task(
+                _force_lookup_by_phone(
+                    current_turn_id,
+                    detected_phone,
+                    "phone_mode_force_triggered",
+                )
+            )
+            return
         
         # 1. Order Number Watchdog
         if (
             _should_force_order_lookup(user_text, detected_order_number)
             and number_mode != "phone"
             and not order_lookup_blocked_by_flow
+            and not phone_flow_active
         ):
             now = time.time()
             last_forced_order = str(_current_session.get("last_forced_lookup_order") or "")
@@ -5141,6 +5223,7 @@ async def entrypoint(ctx: JobContext):
             detected_phone
             and not order_lookup_blocked_by_flow
             and (flow_state == FLOW_AWAITING_PHONE_NUMBER or _should_force_order_lookup(user_text, None))
+            and not phone_flow_active
         ):
             now = time.time()
             last_forced_phone = str(_current_session.get("last_forced_lookup_phone") or "")
@@ -5244,6 +5327,35 @@ async def entrypoint(ctx: JobContext):
             and not _mentions_no_order_number(user_text)
             and not normalized_order_candidate
         ):
+            # If we are awaiting an order number but the agent has already asked for
+            # phone, accept a valid phone input immediately and start phone lookup.
+            normalized_phone_candidate = _normalize_phone_for_lookup(user_text or "")
+            last_agent_text = str(_current_session.get("last_agent_text") or "")
+            if normalized_phone_candidate and (
+                _is_phone_number_prompt(last_agent_text)
+                or str(_current_session.get("number_mode_lock") or "") == "phone"
+            ):
+                _current_session["pending_phone_candidate"] = None
+                _reset_phone_digit_buffer("phone_from_order_flow_fast_path")
+                _set_support_flow_state(
+                    FLOW_CHECKING_PHONE_NUMBER,
+                    reason="phone_provided_while_awaiting_order_number",
+                )
+                room_log(
+                    "PHONE_FAST_PATH_TRIGGERED",
+                    turn_id=current_turn_id,
+                    phone=normalized_phone_candidate,
+                    last_agent_text=_truncate(last_agent_text, max_len=120),
+                )
+                asyncio.create_task(
+                    _force_lookup_by_phone(
+                        current_turn_id,
+                        normalized_phone_candidate,
+                        "phone_provided_while_awaiting_order_number",
+                    )
+                )
+                return
+
             min_d, max_d = _order_digit_range()
             if has_digits:
                 agent.chat_ctx.append(
@@ -5493,15 +5605,51 @@ async def entrypoint(ctx: JobContext):
             flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
             
             order_lookup_blocked_by_flow = (
-                flow_state in {FLOW_AWAITING_PHONE_CONFIRMATION, FLOW_CHECKING_PHONE_NUMBER}
+                (
+                    flow_state == FLOW_AWAITING_PHONE_CONFIRMATION
+                    or (
+                        flow_state == FLOW_CHECKING_PHONE_NUMBER
+                        and bool(_current_session.get("phone_lookup_inflight"))
+                    )
+                )
                 and not detected_order_number
             )
+
+            # Hard fallback duplicate in second watchdog pass:
+            if (
+                number_mode == "phone"
+                and detected_phone
+                and flow_state in {FLOW_AWAITING_ORDER_NUMBER, FLOW_CHECKING_ORDER_NUMBER}
+                and not bool(_current_session.get("phone_lookup_inflight"))
+            ):
+                room_log(
+                    "PHONE_MODE_FORCE_TRIGGERED",
+                    turn_id=int(_current_session.get("last_user_turn_id") or 0),
+                    flow_state=flow_state,
+                    phone=detected_phone,
+                    source="secondary_watchdog_pass",
+                )
+                _set_support_flow_state(
+                    FLOW_CHECKING_PHONE_NUMBER,
+                    reason="phone_mode_force_triggered_secondary",
+                )
+                _set_lookup_pending(detected_phone, reason="phone_mode_force_triggered_secondary")
+                current_turn = int(_current_session.get("last_user_turn_id") or 0)
+                asyncio.create_task(
+                    _force_lookup_by_phone(
+                        current_turn,
+                        detected_phone,
+                        "phone_mode_force_triggered_secondary",
+                    )
+                )
+                return
             
             # --- 1. Order Number Watchdog ---
             if (
                 _should_force_order_lookup(user_text, detected_order_number)
                 and number_mode != "phone"
                 and not order_lookup_blocked_by_flow
+                and flow_state not in PHONE_FLOW_STATES
             ):
                 now = time.time()
                 last_forced_order = str(_current_session.get("last_forced_lookup_order") or "")
@@ -5538,6 +5686,7 @@ async def entrypoint(ctx: JobContext):
                 detected_phone
                 and not order_lookup_blocked_by_flow
                 and (flow_state == FLOW_AWAITING_PHONE_NUMBER or _should_force_order_lookup(user_text, None))
+                and flow_state not in PHONE_FLOW_STATES
             ):
                 now = time.time()
                 last_forced_phone = str(_current_session.get("last_forced_lookup_phone") or "")
@@ -5673,7 +5822,6 @@ async def entrypoint(ctx: JobContext):
                 transcript_text = _format_agent_text_for_transcript(display_text or text)
                 asyncio.create_task(send_agent_transcript(transcript_text))
                 asyncio.create_task(send_agent_info(transcript_text))
-                conversation_transcript.append(f"Agent: {transcript_text}")
                 _current_session["last_agent_text"] = transcript_text
                 normalized_display = _normalize_switch_text(transcript_text)
                 details_prompted = bool(
@@ -5940,6 +6088,7 @@ async def entrypoint(ctx: JobContext):
         greeting = get_greeting(agent_lang)
         logger.info(f"⏱️ Saying greeting ({time.time() - startup_time:.1f}s): {greeting[:50]}...")
         await agent.say(greeting, allow_interruptions=True)
+        await send_agent_transcript(greeting)
     else:
         logger.info("Greeting disabled by settings")
     
@@ -6013,6 +6162,7 @@ async def entrypoint(ctx: JobContext):
                             progress_msg = "I'm still searching for your order, thank you for your patience." if current_lang == "en" else "Ακόμη ψάχνω για την παραγγελία σας, ευχαριστώ για την υπομονή σας."
                             logger.info(f"⏳ Sending periodic search update: {progress_msg}")
                             await agent.say(progress_msg, allow_interruptions=False)
+                            await send_agent_transcript(progress_msg)
 
                     # If lookup state is stale, clear it silently.
                     if pending_started and (now - pending_started) > max_lookup_block_s:
@@ -6070,6 +6220,7 @@ async def entrypoint(ctx: JobContext):
                         
                         # Say the prompt
                         await agent.say(prompt_text, allow_interruptions=True)
+                        await send_agent_transcript(prompt_text)
                         
                     else:
                         # Max prompts reached - disconnect
@@ -6078,6 +6229,7 @@ async def entrypoint(ctx: JobContext):
                         
                         silence_tracker["enabled"] = False
                         await agent.say(goodbye_text, allow_interruptions=False)
+                        await send_agent_transcript(goodbye_text)
                         
                         # Wait for goodbye to finish, then disconnect
                         await asyncio.sleep(3.0)

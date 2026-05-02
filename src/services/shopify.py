@@ -339,11 +339,11 @@ class ShopifyService:
         
         # Check cache first (instant)
         if self.cache.has(cleaned):
-            logger.info(f"Order {cleaned} found in cache (instant)")
+            logger.info(f"[SHOPIFY_API] Order {cleaned} found in cache (instant hit)")
             return self.cache.get(cleaned)
         
         # Not in cache, fetch from API
-        logger.info(f"Order {cleaned} not in cache, fetching from API...")
+        logger.info(f"[SHOPIFY_API] Order {cleaned} NOT in cache, fetching from live API...")
         order = await self.lookup_order_by_number(cleaned)
         
         # Add to cache for future lookups
@@ -394,7 +394,7 @@ class ShopifyService:
         cleaned_number = self.clean_order_number(order_number)
         
         if not self.validate_order_number(cleaned_number):
-            logger.warning(f"Invalid order number format: {cleaned_number}")
+            logger.warning(f"[SHOPIFY_API] Invalid order number format: {cleaned_number}")
             return None
 
         try:
@@ -428,13 +428,15 @@ class ShopifyService:
                 orders = data.get("orders", [])
             
             if orders:
-                return self._parse_order(orders[0])
+                order_info = self._parse_order(orders[0])
+                logger.info(f"[SHOPIFY_API] Order found for number {cleaned_number}: Order ID {order_info.order_number}, status: {order_info.status}")
+                return order_info
             
-            logger.info(f"No order found for number: {cleaned_number}")
+            logger.info(f"[SHOPIFY_API] No order found for number: {cleaned_number}")
             return None
 
         except httpx.HTTPError as e:
-            logger.error(f"Shopify API error: {e}")
+            logger.error(f"[SHOPIFY_API] Shopify API request failed: {e}")
             return None
 
     async def lookup_order_by_email(self, email: str) -> list[OrderInfo]:
@@ -506,7 +508,7 @@ class ShopifyService:
             matched_format: str | None = None
 
             for fmt in unique_candidates:
-                logger.info(f"Shopify customer search — trying phone format: {fmt!r}")
+                logger.info(f"[SHOPIFY_API] Phone search — trying format: {fmt!r}")
                 response = await client.get(
                     f"{self.base_url}/customers/search.json",
                     params={"query": f"phone:{fmt}", "limit": 5},
@@ -517,7 +519,7 @@ class ShopifyService:
                     customer_id = customers[0]["id"]
                     matched_format = fmt
                     logger.info(
-                        f"Shopify customer found with format {fmt!r} → customer_id={customer_id}"
+                        f"[SHOPIFY_API] Customer found for {fmt!r} → ID: {customer_id}, name: {customers[0].get('first_name')} {customers[0].get('last_name')}"
                     )
                     break
 
@@ -535,10 +537,12 @@ class ShopifyService:
             )
             response.raise_for_status()
             data = response.json()
-            orders = [self._parse_order(o) for o in data.get("orders", [])]
+            orders_data = data.get("orders", [])
+            orders = [self._parse_order(o) for o in orders_data]
+            
+            order_summary = ", ".join([f"#{o.order_number} ({o.status})" for o in orders])
             logger.info(
-                f"Shopify phone lookup complete: {len(orders)} order(s) found "
-                f"(matched format: {matched_format!r})"
+                f"[SHOPIFY_API] Phone lookup complete: {len(orders)} order(s) found for customer {customer_id}: {order_summary}"
             )
             return orders
 
