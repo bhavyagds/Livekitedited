@@ -4,7 +4,7 @@ Uses SQLAlchemy async with PostgreSQL.
 """
 
 import logging
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
 import uuid
@@ -114,7 +114,7 @@ class DatabaseService:
                 await session.execute(
                     update(AdminUser)
                     .where(AdminUser.id == uuid.UUID(user_id))
-                    .values(last_login=datetime.utcnow())
+                    .values(last_login=datetime.now(timezone.utc))
                 )
             return True
         except Exception as e:
@@ -1388,7 +1388,7 @@ class DatabaseService:
     async def get_analytics_summary(self, days: int = 30) -> Dict:
         """Get analytics summary for dashboard."""
         try:
-            from_date = datetime.utcnow().date() - timedelta(days=days)
+            from_date = datetime.now(timezone.utc).date() - timedelta(days=days)
 
             async with get_db() as session:
                 result = await session.execute(
@@ -1426,7 +1426,7 @@ class DatabaseService:
     async def get_today_stats(self) -> Dict:
         """Get today's call statistics."""
         try:
-            today = datetime.utcnow().date()
+            today = datetime.now(timezone.utc).date()
             async with get_db() as session:
                 result = await session.execute(
                     select(CallAnalytics).where(CallAnalytics.date == today)
@@ -1456,7 +1456,7 @@ class DatabaseService:
     async def update_analytics_for_call(self, call: Dict) -> bool:
         """Update analytics when a call is recorded."""
         try:
-            today = datetime.utcnow().date()
+            today = datetime.now(timezone.utc).date()
             async with get_db() as session:
                 # Try to update existing record
                 result = await session.execute(
@@ -1509,7 +1509,7 @@ class DatabaseService:
                     caller_number=caller_number,
                     caller_name=caller_identity,
                     status="active",
-                    started_at=datetime.utcnow(),
+                    started_at=datetime.now(timezone.utc),
                 )
                 session.add(call)
                 await session.flush()
@@ -1548,7 +1548,7 @@ class DatabaseService:
                 
                 if call:
                     call.status = status
-                    call.ended_at = datetime.utcnow()
+                    call.ended_at = datetime.now(timezone.utc)
                     call.duration_seconds = duration_seconds
                     call.disconnect_reason = disconnect_reason
                     if transcript:
@@ -1556,7 +1556,7 @@ class DatabaseService:
                     
                     # Calculate duration if not provided
                     if not duration_seconds and call.started_at:
-                        call.duration_seconds = int((datetime.utcnow() - call.started_at).total_seconds())
+                        call.duration_seconds = int((datetime.now(timezone.utc) - call.started_at).total_seconds())
                     
                     await session.commit()
                     
@@ -1631,7 +1631,7 @@ class DatabaseService:
         """
         try:
             async with get_db() as session:
-                cutoff_time = datetime.utcnow() - timedelta(minutes=max_age_minutes)
+                cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
                 
                 # Find orphaned active calls
                 query = select(Call).where(
@@ -1646,10 +1646,10 @@ class DatabaseService:
                 count = 0
                 for call in orphaned_calls:
                     call.status = "completed"
-                    call.ended_at = datetime.utcnow()
+                    call.ended_at = datetime.now(timezone.utc)
                     call.disconnect_reason = "orphaned_cleanup"
                     if call.started_at:
-                        call.duration_seconds = int((datetime.utcnow() - call.started_at).total_seconds())
+                        call.duration_seconds = int((datetime.now(timezone.utc) - call.started_at).total_seconds())
                     count += 1
                 
                 if count > 0:
@@ -1677,10 +1677,10 @@ class DatabaseService:
                 for call in active_calls:
                     if call.room_name and call.room_name not in active_room_names:
                         call.status = "completed"
-                        call.ended_at = datetime.utcnow()
+                        call.ended_at = datetime.now(timezone.utc)
                         call.disconnect_reason = "room_closed"
                         if call.started_at:
-                            call.duration_seconds = int((datetime.utcnow() - call.started_at).total_seconds())
+                            call.duration_seconds = int((datetime.now(timezone.utc) - call.started_at).total_seconds())
                         count += 1
                         logger.info(f"Marked call {call.id} as completed (room {call.room_name} no longer exists)")
                 
@@ -1695,7 +1695,7 @@ class DatabaseService:
     async def _update_analytics_duration(self, duration: int) -> None:
         """Update the average duration in today's analytics."""
         try:
-            today = datetime.utcnow().date()
+            today = datetime.now(timezone.utc).date()
             async with get_db() as session:
                 result = await session.execute(
                     select(CallAnalytics).where(CallAnalytics.date == today)
@@ -1893,9 +1893,9 @@ class DatabaseService:
             async with get_db() as session:
                 # Default to last 24 hours if no date range
                 if not from_date:
-                    from_date = datetime.utcnow() - timedelta(hours=24)
+                    from_date = datetime.now(timezone.utc) - timedelta(hours=24)
                 if not to_date:
-                    to_date = datetime.utcnow()
+                    to_date = datetime.now(timezone.utc)
                 
                 conditions = [
                     SIPEvent.created_at >= from_date,
@@ -1993,7 +1993,7 @@ class DatabaseService:
                         existing.avg_duration_seconds = total_duration / existing.total_calls
                     if error:
                         existing.last_error = error
-                        existing.last_error_at = datetime.utcnow()
+                        existing.last_error_at = datetime.now(timezone.utc)
                 else:
                     # Create new
                     trunk_status = SIPTrunkStatus(
@@ -2007,7 +2007,7 @@ class DatabaseService:
                         failed_calls=1 if increment_failed else 0,
                         avg_duration_seconds=float(duration_seconds) if duration_seconds else 0,
                         last_error=error,
-                        last_error_at=datetime.utcnow() if error else None,
+                        last_error_at=datetime.now(timezone.utc) if error else None,
                     )
                     session.add(trunk_status)
                 
@@ -2206,7 +2206,7 @@ class DatabaseService:
             async with get_db() as session:
                 values = {
                     "sync_status": sync_status,
-                    "last_sync_at": datetime.utcnow(),
+                    "last_sync_at": datetime.now(timezone.utc),
                 }
                 if livekit_trunk_id is not None:
                     values["livekit_trunk_id"] = livekit_trunk_id
@@ -2246,7 +2246,7 @@ class DatabaseService:
         """Get SIP analytics for the specified period."""
         try:
             async with get_db() as session:
-                from_date = datetime.utcnow() - timedelta(days=days)
+                from_date = datetime.now(timezone.utc) - timedelta(days=days)
                 
                 # Get daily call counts using cast for PostgreSQL
                 from sqlalchemy import cast, Date, case
@@ -2281,7 +2281,7 @@ class DatabaseService:
                 ]
                 
                 # Get hourly distribution (for today)
-                today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
                 query = select(
                     func.extract('hour', SIPEvent.created_at).label("hour"),
                     func.count(SIPEvent.id).label("count"),
@@ -2496,10 +2496,12 @@ class DatabaseService:
                     return ""
 
                 sections: List[str] = []
-                
-                # Group by language if needed, or just list as examples
-                sections.append("### BEHAVIORAL GUIDELINES & EXAMPLES")
-                sections.append("The following examples illustrate how you should behave and answer in specific situations. Learn from these patterns to provide consistent service:")
+
+                sections.append("### BEHAVIORAL GUIDELINES & EXAMPLES (INTENT-BASED MATCHING)")
+                sections.append(
+                    "Apply each rule when the user's message has the SAME INTENT OR MEANING as the SCENARIO, "
+                    "regardless of exact wording, typos, word order, or phrasing differences."
+                )
                 sections.append("")
 
                 for m in memories:
@@ -2508,8 +2510,17 @@ class DatabaseService:
                     c = (m.comments or "").strip()
                     if not q or not a:
                         continue
-                    
-                    sections.append(f"SCENARIO: User asks/says: \"{q}\"")
+
+                    # Derive simple intent keywords from the question for fuzzy matching hints
+                    keywords = list(dict.fromkeys(
+                        w.lower().strip("?.!,\"'") for w in q.split()
+                        if len(w) > 3
+                    ))
+                    keyword_str = ", ".join(keywords[:8]) if keywords else ""
+
+                    sections.append(f"SCENARIO (match by intent, not exact words): \"{q}\"")
+                    if keyword_str:
+                        sections.append(f"KEY CONCEPTS: {keyword_str}")
                     sections.append(f"EXPECTED RESPONSE: \"{a}\"")
                     if c:
                         sections.append(f"GUIDELINE: {c}")
@@ -2518,6 +2529,7 @@ class DatabaseService:
                 return "\n".join(sections).strip()
         except Exception as e:
             logger.error(f"Error getting active memory context: {e}")
+
             return ""
 
     async def add_agent_memory(self, question: str, answer: str, comments: str = None, language: str = "en") -> bool:

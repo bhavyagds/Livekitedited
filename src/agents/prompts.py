@@ -335,10 +335,15 @@ DO NOT say "I don't have information" if the answer is below.""")
     memory_context = _cache.get("long_term_memory", "")
     if memory_context:
         parts.append("\n\n" + "="*60)
-        parts.append("""LONG-TERM MEMORY & BEHAVIORAL TRAINING:
-The following are specific behavioral patterns and trained responses provided by admins.
-Treat these as strong guidelines for your persona, style, and logic. 
-Generalize from these examples to handle similar situations with the same behavior.""")
+        parts.append("""LONG-TERM MEMORY & BEHAVIORAL TRAINING (SEMANTIC MATCHING REQUIRED):
+The following SCENARIO/RESPONSE pairs are behavioral rules defined by admins.
+CRITICAL MATCHING RULES:
+- Match by INTENT and MEANING, NOT by exact wording.
+- If a user's question has the same meaning or context as a SCENARIO below — even with typos,
+  different word order, missing words, or a paraphrase — apply the EXPECTED RESPONSE and GUIDELINE.
+- Do NOT require a word-for-word match. A question like "do u have veg food?" must match
+  a SCENARIO like "Do you have vegetarian options?" because the intent is the same.
+- When in doubt, prefer applying a memory guideline over ignoring it.""")
         parts.append("="*60)
         parts.append(memory_context)
         parts.append("="*60 + "\n")
@@ -402,10 +407,15 @@ DO NOT say "I don't have information" if the answer is below.""")
     memory_context = _cache.get("long_term_memory", "")
     if memory_context:
         parts.append("\n\n" + "="*60)
-        parts.append("""LONG-TERM MEMORY & BEHAVIORAL TRAINING:
-The following are specific behavioral patterns and trained responses provided by admins.
-Treat these as strong guidelines for your persona, style, and logic. 
-Generalize from these examples to handle similar situations with the same behavior.""")
+        parts.append("""LONG-TERM MEMORY & BEHAVIORAL TRAINING (SEMANTIC MATCHING REQUIRED):
+The following SCENARIO/RESPONSE pairs are behavioral rules defined by admins.
+CRITICAL MATCHING RULES:
+- Match by INTENT and MEANING, NOT by exact wording.
+- If a user's question has the same meaning or context as a SCENARIO below — even with typos,
+  different word order, missing words, or a paraphrase — apply the EXPECTED RESPONSE and GUIDELINE.
+- Do NOT require a word-for-word match. A question like "do u have veg food?" must match
+  a SCENARIO like "Do you have vegetarian options?" because the intent is the same.
+- When in doubt, prefer applying a memory guideline over ignoring it.""")
         parts.append("="*60)
         parts.append(memory_context)
         parts.append("="*60 + "\n")

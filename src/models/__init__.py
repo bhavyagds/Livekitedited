@@ -20,7 +20,7 @@ from src.models.admin import (
     PromptsContent,
     SIPEvent,
     SIPTrunkStatus,
-    LongTermMemory,
+    AgentMemory,
 )
 
 __all__ = [
@@ -41,5 +41,5 @@ __all__ = [
     "PromptsContent",
     "SIPEvent",
     "SIPTrunkStatus",
-    "LongTermMemory",
+    "AgentMemory",
 ]

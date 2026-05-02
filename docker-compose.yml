@@ -200,11 +200,15 @@ services:
       - "3000:3000"
     environment:
       - NODE_ENV=development
+      # Use explicit container name to avoid intermittent DNS resolution failures
+      - VITE_API_URL=http://meallion-api:8000
+      - VITE_WS_URL=ws://meallion-api:8000
     volumes:
       - ./frontend:/app
       - frontend-node-modules:/app/node_modules
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     networks:
       - meallion-network
 
@@ -218,11 +222,14 @@ services:
       - "3001:3001"
     environment:
       - NODE_ENV=development
+      # Use explicit container name to avoid intermittent DNS resolution failures
+      - VITE_API_URL=http://meallion-api:8000
     volumes:
       - ./admin:/app
       - admin-node-modules:/app/node_modules
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     networks:
       - meallion-network
 

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Meallion Voice AI - Order Lookup Tool
 Handles order status lookups via Shopify API with caching for fast responses.
 """
@@ -35,11 +35,22 @@ def _set_last_order_cache(order) -> None:
     )
 
 
-def _expected_order_digits() -> int:
+def _order_digit_range() -> tuple[int, int]:
+    """Return (min_digits, max_digits) for order ID validation. Defaults to 3-6."""
     try:
-        return int(get_agent_setting("order_id_exact_digits", 5) or 5)
+        min_d = int(get_agent_setting("order_id_min_digits", 3) or 3)
+        max_d = int(get_agent_setting("order_id_max_digits", 6) or 6)
+        min_d = max(3, min(min_d, 9))
+        max_d = max(min_d, min(max_d, 9))
+        return min_d, max_d
     except Exception:
-        return 5
+        return 3, 6
+
+
+def _expected_order_digits() -> int:
+    """Kept for backward compatibility — returns min digit length."""
+    min_d, _ = _order_digit_range()
+    return min_d
 
 
 def _phone_digit_bounds() -> tuple[int, int]:
@@ -110,17 +121,17 @@ async def lookup_order(
     agent_lang = get_agent_language()
 
     cleaned = shopify.clean_order_number(order_number)
-    expected = _expected_order_digits()
+    min_digits, max_digits = _order_digit_range()
 
-    if not cleaned or not cleaned.isdigit() or len(cleaned) != expected:
-        logger.warning(f"Invalid order number: {order_number} -> {cleaned}")
+    if not cleaned or not cleaned.isdigit() or not (min_digits <= len(cleaned) <= max_digits):
+        logger.warning(f"Invalid order number: {order_number} -> {cleaned} (expected {min_digits}-{max_digits} digits)")
         if agent_lang == "el":
             return (
-                f"Ο αριθμός παραγγελίας πρέπει να έχει ακριβώς {expected} ψηφία. "
+                f"Ο αριθμός παραγγελίας πρέπει να έχει από {min_digits} έως {max_digits} ψηφία. "
                 "Μπορείτε να τον επαναλάβετε ψηφίο προς ψηφίο;"
             )
         return (
-            f"The order number must be exactly {expected} digits. "
+            f"The order number must be between {min_digits} and {max_digits} digits. "
             "Could you repeat it digit by digit?"
         )
 
@@ -129,7 +140,15 @@ async def lookup_order(
 
     if order is None:
         logger.info(f"Order not found: {cleaned}")
-        return "I couldn't find that order. Please double-check the order number from your confirmation."
+        if agent_lang == "el":
+            return (
+                "Δεν μπόρεσα να βρω αυτή την παραγγελία. "
+                "Παρακαλώ ελέγξτε ξανά τον αριθμό παραγγελίας από την επιβεβαίωση που λάβατε."
+            )
+        return (
+            "I could not find that order. "
+            "Please double-check the order number from your confirmation email."
+        )
 
     _set_last_order_cache(order)
 
@@ -216,11 +235,11 @@ async def lookup_order_by_phone(
     if not orders:
         if agent_lang == "el":
             return (
-                "Δεν μπόρεσα να βρω κάποια παραγγελία με αυτόν τον αριθμό τηλεφώνου. "
+                "Δεν βρέθηκε παραγγελία με αυτόν τον αριθμό τηλεφώνου. "
                 "Μπορείτε να ελέγξετε τον αριθμό και να τον επαναλάβετε ψηφίο προς ψηφίο;"
             )
         return (
-            "I couldn't find any order with this phone number. "
+            "No order was found for this phone number. "
             "Please check the number and repeat it digit by digit."
         )
 

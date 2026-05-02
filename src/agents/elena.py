@@ -96,14 +96,27 @@ def _as_int(
     return result
 
 
-def _expected_order_digits() -> int:
-    """Configured minimum order-id length used across lookups/validation."""
-    return _as_int(
-        get_agent_setting("order_id_exact_digits", 5),
-        5,
-        min_value=4,
-        max_value=8,
+def _order_digit_range() -> tuple[int, int]:
+    """Return (min_digits, max_digits) for order ID validation. Defaults to 3-6."""
+    min_d = _as_int(
+        get_agent_setting("order_id_min_digits", 3),
+        3,
+        min_value=3,
+        max_value=9,
     )
+    max_d = _as_int(
+        get_agent_setting("order_id_max_digits", 6),
+        6,
+        min_value=min_d,
+        max_value=9,
+    )
+    return min_d, max_d
+
+
+def _expected_order_digits() -> int:
+    """Configured minimum order-id length — kept for backward compatibility."""
+    min_d, _ = _order_digit_range()
+    return min_d
 
 
 _ORDER_WORD_TO_DIGIT: dict[str, str] = {
@@ -230,25 +243,25 @@ def _extract_digit_parts(text: str) -> list[str]:
 
 
 def _normalize_order_id_strict(raw_text: str) -> Optional[str]:
-    """Return strict order id candidate with at least the minimum configured length."""
-    min_len = _expected_order_digits()
+    """Return strict order id candidate within the configured digit range (3-6 by default)."""
+    min_len, max_len = _order_digit_range()
     normalized = (raw_text or "").strip().lower()
     if not normalized:
         return None
 
-    # Find the longest sequence of digits in the text
+    # Convert spoken words to digits, then join
     parts = _extract_digit_parts(normalized)
     joined = "".join(parts)
-    
-    # Validation: must be at least min_len and not a phone number (usually 10+ digits)
-    if len(joined) >= min_len and len(joined) < 10:
+
+    # Primary check: within configured range and not a phone number (10+ digits)
+    if min_len <= len(joined) <= max_len:
         return joined
-    
-    # Also check for sequences within the text if joined failed
-    matches = re.findall(r"\d{4,9}", normalized)
+
+    # Fallback: find explicit digit sequences in the raw text within range
+    matches = re.findall(rf"\d{{{min_len},{max_len}}}", normalized)
     if matches:
         return matches[-1]
-        
+
     return None
 
 
@@ -755,15 +768,26 @@ def _normalize_intent_text(text: str) -> str:
 
 
 def _is_affirmative_utterance(text: str) -> bool:
-    """Return True for short positive confirmations like 'yes'."""
+    """Return True for positive confirmations. Handles full sentences not just single words."""
     normalized = _normalize_intent_text(text)
     if not normalized:
         return False
     yes_tokens = {
         "yes", "yeah", "yep", "sure", "ok", "okay", "correct",
+        "right", "absolutely", "definitely", "of course", "exactly",
+        "that s right", "that is right", "that s correct", "that is correct",
+        "go ahead", "please go ahead", "yes please", "yes go ahead",
         "ναι", "ενταξει", "εντάξει", "σωστα", "σωστά",
+        "ναι ευχαριστω", "ναι παρακαλώ", "βεβαιως", "ακριβως",
     }
-    return normalized in yes_tokens
+    # Exact match first
+    if normalized in yes_tokens:
+        return True
+    # Starts with any yes token (handles "yes that's my number", "ναι είναι σωστός" etc.)
+    for token in yes_tokens:
+        if normalized.startswith(token + " ") or normalized == token:
+            return True
+    return False
 
 
 def _is_negative_utterance(text: str) -> bool:
@@ -809,8 +833,22 @@ def _classify_lookup_result(result_text: str) -> str:
         "couldn t find order",
         "couldn't find order",
         "could not find order",
-        "no order found",
+        # Single-order variants (from order_lookup.py and get_order_details)
+        "couldn t find that order",
+        "could not find that order",
+        "i couldn t find that order",
+        "i could not find that order",
+        "i couldn t find order",
+        "i could not find order",
+        # Phone lookup not-found strings
+        "no order was found for this phone",
+        "no order was found for this phone number",
+        "couldn t find any order with this phone number",
+        "could not find any order with this phone number",
+        "didn t find any order for this phone",
+        "did not find any order for this phone",
         "no orders found",
+        "no order found",
         "order not found",
         "no matching order",
         "no matching orders",
@@ -843,6 +881,9 @@ def _classify_lookup_result(result_text: str) -> str:
         "δεν βρέθηκε καμία παραγγελία",
         "δεν βρεθηκε καμια παραγγελια",
         "δεν βρηκαμε παραγγελιες",
+        # Phone-specific Greek
+        "δεν βρέθηκε παραγγελία με αυτον τον αριθμο τηλεφωνου",
+        "δεν βρεθηκε παραγγελια με αυτον τον αριθμο τηλεφωνου",
         "no orders found for this phone",
         "couldn't find any orders matching the phone",
         "couldn t find any orders matching the phone",
@@ -1588,7 +1629,10 @@ def _resume_silence_for_tool(tool_name: str) -> None:
     tracker["paused_by_tool"] = False
     tracker["last_user_speech"] = now
     tracker["last_agent_speech"] = now
-    tracker["is_waiting_for_response"] = True
+    # Keep is_waiting_for_response=False — the LLM still needs to process the tool
+    # result and start TTS (3-7s). mark_agent_speaking() will set it to True only
+    # after the LLM response audio actually finishes playing.
+    tracker["is_waiting_for_response"] = False
     started_at = float(tracker.get("pause_started_at") or now)
     room_log("SILENCE_RESUMED", reason=f"tool:{tool_name}", paused_s=round(now - started_at, 2))
 
@@ -2395,10 +2439,10 @@ class ElenaFunctionContext(llm.FunctionContext):
         """Pick a natural, non-repeating wait phrase based on current language."""
         lang = get_agent_language()
         silence_grace_s = _as_float(
-            get_agent_setting("order_lookup_silence_grace_seconds", 8.0),
-            8.0,
-            min_value=2.0,
-            max_value=20.0,
+            get_agent_setting("order_lookup_silence_grace_seconds", 30.0),
+            30.0,
+            min_value=20.0,
+            max_value=60.0,
         )
         if lang == "en":
             phrases = (
@@ -2467,12 +2511,12 @@ class ElenaFunctionContext(llm.FunctionContext):
 
         strict_order = _normalize_order_id_strict(order_number)
         if not strict_order:
-            expected = _expected_order_digits()
+            min_d, max_d = _order_digit_range()
             room_log("TOOL_RESULT_BLOCKED", name="lookup_order", reason="invalid_order_id_format", input=order_number)
             _set_support_flow_state(FLOW_AWAITING_ORDER_NUMBER, reason="invalid_order_format")
             if lang == "el":
-                return f"Ο αριθμός παραγγελίας πρέπει να είναι τουλάχιστον {expected} ψηφία. Μπορείτε να τον πείτε ξανά;"
-            return f"The order number must be at least {expected} digits. Could you say it again?"
+                return f"Ο αριθμός παραγγελίας πρέπει να έχει από {min_d} έως {max_d} ψηφία. Μπορείτε να τον πείτε ξανά;"
+            return f"The order number must be between {min_d} and {max_d} digits. Could you say it again?"
 
         # We now have a valid order id, so move flow authority back to order lookup.
         _set_support_flow_state(FLOW_CHECKING_ORDER_NUMBER, reason="lookup_order_called")
@@ -2482,8 +2526,7 @@ class ElenaFunctionContext(llm.FunctionContext):
         _current_session["last_lookup_progress_at"] = time.time()
         room_log("TOOL_CALL", name="lookup_order", order_number=strict_order)
         logger.info(f"🔎 Starting order lookup for #{strict_order}")
-        wait_msg = "Μισό λεπτό, ψάχνω την παραγγελία σας." if get_agent_language() == "el" else "Just a moment, I am searching for your order."
-        await agent.say(wait_msg, allow_interruptions=False)
+        # No agent.say() here — the LLM's pre-tool message handles the wait UX
         try:
             result = await self._run_tool_with_silence_pause(
                 "lookup_order",
@@ -2513,6 +2556,9 @@ class ElenaFunctionContext(llm.FunctionContext):
                     silence_timeout + 5.0,
                     reason="order_lookup_not_found_grace",
                 )
+                # Suppress LLM from adding its own extra paraphrase on top of the tool result
+                _current_session["forced_response_suppress_llm_until"] = time.time() + 15.0
+                room_log("LLM_SUPPRESSED_AFTER_NOT_FOUND", order_number=strict_order)
 
             summary = _build_order_voice_summary(result, get_agent_language()) or result
             return summary
@@ -2520,7 +2566,7 @@ class ElenaFunctionContext(llm.FunctionContext):
             _clear_lookup_pending("lookup_order_finished")
             _clear_pending_lookup_wait_phrase("lookup_order_finished")
             _current_session["lookup_progress_prompt_until"] = 0.0
-            _snooze_silence_prompts(5.0, reason="lookup_order_finished")
+            _snooze_silence_prompts(15.0, reason="lookup_order_finished")
 
     @llm.ai_callable()
     async def get_order_details(
@@ -2681,7 +2727,24 @@ class ElenaFunctionContext(llm.FunctionContext):
         pending_phone = str(_current_session.get("pending_phone_candidate") or "").strip()
         awaiting_confirmation = _is_phone_confirmation_pending()
         flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
-        if not awaiting_confirmation and flow_state != FLOW_CHECKING_PHONE_NUMBER:
+
+        # Gate: If already in CHECKING state (confirmed via on_user_speech_committed), proceed directly
+        if flow_state == FLOW_CHECKING_PHONE_NUMBER:
+            # Fall through to the actual lookup below
+            pass
+        elif awaiting_confirmation and pending_phone and normalized_phone == pending_phone:
+            # Simplified gate: LLM re-called the tool with the same phone after asking for confirmation.
+            # Treat this as user having confirmed — proceed to lookup.
+            room_log(
+                "PHONE_GATE_RECONFIRMED_VIA_TOOL",
+                name="lookup_order_by_phone",
+                phone=normalized_phone,
+            )
+            _current_session["pending_phone_candidate"] = None
+            _set_support_flow_state(FLOW_CHECKING_PHONE_NUMBER, reason="phone_reconfirmed_via_tool")
+            # Fall through to the actual lookup below
+        elif not awaiting_confirmation:
+            # First encounter of this phone number — ask for confirmation once
             _current_session["pending_phone_candidate"] = normalized_phone
             _set_support_flow_state(FLOW_AWAITING_PHONE_CONFIRMATION, reason="lookup_order_by_phone_guard")
             _clear_pending_lookup_wait_phrase("phone_confirmation_required")
@@ -2698,36 +2761,22 @@ class ElenaFunctionContext(llm.FunctionContext):
             if lang == "el":
                 return f"Για επιβεβαίωση, ο αριθμός τηλεφώνου σας είναι {spoken_phone}. Είναι σωστός;"
             return f"Just to confirm, your phone number is {spoken_phone}. Is that correct?"
-
-        if awaiting_confirmation:
-            _clear_lookup_pending("phone_confirmation_required")
+        else:
+            # Awaiting confirmation but user gave a different phone — restart confirmation
+            _current_session["pending_phone_candidate"] = normalized_phone
+            _clear_pending_lookup_wait_phrase("phone_candidate_changed")
+            _clear_lookup_pending("phone_candidate_changed")
             _current_session["phone_lookup_inflight"] = False
-            if pending_phone and normalized_phone == pending_phone:
-                _clear_pending_lookup_wait_phrase("phone_confirmation_required")
-                room_log(
-                    "TOOL_RESULT_BLOCKED",
-                    name="lookup_order_by_phone",
-                    reason="phone_confirmation_required",
-                )
-                if lang == "el":
-                    return (
-                        "Πριν το ελέγξω, παρακαλώ επιβεβαιώστε αν αυτός ο αριθμός τηλεφώνου είναι σωστός."
-                    )
-                return "Before I check that, please confirm whether this phone number is correct."
-
             room_log(
-                "TOOL_RESULT_BLOCKED",
+                "PHONE_CANDIDATE_UPDATED",
                 name="lookup_order_by_phone",
-                reason="phone_confirmation_pending_mismatch",
-                phone=normalized_phone,
-                pending_phone=pending_phone or None,
+                old_phone=pending_phone or None,
+                new_phone=normalized_phone,
             )
-            _clear_pending_lookup_wait_phrase("phone_confirmation_pending_mismatch")
-            _clear_lookup_pending("phone_confirmation_pending_mismatch")
-            _current_session["phone_lookup_inflight"] = False
+            spoken_phone = _speak_digits(normalized_phone, get_agent_language())
             if lang == "el":
-                return "Για να συνεχίσουμε, επιβεβαιώστε πρώτα τον αριθμό τηλεφώνου."
-            return "To continue, please confirm the phone number first."
+                return f"Για επιβεβαίωση, ο αριθμός τηλεφώνου σας είναι {spoken_phone}. Είναι σωστός;"
+            return f"Just to confirm, your phone number is {spoken_phone}. Is that correct?"
 
         _set_support_flow_state(FLOW_CHECKING_PHONE_NUMBER, reason="lookup_order_by_phone_called")
         _current_session["phone_lookup_inflight"] = True
@@ -2738,10 +2787,8 @@ class ElenaFunctionContext(llm.FunctionContext):
         _current_session["last_lookup_tool_order"] = normalized_phone
         _current_session["last_lookup_progress_at"] = time.time()
         room_log("TOOL_CALL", name="lookup_order_by_phone", phone=normalized_phone)
-        wait_msg = "Μισό λεπτό, ψάχνω την παραγγελία σας." if get_agent_language() == "el" else "Just a moment, I am searching for your order."
-        logger.info(f"🔍 Starting phone lookup for {normalized_phone}, saying: {wait_msg}")
-        _current_session["last_lookup_progress_at"] = time.time()
-        await agent.say(wait_msg, allow_interruptions=False)
+        logger.info(f"🔍 Starting phone lookup for {normalized_phone}")
+        # No agent.say() here — the LLM's pre-tool message handles the wait UX
         try:
             result = await self._run_tool_with_silence_pause(
                 "lookup_order_by_phone",
@@ -2765,17 +2812,18 @@ class ElenaFunctionContext(llm.FunctionContext):
                 _current_session["details_confirmation_pending"] = False
                 _current_session["details_confirmation_pending_until"] = 0.0
                 _current_session["full_order_details_allowed_until"] = 0.0
+                # Suppress LLM from adding its own paraphrase on top of the not-found tool result
+                _current_session["forced_response_suppress_llm_until"] = time.time() + 15.0
+                room_log("LLM_SUPPRESSED_AFTER_PHONE_NOT_FOUND", phone=normalized_phone)
 
             summary = _build_phone_lookup_voice_summary(result, get_agent_language()) or result
-            if _as_bool(get_agent_setting("order_lookup_wait_phrase_enabled", True), default=True):
-                self._pick_lookup_wait_phrase()
             return summary
         finally:
             _current_session["phone_lookup_inflight"] = False
             _clear_lookup_pending("phone_lookup_finished")
             _clear_pending_lookup_wait_phrase("phone_lookup_finished")
             _reset_phone_digit_buffer("phone_lookup_finished")
-            _snooze_silence_prompts(5.0, reason="phone_lookup_finished")
+            _snooze_silence_prompts(15.0, reason="phone_lookup_finished")
 
     @llm.ai_callable()
     async def create_support_ticket(
@@ -3502,18 +3550,22 @@ async def entrypoint(ctx: JobContext):
 
     def _extract_order_number_candidate(text: str) -> Optional[str]:
         """
-        Extract likely order number with strict exact configured digit length.
+        Extract likely order number within the configured digit range (e.g. 3-6 digits).
         Prioritizes chunks near order-related keywords to avoid false captures.
         """
         normalized = (text or "").lower().strip()
         if not normalized:
             return None
-        expected = _expected_order_digits()
+        min_d, max_d = _order_digit_range()
 
-        explicit_runs = re.findall(rf"\d{{{expected}}}", normalized)
+        # 1. Try to find explicit digit sequences within range first
+        explicit_runs = re.findall(rf"\d{{{min_d},{max_d}}}", normalized)
         if explicit_runs:
-            return explicit_runs[-1]
+            # Pick the longest match if multiple exist, or the last one if same length
+            best = sorted(explicit_runs, key=len, reverse=True)[0]
+            return best
 
+        # 2. Look for digits near keywords
         windows = []
         for match in re.finditer(r"(order(?:\s+number)?|παραγγε\w*|αριθμ\w*)", normalized, flags=re.IGNORECASE):
             windows.append(normalized[match.start(): match.start() + 96])
@@ -3521,13 +3573,15 @@ async def entrypoint(ctx: JobContext):
         if windows:
             for segment in windows:
                 candidate = _normalize_order_id_strict(segment)
-                if candidate and len(candidate) == expected:
+                if candidate and min_d <= len(candidate) <= max_d:
                     return candidate
 
+        # 3. Last resort: normalize full text
         fallback = _normalize_order_id_strict(normalized)
-        if fallback and len(fallback) == expected:
+        if fallback and min_d <= len(fallback) <= max_d:
             return fallback
         return None
+
 
     def _should_force_order_lookup(user_text: str, order_number: Optional[str]) -> bool:
         """Return True when we should force immediate lookup_order for this turn."""
@@ -4462,10 +4516,103 @@ async def entrypoint(ctx: JobContext):
                 _current_session["details_forced_pending_turn_id"] = 0
             _resume_silence_for_tool("forced_get_order_details")
 
+    async def _force_lookup_order_by_number(turn_id: int, order_number: str, scheduled_at: float) -> None:
+        """
+        Watchdog: wait a few seconds for the LLM to call lookup_order itself.
+        If the LLM doesn't start the tool within the grace window, call it directly.
+        """
+        # Ensure silence monitor doesn't fire while we wait for the LLM
+        _snooze_silence_prompts(30.0, reason="order_watchdog_grace")
+        _pause_silence_for_tool("order_watchdog_grace")
+
+        try:
+            # Grace window — give the LLM time to initiate the tool call itself.
+            watchdog_grace_s = 4.0
+            await asyncio.sleep(watchdog_grace_s)
+
+            if call_ended["value"] or _current_session.get("should_end"):
+                return
+
+            # Check if the LLM already started the lookup via the tool
+            last_tool_call = float(_current_session.get("last_lookup_tool_called_at") or 0.0)
+            if last_tool_call >= scheduled_at:
+                room_log("ORDER_WATCHDOG_SKIPPED", reason="llm_started_tool", turn_id=turn_id)
+                return
+
+            # If the flow already advanced past checking (e.g. order found), do nothing.
+            current_flow = str(_current_session.get("support_flow_state") or FLOW_IDLE)
+            if current_flow in {FLOW_ORDER_FOUND}:
+                room_log("ORDER_WATCHDOG_SKIPPED", reason="order_already_found", turn_id=turn_id)
+                return
+
+            # Deduplication: skip if a newer turn has already started.
+            latest_turn = int(_current_session.get("last_user_turn_id") or 0)
+            if latest_turn > turn_id:
+                room_log("ORDER_WATCHDOG_SKIPPED", reason="newer_turn", turn_id=turn_id, latest=latest_turn)
+                return
+
+            # Check if order_number is still valid.
+            strict_order = _normalize_order_id_strict(order_number)
+            if not strict_order:
+                room_log("ORDER_WATCHDOG_SKIPPED", reason="invalid_order_number", order=order_number)
+                return
+
+            room_log("ORDER_WATCHDOG_FIRED", turn_id=turn_id, order_number=strict_order)
+            logger.info(f"🚨 Order watchdog fired: LLM didn't call lookup_order for #{strict_order}, running directly")
+
+            forced_suppress_s = _as_float(
+                get_agent_setting("forced_phone_llm_suppress_seconds", 90.0),
+                90.0,
+                min_value=15.0,
+                max_value=300.0,
+            )
+            _set_support_flow_state(FLOW_CHECKING_ORDER_NUMBER, reason="order_watchdog_fired")
+            _set_lookup_pending(strict_order, reason="order_watchdog_started")
+            _current_session["forced_response_spoken_turn_id"] = turn_id
+            _current_session["forced_response_suppress_llm_until"] = time.time() + forced_suppress_s
+            _current_session["forced_response_manual_say_active"] = True
+            _snooze_silence_prompts(45.0, reason="order_watchdog_started")
+            _pause_silence_for_tool("order_watchdog")
+
+            result = await order_lookup.lookup_order(strict_order)
+            room_log("ORDER_WATCHDOG_RESULT", result=_truncate(result), order_number=strict_order)
+
+            lookup_state = _classify_lookup_result(result)
+            _current_session["last_lookup_state"] = lookup_state
+            _current_session["last_lookup_order"] = strict_order if lookup_state == "found" else ""
+
+            if lookup_state == "found":
+                _set_support_flow_state(FLOW_ORDER_FOUND, reason="order_watchdog_found")
+                _current_session["details_confirmation_pending"] = True
+                _current_session["details_confirmation_pending_until"] = time.time() + 120.0
+            else:
+                _set_support_flow_state(FLOW_AWAITING_ORDER_NUMBER, reason=f"order_watchdog_{lookup_state}")
+                _current_session["details_confirmation_pending"] = False
+                _current_session["details_confirmation_pending_until"] = 0.0
+                _current_session["full_order_details_allowed_until"] = 0.0
+
+            spoken_summary = _build_order_voice_summary(result, get_agent_language()) or result
+            live_agent = _current_session.get("agent")
+            if live_agent:
+                await live_agent.say(spoken_summary, allow_interruptions=True)
+                mark_agent_speaking()
+                _snooze_silence_prompts(10.0, reason="order_watchdog_spoken")
+        except Exception as e:
+            room_log("ORDER_WATCHDOG_ERROR", error=_truncate(str(e), max_len=200), order_number=str(order_number))
+            logger.error(f"Order watchdog error for #{order_number}: {e}")
+        finally:
+            _resume_silence_for_tool("order_watchdog_grace")
+            _resume_silence_for_tool("order_watchdog")
+            _current_session["forced_response_manual_say_active"] = False
+            _clear_lookup_pending(reason="order_watchdog_finished")
+
+
+
     async def _force_lookup_by_phone(turn_id: int, phone: str, trigger_reason: str) -> None:
         """Deterministically run lookup_order_by_phone and speak the result."""
         if call_ended["value"] or _current_session.get("should_end"):
             room_log("PHONE_LOOKUP_FORCED_SKIP", reason="call_ended", turn_id=turn_id)
+
             return
 
         flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
@@ -4583,15 +4730,15 @@ async def entrypoint(ctx: JobContext):
                 error=_truncate(str(e), max_len=200),
             )
         finally:
+            _resume_silence_for_tool("forced_lookup_order_by_phone")
             _current_session["forced_response_manual_say_active"] = False
             _current_session["phone_lookup_inflight"] = False
             _clear_lookup_pending(reason="phone_lookup_finished")
             _clear_pending_lookup_wait_phrase("phone_lookup_finished")
             _reset_phone_digit_buffer("phone_lookup_finished")
-            _snooze_silence_prompts(5.0, reason="phone_lookup_finished")
+            _snooze_silence_prompts(15.0, reason="phone_lookup_finished")
             if int(_current_session.get("phone_forced_pending_turn_id") or 0) == turn_id:
                 _current_session["phone_forced_pending_turn_id"] = 0
-            _resume_silence_for_tool("forced_lookup_order_by_phone")
 
     async def _speak_phone_confirmation_prompt(
         turn_id: int,
@@ -4798,11 +4945,11 @@ async def entrypoint(ctx: JobContext):
                 room_log("PHONE_CANDIDATE_CAPTURED", phone=phone_candidate, turn_id=current_turn_id)
                 _current_session["forced_response_manual_say_active"] = True
                 _current_session["forced_response_spoken_turn_id"] = current_turn_id
-                _current_session["forced_response_suppress_llm_until"] = time.time() + 8.0
+                _current_session["forced_response_suppress_llm_until"] = time.time() + 30.0
                 _clear_pending_lookup_wait_phrase("phone_confirmation_prompt")
                 _clear_lookup_pending("phone_confirmation_prompt")
                 _current_session["phone_lookup_inflight"] = False
-                _snooze_silence_prompts(8.0, reason="phone_confirmation_prompt")
+                _snooze_silence_prompts(30.0, reason="phone_confirmation_prompt")
                 asyncio.create_task(
                     _speak_phone_confirmation_prompt(
                         current_turn_id,
@@ -4986,6 +5133,7 @@ async def entrypoint(ctx: JobContext):
         if flow_state == FLOW_AWAITING_ORDER_NUMBER and raw_digits:
             normalized_order = _normalize_order_id_strict(user_text or "")
             if not normalized_order:
+                min_d, max_d = _order_digit_range()
                 _current_session["number_mode_lock"] = "order"
                 _set_support_flow_state(
                     FLOW_AWAITING_ORDER_NUMBER,
@@ -5006,13 +5154,12 @@ async def entrypoint(ctx: JobContext):
                     try:
                         if get_agent_language() == "el":
                             msg = (
-                                f"Ο αριθμός παραγγελίας πρέπει να έχει ακριβώς "
-                                f"{expected_digits} ψηφία. Μπορείτε να τον επαναλάβετε "
-                                f"ψηφίο προς ψηφίο;"
+                                f"Ο αριθμός παραγγελίας πρέπει να έχει από {min_d} έως {max_d} ψηφία. "
+                                f"Μπορείτε να τον επαναλάβετε ψηφίο προς ψηφίο;"
                             )
                         else:
                             msg = (
-                                f"The order number must be exactly {expected_digits} digits. "
+                                f"The order number should be between {min_d} and {max_d} digits. "
                                 f"Could you repeat it digit by digit?"
                             )
                         await live_agent.say(msg, allow_interruptions=True)
@@ -5027,13 +5174,13 @@ async def entrypoint(ctx: JobContext):
             and not _mentions_no_order_number(user_text)
             and not normalized_order_candidate
         ):
-            expected = _expected_order_digits()
+            min_d, max_d = _order_digit_range()
             if has_digits:
                 agent.chat_ctx.append(
                     role="system",
                     text=(
                         "SUPPORT FLOW - ORDER NUMBER STILL MISSING:\n"
-                        f"- The caller has not provided a valid {expected}-digit order number yet.\n"
+                        f"- The caller has not provided a valid {min_d}-{max_d} digit order number yet.\n"
                         "- Ask them to repeat the order number digit by digit.\n"
                         "- Do not switch to phone lookup unless they explicitly say they don't have an order number."
                     ),
@@ -5303,8 +5450,20 @@ async def entrypoint(ctx: JobContext):
                     )
                     room_log("ORDER_LOOKUP_HINT_INJECTED", order_number=detected_order_number)
 
-                    # No background forced-response task here to avoid duplicate/racing
-                    # responses with normal tool calls in the same turn.
+                    # Mark as pending immediately to block silence prompts during the grace window
+                    _set_lookup_pending(detected_order_number, reason="order_detected_awaiting_tool")
+                    start_time = time.time()
+
+                    # Schedule watchdog: give the LLM 4 s to call lookup_order itself.
+                    # If it doesn't (known LLM reliability issue), the watchdog calls
+                    # the tool directly and speaks the result.
+                    current_turn = int(_current_session.get("last_user_turn_id") or 0)
+                    asyncio.create_task(
+                        _force_lookup_order_by_number(current_turn, detected_order_number, start_time)
+                    )
+                    room_log("ORDER_WATCHDOG_SCHEDULED", turn_id=current_turn, order_number=detected_order_number)
+
+
             elif order_lookup_blocked_by_flow and _should_force_order_lookup(user_text, detected_order_number):
                 room_log(
                     "ORDER_LOOKUP_HINT_SKIPPED",
@@ -5321,16 +5480,16 @@ async def entrypoint(ctx: JobContext):
         reset_silence_timer()
         if _is_digit_collection_utterance(user_text):
             digit_grace = _as_float(
-                get_agent_setting("digit_collection_silence_grace_seconds", 14.0),
-                14.0,
-                min_value=4.0,
-                max_value=40.0,
+                get_agent_setting("digit_collection_silence_grace_seconds", 30.0),
+                30.0,
+                min_value=15.0,
+                max_value=60.0,
             )
             _snooze_silence_prompts(digit_grace, reason="digit_collection")
         elif _is_short_utterance(user_text):
             short_grace = _as_float(
-                get_agent_setting("short_utterance_silence_grace_seconds", 6.0),
-                6.0,
+                get_agent_setting("short_utterance_silence_grace_seconds", 8.0),
+                8.0,
                 min_value=2.0,
                 max_value=20.0,
             )

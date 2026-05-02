@@ -377,7 +377,7 @@ class ShopifyService:
 
     @staticmethod
     def validate_order_number(order_number: str) -> bool:
-        """Validate that order number is 3-6 digits."""
+        """Validate that order number is 3-6 digits (covers all Shopify store ranges)."""
         return bool(re.match(r'^\d{3,6}$', order_number))
 
     async def lookup_order_by_number(self, order_number: str) -> Optional[OrderInfo]:
@@ -462,36 +462,88 @@ class ShopifyService:
             return []
 
     async def lookup_order_by_phone(self, phone: str) -> list[OrderInfo]:
-        """Look up orders by customer phone number."""
+        """
+        Look up orders by customer phone number.
+
+        Shopify stores phone numbers in many formats (+country-code + local, local-only, etc.).
+        This method tries several variants so a missed country-code prefix never causes a false
+        "not found" result.  It short-circuits as soon as a customer record is found.
+        """
         cleaned_phone = self.clean_phone_number(phone)
-        
+
+        # Build candidate query strings in priority order:
+        # 1. Plain digits as spoken (e.g. 6912345678)
+        # 2. International format with + prefix (e.g. +6912345678)
+        # 3. Greek country code (+30) – most common for this deployment
+        # 4. US/Canada country code (+1) – common if store has international customers
+        # 5. Digits without leading country-code zero stripping
+        candidates: list[str] = [cleaned_phone]
+        if not cleaned_phone.startswith("+"):
+            candidates.append(f"+{cleaned_phone}")
+            # Greek (+30): local numbers are 10 digits; stored as +30XXXXXXXXXX
+            if len(cleaned_phone) == 10 and not cleaned_phone.startswith("30"):
+                candidates.append(f"+30{cleaned_phone}")
+            # If caller already included country code 30, also try without it
+            if cleaned_phone.startswith("30") and len(cleaned_phone) > 10:
+                candidates.append(f"+{cleaned_phone}")
+                candidates.append(cleaned_phone[2:])  # strip 30 prefix
+            # US/Canada (+1): local numbers are 10 digits
+            if len(cleaned_phone) == 10 and not cleaned_phone.startswith("1"):
+                candidates.append(f"+1{cleaned_phone}")
+
+        # De-duplicate while preserving order
+        seen: set[str] = set()
+        unique_candidates: list[str] = []
+        for c in candidates:
+            if c not in seen:
+                seen.add(c)
+                unique_candidates.append(c)
+
         try:
             client = await self.get_client()
-            
-            # Search customers first
-            response = await client.get(
-                f"{self.base_url}/customers/search.json",
-                params={"query": f"phone:{cleaned_phone}"}
-            )
-            response.raise_for_status()
-            customers = response.json().get("customers", [])
-            
-            if not customers:
+
+            customer_id: int | None = None
+            matched_format: str | None = None
+
+            for fmt in unique_candidates:
+                logger.info(f"Shopify customer search — trying phone format: {fmt!r}")
+                response = await client.get(
+                    f"{self.base_url}/customers/search.json",
+                    params={"query": f"phone:{fmt}", "limit": 5},
+                )
+                response.raise_for_status()
+                customers = response.json().get("customers", [])
+                if customers:
+                    customer_id = customers[0]["id"]
+                    matched_format = fmt
+                    logger.info(
+                        f"Shopify customer found with format {fmt!r} → customer_id={customer_id}"
+                    )
+                    break
+
+            if customer_id is None:
+                logger.info(
+                    f"Shopify customer not found for phone {cleaned_phone!r} "
+                    f"(tried {len(unique_candidates)} format(s))"
+                )
                 return []
-            
-            # Get orders for the first matching customer
-            customer_id = customers[0]["id"]
+
+            # Retrieve the customer's recent orders
             response = await client.get(
                 f"{self.base_url}/customers/{customer_id}/orders.json",
-                params={"status": "any", "limit": 5}
+                params={"status": "any", "limit": 5},
             )
             response.raise_for_status()
             data = response.json()
-            
-            return [self._parse_order(order) for order in data.get("orders", [])]
+            orders = [self._parse_order(o) for o in data.get("orders", [])]
+            logger.info(
+                f"Shopify phone lookup complete: {len(orders)} order(s) found "
+                f"(matched format: {matched_format!r})"
+            )
+            return orders
 
         except httpx.HTTPError as e:
-            logger.error(f"Shopify API error: {e}")
+            logger.error(f"Shopify API error during phone lookup: {e}")
             return []
 
     def _parse_order(self, order_data: dict) -> OrderInfo:
