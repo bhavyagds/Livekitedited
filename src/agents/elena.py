@@ -814,9 +814,11 @@ def _is_closing_utterance(text: str) -> bool:
     closing_patterns = [
         r"have a (great|nice|wonderful|good) day",
         r"(good)?bye",
-        r"that's (all|everything)",
+        r"that's (all|everything|it)",
         r"nothing else",
         r"that will be all",
+        r"finished",
+        r"done",
         r"ευχαριστώ.*αντίο",
         r"καλή σας μέρα",
         r"γεια σας",
@@ -4940,6 +4942,18 @@ async def entrypoint(ctx: JobContext):
                 suppress_s: float = 8.0,
                 snooze_s: float = 8.0,
             ) -> None:
+                # Robustness: Never double-respond if a manual response is already active 
+                # or if a tool was called in this exact turn.
+                if _current_session.get("forced_response_manual_say_active"):
+                    room_log("MANUAL_PROMPT_SKIPPED", reason="already_active", trigger=reason)
+                    return
+
+                last_tool_call = float(_current_session.get("last_lookup_tool_called_at") or 0.0)
+                # If a tool was called within the last 500ms, assume the LLM/Watchdog is handling it.
+                if (time.time() - last_tool_call) < 0.5:
+                    room_log("MANUAL_PROMPT_SKIPPED", reason="recent_tool_call", trigger=reason)
+                    return
+
                 _current_session["forced_response_manual_say_active"] = True
                 _current_session["forced_response_spoken_turn_id"] = current_turn_id
                 _current_session["forced_response_suppress_llm_until"] = time.time() + suppress_s
@@ -4952,6 +4966,9 @@ async def entrypoint(ctx: JobContext):
 
                 async def _say_prompt() -> None:
                     try:
+                        # Final check before speaking to avoid race conditions
+                        if _current_session.get("should_end"):
+                             return
                         await agent.say(message_text, allow_interruptions=True)
                         _current_session["forced_response_suppress_llm_until"] = time.time() + suppress_s
                         mark_agent_speaking()
@@ -5032,6 +5049,13 @@ async def entrypoint(ctx: JobContext):
                 local_flow_state = FLOW_AWAITING_PHONE_NUMBER
 
             if local_flow_state == FLOW_AWAITING_PHONE_NUMBER:
+                # 1. Check for exit or negative intent before forcing digits.
+                if is_negative or _is_closing_utterance(user_text):
+                    room_log("PHONE_FLOW_EXIT", reason="negative_or_closing", turn_id=current_turn_id)
+                    _reset_phone_collection_state("user_exit")
+                    _set_support_flow_state(FLOW_IDLE, reason="user_exit")
+                    return False
+
                 if not raw_digits:
                     if _is_short_utterance(user_text) or not (user_text or "").strip():
                         if get_agent_language() == "el":
@@ -5061,6 +5085,11 @@ async def entrypoint(ctx: JobContext):
                     max_value=15,
                 )
                 if len(combined_digits) < min_digits:
+                    # Guard: If the user is trying to exit or say no, don't force partial digit prompt.
+                    if is_negative or _is_closing_utterance(user_text):
+                        room_log("PHONE_PARTIAL_PROMPT_SKIPPED", reason="negative_or_closing")
+                        return False
+                        
                     if get_agent_language() == "el":
                         msg = "Σας ακούω. Συνεχίστε με τα υπόλοιπα ψηφία του τηλεφώνου, παρακαλώ."
                     else:
