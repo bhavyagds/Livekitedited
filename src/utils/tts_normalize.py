@@ -144,7 +144,8 @@ def _digits_to_greek_words(raw_digits: str) -> str:
 
 
 def _digits_to_english_words(raw_digits: str) -> str:
-    return " ".join(_EN_DIGIT_WORDS.get(d, d) for d in raw_digits)
+    """Space out digits for TTS clarity without using words, keeping transcript numeric."""
+    return " ".join(raw_digits)
 
 
 def _english_spoken_id_from_raw(raw_value: str) -> str:
@@ -159,6 +160,9 @@ def _english_spoken_id_from_raw(raw_value: str) -> str:
     return spoken
 
 
+_NUMERIC_DATE_RE = re.compile(r"\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b")
+
+
 def normalize_numeric_ids_for_tts(text: str, language: str | None = None) -> str:
     """
     Normalize numeric IDs for clearer TTS pronunciation.
@@ -170,6 +174,7 @@ def normalize_numeric_ids_for_tts(text: str, language: str | None = None) -> str
     English behavior:
     - Reads order/phone/zip/reference-like IDs digit-by-digit.
     - Reads hash-prefixed IDs (#12345) digit-by-digit.
+    - Converts numeric dates (DD/MM) to spoken month + ordinal day.
     """
     if not text:
         return text
@@ -191,16 +196,35 @@ def normalize_numeric_ids_for_tts(text: str, language: str | None = None) -> str
         )
 
         def _date_repl(m: re.Match) -> str:
-            month = m.group(1)
+            month_name = m.group(1)
             day = m.group(2)
-            # Simple ordinal logic: 1st, 2nd, 3rd, everything else th (close enough for TTS clarity)
-            if day == "1" or day == "21" or day == "31": suffix = "st"
-            elif day == "2" or day == "22": suffix = "nd"
-            elif day == "3" or day == "23": suffix = "rd"
+            # Simple ordinal logic: 1st, 2nd, 3rd, everything else th
+            d_val = int(day)
+            if d_val == 1 or d_val == 21 or d_val == 31: suffix = "st"
+            elif d_val == 2 or d_val == 22: suffix = "nd"
+            elif d_val == 3 or d_val == 23: suffix = "rd"
             else: suffix = "th"
-            return f"{month} {day}{suffix}"
+            return f"{month_name} {day}{suffix}"
 
         updated = _EN_DATE_RE.sub(_date_repl, updated)
+
+        def _num_date_repl(m: re.Match) -> str:
+            day = int(m.group(1))
+            month = int(m.group(2))
+            month_names = [
+                "January", "February", "March", "April", "May", "June",
+                "July", "August", "September", "October", "November", "December"
+            ]
+            if 1 <= month <= 12:
+                m_name = month_names[month - 1]
+                if day == 1 or day == 21 or day == 31: suffix = "st"
+                elif day == 2 or day == 22: suffix = "nd"
+                elif day == 3 or day == 23: suffix = "rd"
+                else: suffix = "th"
+                return f"{m_name} {day}{suffix}"
+            return m.group(0)
+
+        updated = _NUMERIC_DATE_RE.sub(_num_date_repl, updated)
         return updated
 
     if not lang.startswith("el"):

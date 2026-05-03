@@ -799,7 +799,31 @@ def _is_negative_utterance(text: str) -> bool:
     if not normalized:
         return False
     no_tokens = {"no", "nope", "nah", "not now", "οχι", "όχι", "οχι ευχαριστω", "όχι ευχαριστώ"}
+    # Handle "No. Thanks."
+    if "no thanks" in normalized or "no. thanks" in normalized:
+        return True
     return normalized in no_tokens
+
+
+def _is_closing_utterance(text: str) -> bool:
+    """Check if the text indicates the caller/agent wants to end the interaction."""
+    lowered = (text or "").lower().strip()
+    # Remove common punctuation for robust matching
+    lowered = re.sub(r'[.,!?]', '', lowered)
+    
+    closing_patterns = [
+        r"have a (great|nice|wonderful|good) day",
+        r"(good)?bye",
+        r"that's (all|everything)",
+        r"nothing else",
+        r"that will be all",
+        r"ευχαριστώ.*αντίο",
+        r"καλή σας μέρα",
+        r"γεια σας",
+        r"τίποτα άλλο",
+        r"αυτά (είναι όλα|μόνο)",
+    ]
+    return any(re.search(pat, lowered) for pat in closing_patterns)
 
 
 def _is_issue_confirmation_utterance(text: str) -> bool:
@@ -1309,7 +1333,7 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
         month_name = _month_name(month)
         if not month_name:
             return raw_date
-        return f"{day} {month_name}" if lang == "el" else f"{month_name} {day}"
+        return f"{day:02d}/{month:02d}"
 
     order_match = re.search(r"(?i)\border\s*#?\s*(\d{3,8})\b", text)
     if not order_match:
@@ -1349,7 +1373,7 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
             status_phrase = "βρέθηκε"
         parts = [intro]
         if order_number:
-            parts.append(f"Ο αριθμός παραγγελίας {_digits_spaced(order_number)} {status_phrase}.")
+            parts.append(f"Ο αριθμός παραγγελίας {order_number} {status_phrase}.")
         else:
             parts.append(f"Η παραγγελία σας {status_phrase}.")
         if spoken_date:
@@ -1374,7 +1398,7 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
         status_phrase = "was found"
     parts = [intro]
     if order_number:
-        parts.append(f"Order number {_digits_spaced(order_number)} {status_phrase}.")
+        parts.append(f"Order number {order_number} {status_phrase}.")
     else:
         parts.append(f"Your order {status_phrase}.")
     if spoken_date:
@@ -1457,16 +1481,8 @@ def _build_order_details_voice_summary(result_text: str, language: str) -> str:
     )
 
     def _digits_spaced(raw_value: str) -> str:
-        digits = re.sub(r"\D", "", raw_value or "")
-        if not digits:
-            return ""
-        if lang == "el":
-            try:
-                from src.utils.greek_numbers import number_to_greek
-                return number_to_greek(int(digits))
-            except Exception:
-                return digits
-        return digits
+        """Return the numeric string as-is. TTS normalization will handle the spacing."""
+        return re.sub(r"\D", "", raw_value or "")
 
     def _month_name(month: int) -> str:
         if lang == "el":
@@ -1492,7 +1508,7 @@ def _build_order_details_voice_summary(result_text: str, language: str) -> str:
         month_name = _month_name(month)
         if not month_name:
             return ""
-        return f"{day} {month_name}" if lang == "el" else f"{month_name} {day}"
+        return f"{day:02d}/{month:02d}"
 
     order_match = re.search(r"(?im)^ORDER DETAILS FOR\s*#?\s*(\d+)\s*:", raw)
     if not order_match:
@@ -1562,7 +1578,7 @@ def _build_order_details_voice_summary(result_text: str, language: str) -> str:
     if lang == "el":
         parts = []
         if order_number:
-            parts.append(f"Ορίστε οι λεπτομέρειες για την παραγγελία {_digits_spaced(order_number)}.")
+            parts.append(f"Ορίστε οι λεπτομέρειες για την παραγγελία {order_number}.")
         else:
             parts.append("Ορίστε οι λεπτομέρειες της παραγγελίας σας.")
 
@@ -1592,7 +1608,7 @@ def _build_order_details_voice_summary(result_text: str, language: str) -> str:
     else:
         parts = []
         if order_number:
-            parts.append(f"Here are the details for order {_digits_spaced(order_number)}.")
+            parts.append(f"Here are the details for order {order_number}.")
         else:
             parts.append("Here are your order details.")
 
@@ -4841,13 +4857,40 @@ async def entrypoint(ctx: JobContext):
         user_text = message.content
         current_turn_id = int(_current_session.get("last_user_turn_id") or 0) + 1
         _current_session["last_user_turn_id"] = current_turn_id
+        
+        # Determine initial flow state
         flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
-        phone_flow_active = flow_state in PHONE_FLOW_STATES
         is_affirmative = _is_affirmative_utterance(user_text)
         is_negative = _is_negative_utterance(user_text)
+
+        # --- Early Intent/Mode Inference ---
+        # We infer the number mode early to handle explicit requests to switch between 
+        # Order ID and Phone Number lookups (e.g., "please search with order ID instead").
+        inferred_mode = _infer_number_mode(user_text, str(_current_session.get("last_agent_text") or ""))
+        
+        if inferred_mode == "order" and flow_state in PHONE_FLOW_STATES:
+            _set_support_flow_state(FLOW_AWAITING_ORDER_NUMBER, reason="explicit_mode_switch_to_order")
+            flow_state = FLOW_AWAITING_ORDER_NUMBER
+            _reset_phone_digit_buffer("switched_to_order_mode")
+            _current_session["pending_phone_candidate"] = None
+            # Inject a system hint to guide the LLM back to order-id collection
+            agent.chat_ctx.append(
+                role="system",
+                text="The user wants to search by Order ID instead. Please ask for their order number now."
+            )
+        elif inferred_mode == "phone" and flow_state in {FLOW_IDLE, FLOW_AWAITING_ORDER_NUMBER, FLOW_CHECKING_ORDER_NUMBER}:
+            _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="explicit_mode_switch_to_phone")
+            flow_state = FLOW_AWAITING_PHONE_NUMBER
+            # Inject a system hint to guide the LLM to phone-number collection
+            agent.chat_ctx.append(
+                role="system",
+                text="The user wants to search by Phone Number instead. Please ask for the mobile number used for the order."
+            )
+
+        phone_flow_active = flow_state in PHONE_FLOW_STATES
         normalized_order_candidate = (
             _normalize_order_id_strict(user_text)
-            if flow_state == FLOW_AWAITING_ORDER_NUMBER
+            if flow_state in {FLOW_IDLE, FLOW_AWAITING_ORDER_NUMBER, FLOW_CHECKING_ORDER_NUMBER}
             else None
         )
 
@@ -5274,7 +5317,9 @@ async def entrypoint(ctx: JobContext):
                         "SUPPORT FLOW:\n"
                         "- The issue has been collected.\n"
                         "- Ask the caller for their order number next.\n"
-                        "- If they don't have an order number, ask for the phone number used in the order."
+                        "- If they don't have an order number, ask for the phone number used in the order.\n"
+                        "- IMPORTANT: When reporting delivery dates, always use numeric format (e.g., 14/03) instead of words.\n"
+                        "- For Order IDs and Phone numbers, use numeric digits (e.g., 12752) in your text responses."
                     ),
                 )
 
@@ -5421,7 +5466,7 @@ async def entrypoint(ctx: JobContext):
         _current_session["number_mode_lock"] = None
         _current_session["number_mode_turn_id"] = 0
         flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
-        inferred_mode = _infer_number_mode(user_text, str(_current_session.get("last_agent_text") or ""))
+        # inferred_mode already calculated at turn start
         phone_flow_states = PHONE_FLOW_STATES
         if (
             flow_state == FLOW_AWAITING_ORDER_NUMBER
@@ -5436,13 +5481,7 @@ async def entrypoint(ctx: JobContext):
             and bool(_extract_digit_parts(user_text))
         ):
             inferred_mode = "phone"
-        if (
-            flow_state in phone_flow_states
-            and inferred_mode == "order"
-            and not normalized_order_candidate
-        ):
-            inferred_mode = "phone"
-            room_log("NUMBER_MODE_FORCED", flow_state=flow_state, mode="phone")
+        # Removed strict mode forcing block that prevented switching from phone back to order flow.
         if inferred_mode in {"order", "phone"}:
             _current_session["number_mode_lock"] = inferred_mode
             _current_session["number_mode_turn_id"] = current_turn_id
@@ -5456,6 +5495,7 @@ async def entrypoint(ctx: JobContext):
             _current_session["pending_phone_candidate"] = None
 
         details_pending = bool(_current_session.get("details_confirmation_pending"))
+
         details_pending_until = float(_current_session.get("details_confirmation_pending_until") or 0.0)
         if details_pending and now <= details_pending_until:
             if explicit_details_request or is_affirmative:
@@ -5522,7 +5562,12 @@ async def entrypoint(ctx: JobContext):
                 _current_session["ticket_create_allowed_until"] = 0.0
                 _current_session["pending_ticket_payload"] = None
 
+        # Snooze silence monitor on closing intent (e.g., "No, that's all").
+        if is_negative and not details_pending and not ticket_pending:
+            _snooze_silence_prompts(120.0, reason="user_negative_closing")
+
         if auto_language_switch:
+
             explicit_lang = _explicit_language_request(user_text)
             if explicit_lang and explicit_lang != session_language["value"]:
                 room_log(
@@ -5823,6 +5868,11 @@ async def entrypoint(ctx: JobContext):
                 asyncio.create_task(send_agent_transcript(transcript_text))
                 asyncio.create_task(send_agent_info(transcript_text))
                 _current_session["last_agent_text"] = transcript_text
+                
+                # Snooze silence monitor if agent is saying goodbye or closing the call.
+                if _is_closing_utterance(transcript_text):
+                    _snooze_silence_prompts(180.0, reason="agent_said_goodbye")
+                
                 normalized_display = _normalize_switch_text(transcript_text)
                 details_prompted = bool(
                     re.search(
