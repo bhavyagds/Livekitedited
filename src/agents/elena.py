@@ -2422,9 +2422,13 @@ def create_vad():
         min_value=0.1,
         max_value=0.8,
     )
+    # Language-aware silence delay: Greek speakers tend to pause more between digits.
+    initial_lang = get_agent_language()
+    default_silence = 1.8 if initial_lang == "el" else 1.2
+    
     min_silence_duration = _as_float(
-        get_agent_setting("vad_min_silence_duration", 1.2),
-        1.2,
+        get_agent_setting("vad_min_silence_duration", default_silence),
+        default_silence,
         min_value=0.2,
         max_value=2.0,
     )
@@ -4302,10 +4306,14 @@ async def entrypoint(ctx: JobContext):
     initial_ctx = await context_task
     logger.info(f"⏱️ Context ready ({time.time() - startup_time:.1f}s)")
     
+    # Language-aware endpointing delay: Greek requires more patience for complete transcripts.
+    initial_lang = get_agent_language()
+    default_endpointing = 1.8 if initial_lang == "el" else 1.2
+    
     # Create the voice pipeline agent - tuned to avoid clipping user speech.
     min_endpointing_delay = _as_float(
-        get_agent_setting("min_endpointing_delay", 1.2),
-        1.2,
+        get_agent_setting("min_endpointing_delay", default_endpointing),
+        default_endpointing,
         min_value=0.2,
         max_value=3.0,
     )
@@ -5885,8 +5893,7 @@ async def entrypoint(ctx: JobContext):
             )
             _snooze_silence_prompts(short_grace, reason="short_utterance")
 
-        # Add to transcript
-        conversation_transcript.append(f"User: {user_text_for_transcript}")
+        # Digit collection silence management
         if abuse_detection_enabled:
             # Check for abusive language
             abuse_detected, abuse_response = check_and_respond_to_abuse(
