@@ -2400,10 +2400,10 @@ def create_vad():
         max_value=0.8,
     )
     min_silence_duration = _as_float(
-        get_agent_setting("vad_min_silence_duration", 0.45),
-        0.45,
+        get_agent_setting("vad_min_silence_duration", 1.2),
+        1.2,
         min_value=0.2,
-        max_value=1.5,
+        max_value=2.0,
     )
 
     vad_backend = str(get_agent_setting("vad_backend", "silero") or "").strip().lower()
@@ -2719,7 +2719,10 @@ class ElenaFunctionContext(llm.FunctionContext):
         # 1. Redirection Guard: If input looks like an order ID (min 4 digits, but not a phone)
         clean_input = re.sub(r"\D", "", phone or "")
         min_order_len = _expected_order_digits()
-        if len(clean_input) >= min_order_len and len(clean_input) < 10:
+        # Guard: Greek mobile numbers start with 69. Never redirect those to order lookup if short.
+        is_greek_mobile_prefix = clean_input.startswith("69") or clean_input.startswith("3069")
+        
+        if len(clean_input) >= min_order_len and len(clean_input) < 10 and not is_greek_mobile_prefix:
             room_log("TOOL_REDIRECT", name="lookup_order_by_phone", target="lookup_order", input=phone)
             logger.info(f"🔄 Redirecting lookup_order_by_phone to lookup_order for {phone}")
             return await self.lookup_order(phone)
@@ -4264,10 +4267,10 @@ async def entrypoint(ctx: JobContext):
     
     # Create the voice pipeline agent - tuned to avoid clipping user speech.
     min_endpointing_delay = _as_float(
-        get_agent_setting("min_endpointing_delay", 0.40),
-        0.40,
+        get_agent_setting("min_endpointing_delay", 1.2),
+        1.2,
         min_value=0.2,
-        max_value=1.5,
+        max_value=3.0,
     )
     interrupt_min_words = _as_int(
         get_agent_setting("interrupt_min_words", 3),
