@@ -485,6 +485,29 @@ async def end_call_in_db(
         return False
 
 
+async def save_transcript_to_db(
+    call_id: str,
+    text: str,
+    speaker: str = "agent"
+) -> bool:
+    """Incrementally save a single transcript turn to the database."""
+    if not call_id or not text:
+        return False
+    try:
+        from src.services.database import get_database_service
+        db = get_database_service()
+        
+        entry = f"{speaker.capitalize()}: {text}"
+        return await db.update_call_transcript(
+            call_id=call_id,
+            transcript=entry,
+            append=True
+        )
+    except Exception as e:
+        logger.debug(f"Failed to incrementally save transcript: {e}")
+        return False
+
+
 # =============================================================================
 # LATENCY TRACKER - Measures timing for each service
 # =============================================================================
@@ -3859,12 +3882,21 @@ async def entrypoint(ctx: JobContext):
         """Send spoken agent text to frontend chat in realtime."""
         nonlocal conversation_transcript
         try:
-            if call_ended["value"] or _current_session.get("should_end"):
+            # Don't drop transcripts if the call is ending; we still want to log them.
+            # Only return if we've already handled the final DB recording.
+            if call_ended["value"]:
                 return
             cleaned = _strip_markup_for_output(text)
             if not cleaned:
                 return
-            # Removed duplicate suppression to ensure repeated voice prompts appear in transcript
+            # Short-term de-duplication to avoid double transcripts from manual + automatic paths
+            # while still allowing repetitions later in the call.
+            last_sent_text = _current_session.get("last_agent_transcript_text")
+            last_sent_at = float(_current_session.get("last_agent_transcript_at") or 0.0)
+            if cleaned == last_sent_text and (time.time() - last_sent_at) < 3.0:
+                return
+            _current_session["last_agent_transcript_text"] = cleaned
+            _current_session["last_agent_transcript_at"] = time.time()
 
             import json
             transcript_data = json.dumps({
@@ -3878,6 +3910,11 @@ async def entrypoint(ctx: JobContext):
             )
             # Centralized recording for DB persistence
             conversation_transcript.append(f"Agent: {cleaned}")
+            
+            # Incremental DB save
+            call_id = _current_session.get("call_id")
+            if call_id:
+                asyncio.create_task(save_transcript_to_db(call_id, cleaned, speaker="agent"))
         except Exception as e:
             logger.error(f"Failed to send agent transcript: {e}")
 
@@ -4856,10 +4893,21 @@ async def entrypoint(ctx: JobContext):
     @agent.on("user_speech_committed")
     def on_user_speech_committed(message):
         """Send user transcript to frontend and check for abuse."""
-        if call_ended["value"] or _current_session.get("should_end"):
-            room_log("LATE_EVENT_DROPPED", source="user_speech_committed")
-            return
+        # Extract text first so we can log it even if the call is ending
         user_text = message.content
+        user_text_for_transcript = _format_user_text_for_transcript(user_text)
+
+        # Always add to internal transcript list and DB
+        conversation_transcript.append(f"User: {user_text_for_transcript}")
+        
+        call_id = _current_session.get("call_id")
+        if call_id:
+            asyncio.create_task(save_transcript_to_db(call_id, user_text_for_transcript, speaker="user"))
+
+        # Now check if we should skip the rest of the processing (LLM/Tools)
+        if call_ended["value"] or _current_session.get("should_end"):
+            room_log("LATE_USER_UTTERANCE_LOGGED_BUT_SKIPPED", source="user_speech_committed")
+            return
         current_turn_id = int(_current_session.get("last_user_turn_id") or 0) + 1
         _current_session["last_user_turn_id"] = current_turn_id
         
@@ -6178,7 +6226,7 @@ async def entrypoint(ctx: JobContext):
     if greeting_enabled:
         greeting = get_greeting(agent_lang)
         logger.info(f"⏱️ Saying greeting ({time.time() - startup_time:.1f}s): {greeting[:50]}...")
-        await send_agent_transcript(greeting)
+        # No manual send_agent_transcript here; on_agent_speech_committed will handle it automatically.
         agent.chat_ctx.append(role="assistant", text=greeting)
         await agent.say(greeting, allow_interruptions=True)
     else:
