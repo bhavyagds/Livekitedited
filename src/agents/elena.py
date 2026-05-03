@@ -3871,7 +3871,7 @@ async def entrypoint(ctx: JobContext):
                 "type": "transcript",
                 "speaker": "agent",
                 "text": cleaned,
-            })
+            }, ensure_ascii=False)
             await ctx.room.local_participant.publish_data(
                 transcript_data.encode('utf-8'),
                 reliable=True,
@@ -4400,7 +4400,7 @@ async def entrypoint(ctx: JobContext):
                 "speaker": "user",
                 "text": cleaned,
                 "interim": interim,
-            })
+            }, ensure_ascii=False)
             await ctx.room.local_participant.publish_data(
                 transcript_data.encode('utf-8'),
                 reliable=True
