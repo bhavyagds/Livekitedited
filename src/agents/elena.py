@@ -665,6 +665,7 @@ _current_session: dict = {
     "forced_response_manual_say_active": False,
     "forced_response_spoken_turn_id": 0,
     "forced_response_spoken_text": "",
+    "forced_response_transcript_sent_at": 0.0,
     "forced_response_suppress_llm_until": 0.0,
     "lookup_pending": False,
     "lookup_pending_started_at": 0.0,
@@ -1189,6 +1190,7 @@ def _reset_support_session_state(reason: str = "") -> None:
     _current_session["forced_response_manual_say_active"] = False
     _current_session["forced_response_spoken_turn_id"] = 0
     _current_session["forced_response_spoken_text"] = ""
+    _current_session["forced_response_transcript_sent_at"] = 0.0
     _current_session["forced_response_suppress_llm_until"] = 0.0
 
     _clear_pending_lookup_wait_phrase("support_session_reset")
@@ -4888,6 +4890,7 @@ async def entrypoint(ctx: JobContext):
 
             _current_session["forced_response_manual_say_active"] = True
             _current_session["forced_response_spoken_text"] = confirmation_text
+            _current_session["forced_response_transcript_sent_at"] = time.time()
             await send_agent_transcript(confirmation_text)
             agent.chat_ctx.append(role="assistant", text=confirmation_text)
             await agent.say(confirmation_text, allow_interruptions=True)
@@ -5017,6 +5020,7 @@ async def entrypoint(ctx: JobContext):
                 _current_session["forced_response_spoken_turn_id"] = current_turn_id
                 _current_session["forced_response_suppress_llm_until"] = time.time() + suppress_s
                 _current_session["forced_response_spoken_text"] = message_text
+                _current_session["forced_response_transcript_sent_at"] = time.time()
                 _clear_pending_lookup_wait_phrase(reason)
                 # DO NOT clear_lookup_pending here! It suppresses silence prompts 
                 # while we are preparing/speaking the manual prompt.
@@ -5422,6 +5426,33 @@ async def entrypoint(ctx: JobContext):
         raw_digits = "".join(_extract_digit_parts(user_text or ""))
         expected_digits = _expected_order_digits()
         if flow_state == FLOW_AWAITING_ORDER_NUMBER and raw_digits:
+            normalized_phone_candidate = _normalize_phone_for_lookup(user_text or "")
+            last_agent_text = str(_current_session.get("last_agent_text") or "")
+            if normalized_phone_candidate and (
+                _is_phone_number_prompt(last_agent_text)
+                or str(_current_session.get("number_mode_lock") or "") == "phone"
+            ):
+                _current_session["pending_phone_candidate"] = None
+                _reset_phone_digit_buffer("phone_from_order_flow_fast_path")
+                _set_support_flow_state(
+                    FLOW_CHECKING_PHONE_NUMBER,
+                    reason="phone_provided_while_awaiting_order_number",
+                )
+                room_log(
+                    "PHONE_FAST_PATH_TRIGGERED",
+                    turn_id=current_turn_id,
+                    phone=normalized_phone_candidate,
+                    last_agent_text=_truncate(last_agent_text, max_len=120),
+                )
+                asyncio.create_task(
+                    _force_lookup_by_phone(
+                        current_turn_id,
+                        normalized_phone_candidate,
+                        "phone_provided_while_awaiting_order_number",
+                    )
+                )
+                return
+
             normalized_order = _normalize_order_id_strict(user_text or "")
             if not normalized_order:
                 min_d, max_d = _order_digit_range()
@@ -5467,35 +5498,6 @@ async def entrypoint(ctx: JobContext):
             and not _mentions_no_order_number(user_text)
             and not normalized_order_candidate
         ):
-            # If we are awaiting an order number but the agent has already asked for
-            # phone, accept a valid phone input immediately and start phone lookup.
-            normalized_phone_candidate = _normalize_phone_for_lookup(user_text or "")
-            last_agent_text = str(_current_session.get("last_agent_text") or "")
-            if normalized_phone_candidate and (
-                _is_phone_number_prompt(last_agent_text)
-                or str(_current_session.get("number_mode_lock") or "") == "phone"
-            ):
-                _current_session["pending_phone_candidate"] = None
-                _reset_phone_digit_buffer("phone_from_order_flow_fast_path")
-                _set_support_flow_state(
-                    FLOW_CHECKING_PHONE_NUMBER,
-                    reason="phone_provided_while_awaiting_order_number",
-                )
-                room_log(
-                    "PHONE_FAST_PATH_TRIGGERED",
-                    turn_id=current_turn_id,
-                    phone=normalized_phone_candidate,
-                    last_agent_text=_truncate(last_agent_text, max_len=120),
-                )
-                asyncio.create_task(
-                    _force_lookup_by_phone(
-                        current_turn_id,
-                        normalized_phone_candidate,
-                        "phone_provided_while_awaiting_order_number",
-                    )
-                )
-                return
-
             min_d, max_d = _order_digit_range()
             if has_digits:
                 agent.chat_ctx.append(
@@ -5961,6 +5963,28 @@ async def entrypoint(ctx: JobContext):
                         )
                         return
                 transcript_text = _format_agent_text_for_transcript(display_text or text)
+                expected_forced_response_text = str(_current_session.get("forced_response_spoken_text") or "")
+                forced_transcript_sent_at = float(_current_session.get("forced_response_transcript_sent_at") or 0.0)
+                if expected_forced_response_text and forced_transcript_sent_at:
+                    expected_norm = _normalize_switch_text(expected_forced_response_text)
+                    transcript_norm = _normalize_switch_text(transcript_text)
+                    same_as_forced_response = bool(
+                        expected_norm
+                        and transcript_norm
+                        and (
+                            transcript_norm == expected_norm
+                            or transcript_norm in expected_norm
+                            or expected_norm in transcript_norm
+                        )
+                    )
+                    if same_as_forced_response and (time.time() - forced_transcript_sent_at) <= 20.0:
+                        room_log(
+                            "AGENT_TRANSCRIPT_DUPLICATE_SKIPPED",
+                            reason="manual_transcript_already_sent",
+                            text=_truncate(transcript_text),
+                        )
+                        _current_session["forced_response_transcript_sent_at"] = 0.0
+                        return
                 asyncio.create_task(send_agent_transcript(transcript_text))
                 asyncio.create_task(send_agent_info(transcript_text))
                 _current_session["last_agent_text"] = transcript_text
@@ -6139,6 +6163,7 @@ async def entrypoint(ctx: JobContext):
             _current_session["forced_response_manual_say_active"] = False
             _current_session["forced_response_spoken_turn_id"] = 0
             _current_session["forced_response_spoken_text"] = ""
+            _current_session["forced_response_transcript_sent_at"] = 0.0
             _current_session["forced_response_suppress_llm_until"] = 0.0
             _current_session["lookup_pending"] = False
             _current_session["lookup_pending_started_at"] = 0.0
@@ -6560,11 +6585,6 @@ def run_agent():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     run_agent()
-
-
-
-
-
 
 
 

@@ -111,6 +111,33 @@ class TestElenaLogic(unittest.TestCase):
                 return "Λυπάμαι, αλλά δεν μπόρεσα να βρω την παραγγελία σας"
             return "I'm sorry, but I couldn't find your order"
 
+    def test_phone_fast_path_beats_invalid_order_digits(self):
+        def normalize_phone_for_lookup(text):
+            digits = "".join(re.findall(r"\d", text or ""))
+            return digits if len(digits) == 10 and digits.startswith("69") else None
+
+        def should_route_to_phone(flow_state, user_text, last_agent_text, number_mode_lock):
+            if flow_state != "awaiting_order_number":
+                return False
+            if not re.search(r"\d", user_text or ""):
+                return False
+
+            normalized_phone = normalize_phone_for_lookup(user_text)
+            is_phone_prompt = "τηλεφώνου" in (last_agent_text or "").lower()
+            if normalized_phone and (is_phone_prompt or number_mode_lock == "phone"):
+                return True
+
+            return False
+
+        self.assertTrue(
+            should_route_to_phone(
+                "awaiting_order_number",
+                "6942633977",
+                "Παρακαλώ πείτε τον αριθμό τηλεφώνου που χρησιμοποιήσατε για την παραγγελία, ψηφίο προς ψηφίο.",
+                "phone",
+            )
+        )
+
     def test_memory_context_formatting_v2(self):
         # Exact replication of database.py:get_active_memory_context formatting logic
         def build_memory_context(memories):
