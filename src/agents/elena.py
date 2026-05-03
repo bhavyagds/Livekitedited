@@ -3864,12 +3864,7 @@ async def entrypoint(ctx: JobContext):
             cleaned = _strip_markup_for_output(text)
             if not cleaned:
                 return
-            if cleaned in _sent_agent_transcripts:
-                return
-            _sent_agent_transcripts.add(cleaned)
-            if len(_sent_agent_transcripts) > 100:
-                _sent_agent_transcripts.clear()
-                _sent_agent_transcripts.add(cleaned)
+            # Removed duplicate suppression to ensure repeated voice prompts appear in transcript
 
             import json
             transcript_data = json.dumps({
@@ -4619,11 +4614,11 @@ async def entrypoint(ctx: JobContext):
                 _current_session["full_order_details_allowed_until"] = 0.0
 
             spoken_summary = _build_order_voice_summary(result, get_agent_language()) or result
+            await send_agent_transcript(spoken_summary)
+            agent.chat_ctx.append(role="assistant", text=spoken_summary)
             live_agent = _current_session.get("agent")
             if live_agent:
                 await live_agent.say(spoken_summary, allow_interruptions=True)
-                await send_agent_transcript(spoken_summary)
-                agent.chat_ctx.append(role="assistant", text=spoken_summary)
                 mark_agent_speaking()
                 _snooze_silence_prompts(10.0, reason="order_watchdog_spoken")
         except Exception as e:
@@ -4740,10 +4735,10 @@ async def entrypoint(ctx: JobContext):
                 _current_session["details_confirmation_pending"] = False
 
             spoken_summary = _build_phone_lookup_voice_summary(result, get_agent_language()) or result
+            await send_agent_transcript(spoken_summary)
+            agent.chat_ctx.append(role="assistant", text=spoken_summary)
             if live_agent:
                 await live_agent.say(spoken_summary, allow_interruptions=True)
-                await send_agent_transcript(spoken_summary)
-                agent.chat_ctx.append(role="assistant", text=spoken_summary)
                 mark_agent_speaking()
                 _snooze_silence_prompts(10.0, reason="phone_watchdog_spoken")
 
@@ -4848,9 +4843,9 @@ async def entrypoint(ctx: JobContext):
 
             _current_session["forced_response_manual_say_active"] = True
             _current_session["forced_response_spoken_text"] = confirmation_text
-            await agent.say(confirmation_text, allow_interruptions=True)
             await send_agent_transcript(confirmation_text)
             agent.chat_ctx.append(role="assistant", text=confirmation_text)
+            await agent.say(confirmation_text, allow_interruptions=True)
             _current_session["forced_response_suppress_llm_until"] = time.time() + suppress_s
             mark_agent_speaking()
             _snooze_silence_prompts(confirmation_snooze_s, reason="phone_confirmation_prompt")
@@ -4977,9 +4972,9 @@ async def entrypoint(ctx: JobContext):
                         # Final check before speaking to avoid race conditions
                         if _current_session.get("should_end"):
                              return
-                        await agent.say(message_text, allow_interruptions=True)
                         await send_agent_transcript(message_text)
                         agent.chat_ctx.append(role="assistant", text=message_text)
+                        await agent.say(message_text, allow_interruptions=True)
                         _current_session["forced_response_suppress_llm_until"] = time.time() + suppress_s
                         mark_agent_speaking()
                     finally:
@@ -5402,9 +5397,9 @@ async def entrypoint(ctx: JobContext):
                                 f"The order number should be between {min_d} and {max_d} digits. "
                                 f"Could you repeat it digit by digit?"
                             )
-                        await live_agent.say(msg, allow_interruptions=True)
                         await send_agent_transcript(msg)
                         agent.chat_ctx.append(role="assistant", text=msg)
+                        await live_agent.say(msg, allow_interruptions=True)
                     finally:
                         _current_session["forced_response_manual_say_active"] = False
 
@@ -5496,9 +5491,9 @@ async def entrypoint(ctx: JobContext):
                             "No problem. Please give me the phone number used for the order, "
                             "digit by digit?"
                         )
-                    await live_agent.say(msg, allow_interruptions=True)
                     await send_agent_transcript(msg)
                     agent.chat_ctx.append(role="assistant", text=msg)
+                    await live_agent.say(msg, allow_interruptions=True)
                 finally:
                     _current_session["forced_response_manual_say_active"] = False
 
@@ -6183,9 +6178,9 @@ async def entrypoint(ctx: JobContext):
     if greeting_enabled:
         greeting = get_greeting(agent_lang)
         logger.info(f"⏱️ Saying greeting ({time.time() - startup_time:.1f}s): {greeting[:50]}...")
-        await agent.say(greeting, allow_interruptions=True)
         await send_agent_transcript(greeting)
         agent.chat_ctx.append(role="assistant", text=greeting)
+        await agent.say(greeting, allow_interruptions=True)
     else:
         logger.info("Greeting disabled by settings")
     
@@ -6258,9 +6253,9 @@ async def entrypoint(ctx: JobContext):
                             current_lang = session_language["value"] if "session_language" in locals() else agent_lang
                             progress_msg = "I'm still searching for your order, thank you for your patience." if current_lang == "en" else "Ακόμη ψάχνω για την παραγγελία σας, ευχαριστώ για την υπομονή σας."
                             logger.info(f"⏳ Sending periodic search update: {progress_msg}")
-                            await agent.say(progress_msg, allow_interruptions=False)
                             await send_agent_transcript(progress_msg)
                             agent.chat_ctx.append(role="assistant", text=progress_msg)
+                            await agent.say(progress_msg, allow_interruptions=False)
 
                     # If lookup state is stale, clear it silently.
                     if pending_started and (now - pending_started) > max_lookup_block_s:
@@ -6317,9 +6312,9 @@ async def entrypoint(ctx: JobContext):
                         silence_tracker["is_waiting_for_response"] = False  # Will be set again after agent speaks
                         
                         # Say the prompt
-                        await agent.say(prompt_text, allow_interruptions=True)
                         await send_agent_transcript(prompt_text)
                         agent.chat_ctx.append(role="assistant", text=prompt_text)
+                        await agent.say(prompt_text, allow_interruptions=True)
                         
                     else:
                         # Max prompts reached - disconnect
