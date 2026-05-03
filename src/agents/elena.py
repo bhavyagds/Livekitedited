@@ -3455,13 +3455,18 @@ async def entrypoint(ctx: JobContext):
         lowered = _normalize_switch_text(text)
         if not lowered:
             return False
-        return bool(
-            re.search(
-                r"(no order number|don t have (an )?order number|do not have (an )?order number|δεν έχω .*παραγγελ|δεν εχω .*παραγγελ)",
-                lowered,
-                flags=re.IGNORECASE,
-            )
-        )
+            
+        # Stiffen detection: Check for clear negative markers
+        has_negative = bool(re.search(r"(no|don t|do not|doesn t|didn t|δεν|όχι|οχι)", lowered))
+        has_order_keyword = bool(re.search(r"(order|number|παραγγελ|αριθμ)", lowered))
+        has_have_keyword = bool(re.search(r"(have|έχω|εχω|βρήκα|βρηκα)", lowered))
+        
+        # Guard: If they say "I have it" (positive), definitely not a "no"
+        if has_have_keyword and not has_negative:
+            return False
+            
+        # Must have a negative combined with either "order" or "have"
+        return (has_negative and (has_order_keyword or has_have_keyword)) or (lowered in {"no", "όχι", "οχι"})
 
     def _infer_number_mode(user_text: str, last_agent_text: str) -> Optional[str]:
         """
@@ -4973,6 +4978,8 @@ async def entrypoint(ctx: JobContext):
                         if _current_session.get("should_end"):
                              return
                         await agent.say(message_text, allow_interruptions=True)
+                        await send_agent_transcript(message_text)
+                        agent.chat_ctx.append(role="assistant", text=message_text)
                         _current_session["forced_response_suppress_llm_until"] = time.time() + suppress_s
                         mark_agent_speaking()
                     finally:
@@ -5087,12 +5094,17 @@ async def entrypoint(ctx: JobContext):
                     min_value=7,
                     max_value=15,
                 )
-                if len(combined_digits) < min_digits:
+                if 0 < len(combined_digits) < min_digits:
                     # Guard: If the user is trying to exit or say no, don't force partial digit prompt.
                     if is_negative or _is_closing_utterance(user_text):
                         room_log("PHONE_PARTIAL_PROMPT_SKIPPED", reason="negative_or_closing")
                         return False
-                        
+                    
+                    # Ignore single-digit turns that look like noise (e.g. noise transcribed as "six")
+                    if len(raw_digits) < 2 and len(combined_digits) < 2 and not _is_digit_collection_utterance(user_text):
+                        room_log("PHONE_PARTIAL_PROMPT_SKIPPED", reason="potential_noise", turn_digits=raw_digits)
+                        return False
+
                     if get_agent_language() == "el":
                         msg = "Σας ακούω. Συνεχίστε με τα υπόλοιπα ψηφία του τηλεφώνου, παρακαλώ."
                     else:
@@ -5485,6 +5497,8 @@ async def entrypoint(ctx: JobContext):
                             "digit by digit?"
                         )
                     await live_agent.say(msg, allow_interruptions=True)
+                    await send_agent_transcript(msg)
+                    agent.chat_ctx.append(role="assistant", text=msg)
                 finally:
                     _current_session["forced_response_manual_say_active"] = False
 
@@ -6171,6 +6185,7 @@ async def entrypoint(ctx: JobContext):
         logger.info(f"⏱️ Saying greeting ({time.time() - startup_time:.1f}s): {greeting[:50]}...")
         await agent.say(greeting, allow_interruptions=True)
         await send_agent_transcript(greeting)
+        agent.chat_ctx.append(role="assistant", text=greeting)
     else:
         logger.info("Greeting disabled by settings")
     
@@ -6245,6 +6260,7 @@ async def entrypoint(ctx: JobContext):
                             logger.info(f"⏳ Sending periodic search update: {progress_msg}")
                             await agent.say(progress_msg, allow_interruptions=False)
                             await send_agent_transcript(progress_msg)
+                            agent.chat_ctx.append(role="assistant", text=progress_msg)
 
                     # If lookup state is stale, clear it silently.
                     if pending_started and (now - pending_started) > max_lookup_block_s:
@@ -6303,6 +6319,7 @@ async def entrypoint(ctx: JobContext):
                         # Say the prompt
                         await agent.say(prompt_text, allow_interruptions=True)
                         await send_agent_transcript(prompt_text)
+                        agent.chat_ctx.append(role="assistant", text=prompt_text)
                         
                     else:
                         # Max prompts reached - disconnect
@@ -6312,6 +6329,7 @@ async def entrypoint(ctx: JobContext):
                         silence_tracker["enabled"] = False
                         await agent.say(goodbye_text, allow_interruptions=False)
                         await send_agent_transcript(goodbye_text)
+                        agent.chat_ctx.append(role="assistant", text=goodbye_text)
                         
                         # Wait for goodbye to finish, then disconnect
                         await asyncio.sleep(3.0)
