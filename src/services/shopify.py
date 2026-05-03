@@ -399,10 +399,12 @@ class ShopifyService:
 
         try:
             client = await self.get_client()
+            url = f"{self.base_url}/orders.json"
             
+            logger.info(f"[SHOPIFY_API] Calling Shopify API: {url} for order {cleaned_number}")
             # Query orders by name (Shopify uses #number format)
             response = await client.get(
-                f"{self.base_url}/orders.json",
+                url,
                 params={
                     "name": cleaned_number,
                     "status": "any",
@@ -414,9 +416,10 @@ class ShopifyService:
             
             orders = data.get("orders", [])
             if not orders:
+                logger.info(f"[SHOPIFY_API] No match for {cleaned_number}, trying with # prefix")
                 # Try with # prefix
                 response = await client.get(
-                    f"{self.base_url}/orders.json",
+                    url,
                     params={
                         "name": f"#{cleaned_number}",
                         "status": "any",
@@ -429,10 +432,10 @@ class ShopifyService:
             
             if orders:
                 order_info = self._parse_order(orders[0])
-                logger.info(f"[SHOPIFY_API] Order found for number {cleaned_number}: Order ID {order_info.order_number}, status: {order_info.status}")
+                logger.info(f"[SHOPIFY_API] SUCCESS: Found order {cleaned_number} (Shopify Name: {orders[0].get('name')})")
                 return order_info
             
-            logger.info(f"[SHOPIFY_API] No order found for number: {cleaned_number}")
+            logger.info(f"[SHOPIFY_API] NOT_FOUND: No order matching {cleaned_number} in Shopify")
             return None
 
         except httpx.HTTPError as e:
@@ -508,7 +511,7 @@ class ShopifyService:
             matched_format: str | None = None
 
             for fmt in unique_candidates:
-                logger.info(f"[SHOPIFY_API] Phone search — trying format: {fmt!r}")
+                logger.info(f"[SHOPIFY_API] PHONE_SEARCH: Searching for phone pattern {fmt!r}")
                 response = await client.get(
                     f"{self.base_url}/customers/search.json",
                     params={"query": f"phone:{fmt}", "limit": 5},
@@ -519,18 +522,20 @@ class ShopifyService:
                     customer_id = customers[0]["id"]
                     matched_format = fmt
                     logger.info(
-                        f"[SHOPIFY_API] Customer found for {fmt!r} → ID: {customer_id}, name: {customers[0].get('first_name')} {customers[0].get('last_name')}"
+                        f"[SHOPIFY_API] CUSTOMER_FOUND: Found customer ID {customer_id} for pattern {fmt!r} "
+                        f"({customers[0].get('first_name')} {customers[0].get('last_name')})"
                     )
                     break
 
             if customer_id is None:
                 logger.info(
-                    f"Shopify customer not found for phone {cleaned_phone!r} "
-                    f"(tried {len(unique_candidates)} format(s))"
+                    f"[SHOPIFY_API] CUSTOMER_NOT_FOUND: No customer matched {cleaned_phone!r} "
+                    f"after trying {len(unique_candidates)} pattern(s)"
                 )
                 return []
 
             # Retrieve the customer's recent orders
+            logger.info(f"[SHOPIFY_API] FETCHING_ORDERS: Getting orders for customer ID {customer_id}")
             response = await client.get(
                 f"{self.base_url}/customers/{customer_id}/orders.json",
                 params={"status": "any", "limit": 5},
@@ -542,7 +547,7 @@ class ShopifyService:
             
             order_summary = ", ".join([f"#{o.order_number} ({o.status})" for o in orders])
             logger.info(
-                f"[SHOPIFY_API] Phone lookup complete: {len(orders)} order(s) found for customer {customer_id}: {order_summary}"
+                f"[SHOPIFY_API] PHONE_LOOKUP_SUCCESS: Found {len(orders)} order(s) for customer {customer_id}: {order_summary}"
             )
             return orders
 

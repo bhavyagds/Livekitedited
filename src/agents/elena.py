@@ -6428,6 +6428,17 @@ def run_agent():
     Run the Elena voice agent as a LiveKit worker.
     """
     import os
+    
+    # Configure logging
+    log_level = getattr(logging, settings.log_level, logging.INFO)
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    # Ensure our services log at least at INFO level
+    logging.getLogger("src.services.shopify").setLevel(logging.INFO)
+    logging.getLogger("src.agents.elena").setLevel(logging.INFO)
+    logger.info(f"Elena Worker starting (log_level={settings.log_level})")
 
     def _get_float_env(name: str, default: float) -> float:
         try:
