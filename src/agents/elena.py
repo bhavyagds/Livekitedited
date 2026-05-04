@@ -3422,54 +3422,6 @@ async def entrypoint(ctx: JobContext):
                 return True
         return False
 
-    def _is_more_details_prompt_text(text: str) -> bool:
-        lowered = _normalize_switch_text(text)
-        if not lowered:
-            return False
-        return bool(
-            re.search(
-                r"(would you like .*details.*order|complete order details|more details about this order|θέλετε .*λεπτομέρειες.*παραγγελία)",
-                lowered,
-            )
-        )
-
-    def _mark_more_details_prompt_if_needed(text: str) -> None:
-        if _is_more_details_prompt_text(text):
-            _current_session["last_more_details_prompt_at"] = time.time()
-            if not bool(_current_session.get("full_details_unlocked_once")):
-                _current_session["details_confirmation_pending"] = True
-                _current_session["details_confirmation_pending_until"] = time.time() + 120.0
-            else:
-                _current_session["details_confirmation_pending"] = False
-                _current_session["details_confirmation_pending_until"] = 0.0
-
-    def _explicit_number_mode_switch_request(text: str) -> Optional[str]:
-        lowered = _normalize_switch_text(text)
-        if not lowered:
-            return None
-
-        order_hint = bool(re.search(r"(order|order id|order number|παραγγελ|αριθμ.*παραγγελ)", lowered))
-        phone_hint = bool(re.search(r"(phone|mobile|τηλέφων|τηλεφων|κινητ)", lowered))
-
-        order_switch_patterns = (
-            r"\b(?:use|using|search|lookup|check|try)\b.*\b(order|order id|order number)\b",
-            r"\b(order|order id|order number)\b.*\b(?:instead|please|now)\b",
-            r"\b(?:search by|find by|lookup by|check by)\b.*\b(order|order id|order number)\b",
-            r"\b(?:με|αντί|βρες|ψάξε|έλεγξε|δοκίμασε)\b.*\b(?:παραγγελ|αριθμ.*παραγγελ)\b",
-        )
-        phone_switch_patterns = (
-            r"\b(?:use|using|search|lookup|check|try)\b.*\b(phone|mobile)\b",
-            r"\b(phone|mobile)\b.*\b(?:instead|please|now)\b",
-            r"\b(?:search by|find by|lookup by|check by)\b.*\b(phone|mobile)\b",
-            r"\b(?:με|αντί|βρες|ψάξε|έλεγξε|δοκίμασε)\b.*\b(?:τηλέφων|τηλεφων|κινητ)\b",
-        )
-
-        if order_hint and not phone_hint and any(re.search(pattern, lowered) for pattern in order_switch_patterns):
-            return "order"
-        if phone_hint and not order_hint and any(re.search(pattern, lowered) for pattern in phone_switch_patterns):
-            return "phone"
-        return None
-
     # Reuse module-level numeric parsers to avoid divergence between scopes.
     _digits_from_phrase = globals()["_digits_from_phrase"]
     _extract_digit_parts = globals()["_extract_digit_parts"]
@@ -3556,9 +3508,6 @@ async def entrypoint(ctx: JobContext):
             return None
 
         force_phone_context = _is_phone_flow_active()
-        explicit_switch = _explicit_number_mode_switch_request(lowered)
-        if explicit_switch:
-            return explicit_switch
         if _mentions_no_order_number(lowered):
             return "phone"
 
@@ -3568,11 +3517,9 @@ async def entrypoint(ctx: JobContext):
         asked_for_order = bool(re.search(r"(order number|παραγγελ|αριθμ.*παραγγελ)", last_lowered))
         asked_for_phone = bool(re.search(r"(phone|mobile|τηλέφων|τηλεφων|κινητ)", last_lowered))
 
-        if force_phone_context:
+        if force_phone_context and not order_hint:
             if phone_hint or asked_for_phone or bool(_extract_digit_parts(lowered)):
                 return "phone"
-            if order_hint:
-                return None
 
         if phone_hint and not order_hint:
             return "phone"
@@ -4295,7 +4242,6 @@ async def entrypoint(ctx: JobContext):
                 tts_text = normalize_punctuation_for_tts(tts_text)
                 cleaned_ui_text = _strip_markup_for_output(tts_text)
                 if cleaned_ui_text:
-                    _mark_more_details_prompt_if_needed(cleaned_ui_text)
                     room_log(
                         "TTS_TEXT_FINAL",
                         provider=tts_provider,
@@ -6047,7 +5993,21 @@ async def entrypoint(ctx: JobContext):
                 if _is_closing_utterance(transcript_text):
                     _snooze_silence_prompts(180.0, reason="agent_said_goodbye")
                 
-                _mark_more_details_prompt_if_needed(transcript_text)
+                normalized_display = _normalize_switch_text(transcript_text)
+                details_prompted = bool(
+                    re.search(
+                        r"(would you like .*details.*order|complete order details|more details about this order|θέλετε .*λεπτομέρειες.*παραγγελία)",
+                        normalized_display,
+                    )
+                )
+                if details_prompted:
+                    _current_session["last_more_details_prompt_at"] = time.time()
+                    if not bool(_current_session.get("full_details_unlocked_once")):
+                        _current_session["details_confirmation_pending"] = True
+                        _current_session["details_confirmation_pending_until"] = time.time() + 120.0
+                    else:
+                        _current_session["details_confirmation_pending"] = False
+                        _current_session["details_confirmation_pending_until"] = 0.0
                 if _is_clarification_prompt_text(transcript_text):
                     clarification_grace = _as_float(
                         get_agent_setting("clarification_silence_grace_seconds", 12.0),
@@ -6625,3 +6585,6 @@ def run_agent():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     run_agent()
+
+
+

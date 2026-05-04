@@ -138,63 +138,6 @@ class TestElenaLogic(unittest.TestCase):
             )
         )
 
-    def test_phone_context_does_not_switch_to_order_on_casual_order_mention(self):
-        def infer_number_mode(user_text, last_agent_text, phone_flow_active=True):
-            lowered = re.sub(r"[^\w\s]", " ", (user_text or "").lower())
-            lowered = re.sub(r"\s+", " ", lowered).strip()
-            last_lowered = re.sub(r"[^\w\s]", " ", (last_agent_text or "").lower())
-            last_lowered = re.sub(r"\s+", " ", last_lowered).strip()
-
-            order_hint = bool(re.search(r"(order|order id|order number)", lowered))
-            phone_hint = bool(re.search(r"(phone|mobile)", lowered))
-            asked_for_phone = bool(re.search(r"(phone|mobile)", last_lowered))
-            has_digits = bool(re.search(r"\d", lowered))
-
-            order_switch_patterns = (
-                r"\b(?:use|using|search|lookup|check|try)\b.*\b(order|order id|order number)\b",
-                r"\b(order|order id|order number)\b.*\b(?:instead|please|now)\b",
-                r"\b(?:search by|find by|lookup by|check by)\b.*\b(order|order id|order number)\b",
-            )
-            if order_hint and not phone_hint and any(re.search(pattern, lowered) for pattern in order_switch_patterns):
-                return "order"
-            if phone_flow_active:
-                if phone_hint or asked_for_phone or has_digits:
-                    return "phone"
-                if order_hint:
-                    return None
-            if phone_hint and not order_hint:
-                return "phone"
-            if order_hint and not phone_hint:
-                return "order"
-            return None
-
-        self.assertEqual(
-            infer_number_mode(
-                "oh please find what order id",
-                "Please give me the phone number used for the order, digit by digit.",
-            ),
-            "phone",
-        )
-        self.assertEqual(
-            infer_number_mode(
-                "please search with order id instead",
-                "Please give me the phone number used for the order, digit by digit.",
-            ),
-            "order",
-        )
-
-    def test_yes_counts_as_details_request_when_prompt_was_just_spoken(self):
-        def explicit_more_order_details_request(text, prompted_at, now):
-            lowered = re.sub(r"[^\w\s]", " ", (text or "").lower())
-            lowered = re.sub(r"\s+", " ", lowered).strip()
-            yes_tokens = {"yes", "yeah", "yep", "sure", "ok", "okay"}
-            if lowered in yes_tokens and prompted_at and (now - prompted_at) <= 25.0:
-                return True
-            return False
-
-        self.assertTrue(explicit_more_order_details_request("Yes", 100.0, 103.0))
-        self.assertFalse(explicit_more_order_details_request("Yes", 100.0, 140.0))
-
     def test_memory_context_formatting_v2(self):
         # Exact replication of database.py:get_active_memory_context formatting logic
         def build_memory_context(memories):
