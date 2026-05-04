@@ -256,17 +256,15 @@ async def lookup_order_by_phone(
 
     count = len(orders)
     most_recent = orders[0]
-    status = most_recent.status
+    summary = shopify.format_order_brief(most_recent, language=agent_lang)
     if agent_lang == "el":
         return (
             f"Βρήκα {count} παραγγελίες για αυτόν τον αριθμό τηλεφώνου. "
-            f"Η πιο πρόσφατη παραγγελία σας με αριθμό {most_recent.order_number} "
-            f"είναι σε κατάσταση {status}. Θέλετε περισσότερες λεπτομέρειες;"
+            f"Η πιο πρόσφατη είναι η εξής: {summary}"
         )
     return (
         f"I found {count} orders for this phone number. "
-        f"Your most recent order {most_recent.order_number} is currently {status}. "
-        "Would you like more details?"
+        f"The most recent one is this: {summary}"
     )
 
 
