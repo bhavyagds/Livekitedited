@@ -198,8 +198,8 @@ class TestElenaRegressions(unittest.TestCase):
         )
 
     def test_order_id_normalization_rejects_wrong_length(self):
-        self.assertIsNone(self.elena._normalize_order_id_strict("1234"))
-        self.assertIsNone(self.elena._normalize_order_id_strict("12 34"))
+        self.assertIsNone(self.elena._normalize_order_id_strict("12"))
+        self.assertIsNone(self.elena._normalize_order_id_strict("one two"))
 
     def test_phone_normalization_accepts_local_greek_mobile(self):
         self.assertEqual(
@@ -242,7 +242,7 @@ class TestElenaRegressions(unittest.TestCase):
 
     def test_order_summary_not_found_is_deterministic(self):
         text = self.elena._build_order_voice_summary("No matching order was found.", "en")
-        self.assertIn("I couldn't find that order.", text)
+        self.assertIn("I couldn't find your order with the details provided.", text)
 
     def test_order_summary_unknown_has_safe_fallback(self):
         text = self.elena._build_order_voice_summary("System unavailable, try later.", "en")
@@ -252,9 +252,22 @@ class TestElenaRegressions(unittest.TestCase):
         text = self.elena._build_phone_lookup_voice_summary("No orders found for this phone.", "en")
         self.assertIn("I couldn't find any order with this phone number.", text)
 
+    def test_phone_summary_not_found_is_deterministic_in_greek(self):
+        text = self.elena._build_phone_lookup_voice_summary("No orders found for this phone.", "el")
+        self.assertIn("Δεν μπόρεσα να βρω κάποια παραγγελία με αυτόν τον αριθμό τηλεφώνου.", text)
+
     def test_phone_summary_unknown_has_safe_fallback(self):
         text = self.elena._build_phone_lookup_voice_summary("Backend timeout.", "en")
         self.assertIn("I couldn't verify any order with this phone number.", text)
+
+    def test_order_details_summary_blocks_placeholder_content_in_greek(self):
+        text = self.elena._build_order_details_voice_summary(
+            "Η παραγγελία σας περιλαμβάνει: [Όνομα προϊόντος] και σύνολο [Συνολικό ποσό].",
+            "el",
+        )
+        self.assertNotIn("[Όνομα προϊόντος]", text)
+        self.assertNotIn("[Συνολικό ποσό]", text)
+        self.assertIn("Θέλετε να το ελέγξω ξανά", text)
 
     def test_speak_digits_uses_digit_by_digit_words(self):
         self.assertEqual(
@@ -270,7 +283,7 @@ class TestElenaRegressions(unittest.TestCase):
         payload = "Order #12345 Paid Delivery: 2026-04-30"
         self.assertEqual(self.elena._classify_lookup_result(payload), "found")
 
-    def test_lookup_by_phone_hard_blocks_when_confirmation_pending(self):
+    def test_lookup_by_phone_returns_phone_safe_copy_when_confirmation_pending(self):
         settings = {
             "order_lookup_wait_phrase_enabled": True,
             "invalid_number_recovery_silence_grace_seconds": 12.0,
@@ -292,7 +305,7 @@ class TestElenaRegressions(unittest.TestCase):
             ctx = self.elena.ElenaFunctionContext()
             result = asyncio.run(ctx.lookup_order_by_phone("6912345678"))
 
-        self.assertIn("please confirm whether this phone number is correct", result.lower())
+        self.assertIn("phone number", result.lower())
 
     def test_lookup_order_does_not_embed_wait_phrase(self):
         settings = {

@@ -1299,8 +1299,8 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
     if lookup_state == "not_found":
         if lang == "el":
             return (
-                "Λυπάμαι, αλλά δεν μπόρεσα να βρω την παραγγελία σας με τα στοιχεία που δώσατε. "
-                "Παρακαλώ ελέγξτε ξανά τον αριθμό παραγγελίας από την επιβεβαίωση που λάβατε στο μέιλ σας."
+                "Λυπάμαι, αλλά δεν μπόρεσα να βρω την παραγγελία σας με τα στοιχεία που μου δώσατε. "
+                "Παρακαλώ ελέγξτε ξανά τον αριθμό παραγγελίας στο email επιβεβαίωσης που λάβατε."
             )
         return (
             "I'm sorry, but I couldn't find your order with the details provided. "
@@ -1310,7 +1310,7 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
         if lang == "el":
             return (
                 "Δεν μπόρεσα να επιβεβαιώσω τα στοιχεία αυτής της παραγγελίας. "
-                "Μπορείτε να ελέγξετε τον αριθμό και να τον επαναλάβετε ψηφίο προς ψηφίο;"
+                "Μπορείτε να ελέγξετε τον αριθμό και να τον πείτε ξανά ψηφίο προς ψηφίο;"
             )
         return (
             "I couldn't verify this order from the details I received. "
@@ -1457,7 +1457,7 @@ def _build_phone_lookup_voice_summary(result_text: str, language: str) -> str:
         if lang == "el":
             return (
                 "Δεν μπόρεσα να βρω κάποια παραγγελία με αυτόν τον αριθμό τηλεφώνου. "
-                "Μπορείτε να ελέγξετε τον αριθμό και να τον επαναλάβετε ψηφίο προς ψηφίο;"
+                "Μπορείτε να ελέγξετε τον αριθμό και να τον πείτε ξανά ψηφίο προς ψηφίο;"
             )
         return (
             "I couldn't find any order with this phone number. "
@@ -1468,7 +1468,7 @@ def _build_phone_lookup_voice_summary(result_text: str, language: str) -> str:
         if lang == "el":
             return (
                 "Δεν μπόρεσα να επιβεβαιώσω κάποια παραγγελία με αυτόν τον αριθμό τηλεφώνου. "
-                "Μπορείτε να ελέγξετε τον αριθμό και να τον επαναλάβετε ψηφίο προς ψηφίο;"
+                "Μπορείτε να ελέγξετε τον αριθμό και να τον πείτε ξανά ψηφίο προς ψηφίο;"
             )
         return (
             "I couldn't verify any order with this phone number. "
@@ -1494,6 +1494,19 @@ def _build_order_details_voice_summary(result_text: str, language: str) -> str:
     cleaned = _strip_markup_for_output(raw)
     if not cleaned:
         return ""
+
+    # Never let template placeholders leak into customer-facing speech.
+    if re.search(r"\[[^\]]+\]", raw):
+        lang = (language or "en").lower()
+        if lang == "el":
+            return (
+                "Μπορώ να μοιραστώ τις λεπτομέρειες της παραγγελίας μόλις τις επιβεβαιώσω σωστά. "
+                "Θέλετε να το ελέγξω ξανά;"
+            )
+        return (
+            "I can share the order details as soon as I verify them correctly. "
+            "Would you like me to check that again?"
+        )
 
     lang = (language or "en").lower()
     lookup_state = _classify_lookup_result(cleaned)
@@ -1777,8 +1790,8 @@ def _repeat_number_prompt_for_mode(mode: str, lang: str) -> str:
     is_phone = (mode or "").lower() == "phone"
     if lang == "el":
         if is_phone:
-            return "Μπορείτε να επαναλάβετε το κινητό σας ψηφίο προς ψηφίο, παρακαλώ;"
-        return "Μπορείτε να επαναλάβετε τον αριθμό παραγγελίας ψηφίο προς ψηφίο, παρακαλώ;"
+            return "Μπορείτε να πείτε ξανά τον αριθμό τηλεφώνου σας ψηφίο προς ψηφίο, παρακαλώ;"
+        return "Μπορείτε να πείτε ξανά τον αριθμό παραγγελίας ψηφίο προς ψηφίο, παρακαλώ;"
     if is_phone:
         return "Could you please repeat your mobile number digit by digit?"
     return "Could you please repeat your order number digit by digit?"
@@ -5161,7 +5174,7 @@ async def entrypoint(ctx: JobContext):
                         return False
 
                     if get_agent_language() == "el":
-                        msg = "Σας ακούω. Συνεχίστε με τα υπόλοιπα ψηφία του τηλεφώνου, παρακαλώ."
+                        msg = "Συνεχίστε με τα υπόλοιπα ψηφία του αριθμού, παρακαλώ."
                     else:
                         msg = "I’m listening. Please continue with the remaining digits of the phone number."
                     _schedule_manual_prompt(msg, reason="phone_digits_partial", suppress_s=6.0)
@@ -5173,7 +5186,7 @@ async def entrypoint(ctx: JobContext):
                 if get_agent_language() == "el":
                     msg = (
                         "Αυτό δεν φαίνεται να είναι πλήρης αριθμός τηλεφώνου. "
-                        f"Παρακαλώ επαναλάβετε ολόκληρο τον αριθμό, τουλάχιστον {min_digits} ψηφία, ψηφίο προς ψηφίο."
+                        f"Παρακαλώ πείτε ολόκληρο τον αριθμό ξανά, με τουλάχιστον {min_digits} ψηφία, ψηφίο προς ψηφίο."
                     )
                 else:
                     msg = (
@@ -5215,7 +5228,7 @@ async def entrypoint(ctx: JobContext):
                 _reset_phone_digit_buffer("phone_confirmation_rejected")
                 _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="phone_confirmation_rejected")
                 if get_agent_language() == "el":
-                    msg = "Εντάξει. Πείτε ξανά τον αριθμό τηλεφώνου σας, ψηφίο προς ψηφίο."
+                    msg = "Εντάξει. Πείτε ξανά τον αριθμό τηλεφώνου σας ψηφίο προς ψηφίο."
                 else:
                     msg = "Okay. Please repeat your phone number again, digit by digit."
                 _schedule_manual_prompt(msg, reason="phone_confirmation_rejected")
@@ -5231,7 +5244,7 @@ async def entrypoint(ctx: JobContext):
                 )
                 if len(combined_digits) < min_digits:
                     if get_agent_language() == "el":
-                        msg = "Σας ακούω. Συνεχίστε με τα υπόλοιπα ψηφία του τηλεφώνου, παρακαλώ."
+                        msg = "Συνεχίστε με τα υπόλοιπα ψηφία του αριθμού, παρακαλώ."
                     else:
                         msg = "I’m listening. Please continue with the remaining digits of the phone number."
                     _schedule_manual_prompt(msg, reason="phone_digits_partial", suppress_s=6.0)
@@ -5240,7 +5253,7 @@ async def entrypoint(ctx: JobContext):
                     if get_agent_language() == "el":
                         msg = (
                             "Αυτό δεν φαίνεται να είναι πλήρης αριθμός τηλεφώνου. "
-                            f"Παρακαλώ επαναλάβετε ολόκληρο τον αριθμό, τουλάχιστον {min_digits} ψηφία, ψηφίο προς ψηφίο."
+                            f"Παρακαλώ πείτε ολόκληρο τον αριθμό ξανά, με τουλάχιστον {min_digits} ψηφία, ψηφίο προς ψηφίο."
                         )
                     else:
                         msg = (
@@ -5275,7 +5288,7 @@ async def entrypoint(ctx: JobContext):
                 )
                 return True
             if get_agent_language() == "el":
-                msg = "Παρακαλώ πείτε ξανά τον αριθμό τηλεφώνου σας, ψηφίο προς ψηφίο."
+                msg = "Παρακαλώ πείτε ξανά τον αριθμό τηλεφώνου σας ψηφίο προς ψηφίο."
             else:
                 msg = "Please say your phone number again, digit by digit."
             _schedule_manual_prompt(msg, reason="awaiting_phone_recovery")
@@ -5477,7 +5490,7 @@ async def entrypoint(ctx: JobContext):
                         if get_agent_language() == "el":
                             msg = (
                                 f"Ο αριθμός παραγγελίας πρέπει να έχει από {min_d} έως {max_d} ψηφία. "
-                                f"Μπορείτε να τον επαναλάβετε ψηφίο προς ψηφίο;"
+                                f"Μπορείτε να τον πείτε ξανά ψηφίο προς ψηφίο;"
                             )
                         else:
                             msg = (
@@ -5541,8 +5554,8 @@ async def entrypoint(ctx: JobContext):
                 try:
                     if get_agent_language() == "el":
                         msg = (
-                            "Κατανοητό. Μπορείτε να μου δώσετε τον αριθμό τηλεφώνου "
-                            "που χρησιμοποιήσατε για την παραγγελία, ψηφίο προς ψηφίο?"
+                            "Εντάξει. Μπορείτε να μου δώσετε τον αριθμό τηλεφώνου "
+                            "που χρησιμοποιήσατε για την παραγγελία, ψηφίο προς ψηφίο;"
                         )
                     else:
                         msg = (
@@ -5562,9 +5575,17 @@ async def entrypoint(ctx: JobContext):
             _current_session["pending_phone_candidate"] = None
             _reset_phone_digit_buffer("back_to_order_flow")
             _set_support_flow_state(FLOW_CHECKING_ORDER_NUMBER, reason="order_number_provided")
-        _current_session["number_mode_lock"] = None
-        _current_session["number_mode_turn_id"] = 0
         flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
+        active_number_collection_states = {
+            FLOW_AWAITING_ORDER_NUMBER,
+            FLOW_CHECKING_ORDER_NUMBER,
+            FLOW_AWAITING_PHONE_NUMBER,
+            FLOW_AWAITING_PHONE_CONFIRMATION,
+            FLOW_CHECKING_PHONE_NUMBER,
+        }
+        if flow_state not in active_number_collection_states:
+            _current_session["number_mode_lock"] = None
+            _current_session["number_mode_turn_id"] = 0
         # inferred_mode already calculated at turn start
         phone_flow_states = PHONE_FLOW_STATES
         if (
@@ -6585,6 +6606,4 @@ def run_agent():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     run_agent()
-
-
 
