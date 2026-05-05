@@ -226,6 +226,39 @@ class TestElenaRegressions(unittest.TestCase):
         self.assertEqual(self.elena._normalize_phone_for_lookup("9999999999"), "9999999999")
         self.assertEqual(self.elena._normalize_phone_for_lookup("2101234567"), "2101234567")
 
+    def test_phone_digit_buffer_restarts_on_fresh_full_chunk(self):
+        self.elena._current_session["phone_digit_buffer"] = "69426339"
+        self.elena._current_session["phone_digit_buffer_updated_at"] = 1.0
+        with patch.object(
+            self.elena,
+            "get_agent_setting",
+            _settings_getter_factory(
+                {
+                    "phone_digit_buffer_timeout_seconds": 20.0,
+                    "phone_lookup_min_digits": 10,
+                    "phone_lookup_max_digits": 15,
+                }
+            ),
+        ), patch.object(self.elena.time, "time", lambda: 2.0), patch.object(
+            self.elena, "room_log", lambda *a, **k: None
+        ):
+            combined = self.elena._append_phone_digits_from_turn("6942633977")
+        self.assertEqual(combined, "6942633977")
+
+    def test_silence_prompt_blocked_while_collecting_phone_digits(self):
+        self.elena._current_session["support_flow_state"] = self.elena.FLOW_AWAITING_PHONE_NUMBER
+        self.elena._current_session["phone_digit_buffer"] = "69426339"
+        self.elena._current_session["phone_digit_buffer_updated_at"] = 100.0
+        with patch.object(
+            self.elena,
+            "get_agent_setting",
+            _settings_getter_factory({"phone_digit_capture_silence_block_seconds": 45.0}),
+        ), patch.object(self.elena.time, "time", lambda: 120.0), patch.object(
+            self.elena, "room_log", lambda *a, **k: None
+        ):
+            blocked = self.elena._should_block_silence_prompt("test")
+        self.assertTrue(blocked)
+
     def test_lookup_classifier_catches_common_not_found_variants(self):
         self.assertEqual(
             self.elena._classify_lookup_result("No matching order was found."),
