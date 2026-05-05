@@ -3997,6 +3997,16 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.error(f"Failed to send agent transcript: {e}")
 
+    def _mark_forced_response_transcript(text: str, turn_id: Optional[int] = None) -> None:
+        """Mark a manual/forced spoken line so committed speech won't duplicate it."""
+        cleaned = _strip_markup_for_output(text)
+        if not cleaned:
+            return
+        _current_session["forced_response_spoken_text"] = cleaned
+        _current_session["forced_response_transcript_sent_at"] = time.time()
+        if turn_id is not None:
+            _current_session["forced_response_spoken_turn_id"] = turn_id
+
     async def send_agent_info(text: str):
         """Extract and send important information cards without blocking audio."""
         try:
@@ -4737,6 +4747,7 @@ async def entrypoint(ctx: JobContext):
                 _current_session["full_order_details_allowed_until"] = 0.0
 
             spoken_summary = _build_order_voice_summary(result, get_agent_language()) or result
+            _mark_forced_response_transcript(spoken_summary, turn_id)
             await send_agent_transcript(spoken_summary)
             agent.chat_ctx.append(role="assistant", text=spoken_summary)
             live_agent = _current_session.get("agent")
@@ -4831,6 +4842,7 @@ async def entrypoint(ctx: JobContext):
             wait_msg = "Μισό λεπτό, ψάχνω την παραγγελία σας." if get_agent_language() == "el" else "Just a moment, I am searching for your order."
             live_agent = _current_session.get("agent")
             if live_agent and scheduled_at > 0.0: # Only say wait msg if we are taking over from LLM
+                 _mark_forced_response_transcript(wait_msg, turn_id)
                  await live_agent.say(wait_msg, allow_interruptions=False)
                  await send_agent_transcript(wait_msg)
                  agent.chat_ctx.append(role="assistant", text=wait_msg)
@@ -4858,6 +4870,7 @@ async def entrypoint(ctx: JobContext):
                 _current_session["details_confirmation_pending"] = False
 
             spoken_summary = _build_phone_lookup_voice_summary(result, get_agent_language()) or result
+            _mark_forced_response_transcript(spoken_summary, turn_id)
             await send_agent_transcript(spoken_summary)
             agent.chat_ctx.append(role="assistant", text=spoken_summary)
             if live_agent:
@@ -5590,6 +5603,7 @@ async def entrypoint(ctx: JobContext):
                                 f"The order number should be between {min_d} and {max_d} digits. "
                                 f"Could you repeat it digit by digit?"
                             )
+                        _mark_forced_response_transcript(msg, current_turn_id)
                         await send_agent_transcript(msg)
                         agent.chat_ctx.append(role="assistant", text=msg)
                         await live_agent.say(msg, allow_interruptions=True)
@@ -5663,6 +5677,7 @@ async def entrypoint(ctx: JobContext):
                         return
                     _current_session["last_manual_prompt_turn_id"] = current_turn_id
                     _current_session["last_manual_prompt_key"] = prompt_key
+                    _mark_forced_response_transcript(msg, current_turn_id)
                     await send_agent_transcript(msg)
                     agent.chat_ctx.append(role="assistant", text=msg)
                     await live_agent.say(msg, allow_interruptions=True)
