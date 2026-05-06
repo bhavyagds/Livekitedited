@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 import uuid
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy import select, update, func, and_, desc
+from sqlalchemy import select, update, func, and_, desc, text
 from sqlalchemy.dialects.postgresql import insert
 
 from src.config import settings
@@ -55,6 +55,23 @@ async def init_db():
     """Initialize database tables."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        
+        # Self-healing: Check if agent_memories has is_active column
+        try:
+            # We use a raw SQL check to see if the column exists
+            check_sql = text("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='agent_memories' AND column_name='is_active'
+            """)
+            result = await conn.execute(check_sql)
+            if not result.fetchone():
+                logger.info("Adding missing 'is_active' column to 'agent_memories' table...")
+                await conn.execute(text("ALTER TABLE agent_memories ADD COLUMN is_active BOOLEAN DEFAULT TRUE"))
+                await conn.execute(text("UPDATE agent_memories SET is_active = TRUE WHERE is_active IS NULL"))
+        except Exception as e:
+            logger.warning(f"Could not auto-remediate agent_memories schema: {e}")
+
     logger.info("Database tables initialized")
 
 
@@ -2338,13 +2355,14 @@ class DatabaseService:
     async def get_memory_items(self, active_only: bool = False) -> List[Dict]:
         """
         Get long-term memory entries for admin UI.
-        Note: AgentMemory model currently has no is_active flag, so active_only is ignored.
         """
         try:
             async with get_db() as session:
-                result = await session.execute(
-                    select(AgentMemory).order_by(desc(AgentMemory.updated_at), desc(AgentMemory.created_at))
-                )
+                query = select(AgentMemory)
+                if active_only:
+                    query = query.where(AgentMemory.is_active == True)
+                query = query.order_by(desc(AgentMemory.updated_at), desc(AgentMemory.created_at))
+                result = await session.execute(query)
                 rows = result.scalars().all()
                 return [
                     {
@@ -2352,7 +2370,7 @@ class DatabaseService:
                         "question": m.question,
                         "answer": m.answer,
                         "comment": m.comments,
-                        "is_active": True,
+                        "is_active": m.is_active,
                         "language": m.language,
                         "created_by": None,
                         "updated_by": None,
@@ -2380,7 +2398,7 @@ class DatabaseService:
                     "question": m.question,
                     "answer": m.answer,
                     "comment": m.comments,
-                    "is_active": True,
+                    "is_active": m.is_active,
                     "language": m.language,
                     "created_by": None,
                     "updated_by": None,
@@ -2415,7 +2433,7 @@ class DatabaseService:
                     "question": memory.question,
                     "answer": memory.answer,
                     "comment": memory.comments,
-                    "is_active": True,
+                    "is_active": memory.is_active,
                     "language": memory.language,
                     "created_by": created_by,
                     "updated_by": created_by,
@@ -2437,7 +2455,6 @@ class DatabaseService:
     ) -> bool:
         """
         Update a long-term memory entry.
-        Note: AgentMemory model currently has no is_active flag, so is_active is ignored.
         """
         try:
             async with get_db() as session:
@@ -2454,8 +2471,9 @@ class DatabaseService:
                     memory.answer = answer
                 if comment is not None:
                     memory.comments = comment
+                if is_active is not None:
+                    memory.is_active = is_active
                 _ = updated_by  # Reserved for future schema fields.
-                _ = is_active
                 await session.flush()
                 return True
         except Exception as e:
@@ -2488,7 +2506,9 @@ class DatabaseService:
         try:
             async with get_db() as session:
                 result = await session.execute(
-                    select(AgentMemory).order_by(desc(AgentMemory.updated_at), desc(AgentMemory.created_at))
+                    select(AgentMemory)
+                    .where(AgentMemory.is_active == True)
+                    .order_by(desc(AgentMemory.updated_at), desc(AgentMemory.created_at))
                 )
                 memories = result.scalars().all()
 
