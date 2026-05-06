@@ -667,6 +667,8 @@ _current_session: dict = {
     "forced_response_spoken_text": "",
     "forced_response_transcript_sent_at": 0.0,
     "forced_response_suppress_llm_until": 0.0,
+    "last_manual_prompt_turn_id": 0,
+    "last_manual_prompt_key": "",
     "lookup_pending": False,
     "lookup_pending_started_at": 0.0,
     "lookup_pending_order": None,
@@ -1192,6 +1194,8 @@ def _reset_support_session_state(reason: str = "") -> None:
     _current_session["forced_response_spoken_text"] = ""
     _current_session["forced_response_transcript_sent_at"] = 0.0
     _current_session["forced_response_suppress_llm_until"] = 0.0
+    _current_session["last_manual_prompt_turn_id"] = 0
+    _current_session["last_manual_prompt_key"] = ""
 
     _clear_pending_lookup_wait_phrase("support_session_reset")
 
@@ -1214,16 +1218,48 @@ def _append_phone_digits_from_turn(user_text: str) -> str:
         _reset_phone_digit_buffer("timeout")
 
     current = str(_current_session.get("phone_digit_buffer") or "")
-    combined = current + raw_digits
     max_digits = _as_int(
         get_agent_setting("phone_lookup_max_digits", 15),
         15,
         min_value=10,
         max_value=15,
     )
-    if len(combined) > max_digits:
-        # Caller likely restarted with a fresh number chunk.
+    min_digits = _as_int(
+        get_agent_setting("phone_lookup_min_digits", 10),
+        10,
+        min_value=7,
+        max_value=15,
+    )
+
+    # If the new chunk looks like the caller restarted from the beginning,
+    # prefer the fresh chunk instead of concatenating stale digits.
+    if current and raw_digits.startswith(current[: min(len(current), 4)]):
         combined = raw_digits
+    else:
+        combined = current + raw_digits
+
+    if len(combined) > max_digits:
+        # If the new turn itself is too long, treat it as malformed input rather than
+        # silently reusing it as a fresh candidate.
+        if len(raw_digits) > max_digits:
+            combined = raw_digits
+        else:
+            combined = raw_digits
+
+    # Guard against carrying obviously malformed oversize chunks into lookup logic.
+    if len(combined) > max_digits:
+        _current_session["phone_digit_buffer"] = combined
+        _current_session["phone_digit_buffer_updated_at"] = now
+        room_log("PHONE_DIGIT_BUFFER_UPDATED", raw_digits=raw_digits, buffer=combined, malformed=True)
+        return combined
+
+    # If we already have a partial prefix and the caller now gives another short partial
+    # that still does not reach the minimum phone length, keep buffering.
+    if current and len(combined) < min_digits:
+        _current_session["phone_digit_buffer"] = combined
+        _current_session["phone_digit_buffer_updated_at"] = now
+        room_log("PHONE_DIGIT_BUFFER_UPDATED", raw_digits=raw_digits, buffer=combined)
+        return combined
 
     _current_session["phone_digit_buffer"] = combined
     _current_session["phone_digit_buffer_updated_at"] = now
@@ -1253,26 +1289,44 @@ def _should_block_silence_prompt(reason: str = "") -> bool:
         elif _is_phone_confirmation_pending():
             block_reason = f"{reason}:phone_confirmation_pending"
         else:
-            lookup_progress_until = float(_current_session.get("lookup_progress_prompt_until") or 0.0)
-            if lookup_progress_until and now <= lookup_progress_until:
-                block_reason = f"{reason}:lookup_progress_window"
-            else:
-                tracker = _current_session.get("silence_tracker")
-                if isinstance(tracker, dict):
-                    snooze_until = float(tracker.get("snooze_until") or 0.0)
-                    if snooze_until and now <= snooze_until:
-                        block_reason = f"{reason}:silence_snooze"
-                if not block_reason:
-                    pending_wait_phrase = str(_current_session.get("pending_lookup_wait_phrase") or "").strip()
-                    pending_wait_set_at = float(_current_session.get("pending_lookup_wait_phrase_set_at") or 0.0)
-                    lookup_wait_guard_s = _as_float(
-                        get_agent_setting("lookup_wait_phrase_silence_guard_seconds", 30.0),
-                        30.0,
-                        min_value=10.0,
-                        max_value=90.0,
-                    )
-                    if pending_wait_phrase and pending_wait_set_at and (now - pending_wait_set_at) <= lookup_wait_guard_s:
-                        block_reason = f"{reason}:recent_wait_phrase"
+            flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
+            phone_buffer = str(_current_session.get("phone_digit_buffer") or "")
+            phone_buffer_updated_at = float(_current_session.get("phone_digit_buffer_updated_at") or 0.0)
+            phone_capture_grace = _as_float(
+                get_agent_setting("phone_digit_capture_silence_block_seconds", 45.0),
+                45.0,
+                min_value=10.0,
+                max_value=120.0,
+            )
+            if (
+                flow_state == FLOW_AWAITING_PHONE_NUMBER
+                and phone_buffer
+                and phone_buffer_updated_at
+                and (now - phone_buffer_updated_at) <= phone_capture_grace
+            ):
+                block_reason = f"{reason}:phone_digit_collection_active"
+
+            if not block_reason:
+                lookup_progress_until = float(_current_session.get("lookup_progress_prompt_until") or 0.0)
+                if lookup_progress_until and now <= lookup_progress_until:
+                    block_reason = f"{reason}:lookup_progress_window"
+                else:
+                    tracker = _current_session.get("silence_tracker")
+                    if isinstance(tracker, dict):
+                        snooze_until = float(tracker.get("snooze_until") or 0.0)
+                        if snooze_until and now <= snooze_until:
+                            block_reason = f"{reason}:silence_snooze"
+                    if not block_reason:
+                        pending_wait_phrase = str(_current_session.get("pending_lookup_wait_phrase") or "").strip()
+                        pending_wait_set_at = float(_current_session.get("pending_lookup_wait_phrase_set_at") or 0.0)
+                        lookup_wait_guard_s = _as_float(
+                            get_agent_setting("lookup_wait_phrase_silence_guard_seconds", 30.0),
+                            30.0,
+                            min_value=10.0,
+                            max_value=90.0,
+                        )
+                        if pending_wait_phrase and pending_wait_set_at and (now - pending_wait_set_at) <= lookup_wait_guard_s:
+                            block_reason = f"{reason}:recent_wait_phrase"
 
     if block_reason:
         if _current_session.get("last_silence_block_reason") != block_reason:
@@ -1299,8 +1353,8 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
     if lookup_state == "not_found":
         if lang == "el":
             return (
-                "Λυπάμαι, αλλά δεν μπόρεσα να βρω την παραγγελία σας με τα στοιχεία που δώσατε. "
-                "Παρακαλώ ελέγξτε ξανά τον αριθμό παραγγελίας από την επιβεβαίωση που λάβατε στο μέιλ σας."
+                "Λυπάμαι, αλλά δεν μπόρεσα να βρω την παραγγελία σας με τα στοιχεία που μου δώσατε. "
+                "Παρακαλώ ελέγξτε ξανά τον αριθμό παραγγελίας στο email επιβεβαίωσης που λάβατε."
             )
         return (
             "I'm sorry, but I couldn't find your order with the details provided. "
@@ -1310,7 +1364,7 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
         if lang == "el":
             return (
                 "Δεν μπόρεσα να επιβεβαιώσω τα στοιχεία αυτής της παραγγελίας. "
-                "Μπορείτε να ελέγξετε τον αριθμό και να τον επαναλάβετε ψηφίο προς ψηφίο;"
+                "Μπορείτε να ελέγξετε τον αριθμό και να τον πείτε ξανά ψηφίο προς ψηφίο;"
             )
         return (
             "I couldn't verify this order from the details I received. "
@@ -1457,7 +1511,7 @@ def _build_phone_lookup_voice_summary(result_text: str, language: str) -> str:
         if lang == "el":
             return (
                 "Δεν μπόρεσα να βρω κάποια παραγγελία με αυτόν τον αριθμό τηλεφώνου. "
-                "Μπορείτε να ελέγξετε τον αριθμό και να τον επαναλάβετε ψηφίο προς ψηφίο;"
+                "Μπορείτε να ελέγξετε τον αριθμό και να τον πείτε ξανά ψηφίο προς ψηφίο;"
             )
         return (
             "I couldn't find any order with this phone number. "
@@ -1468,7 +1522,7 @@ def _build_phone_lookup_voice_summary(result_text: str, language: str) -> str:
         if lang == "el":
             return (
                 "Δεν μπόρεσα να επιβεβαιώσω κάποια παραγγελία με αυτόν τον αριθμό τηλεφώνου. "
-                "Μπορείτε να ελέγξετε τον αριθμό και να τον επαναλάβετε ψηφίο προς ψηφίο;"
+                "Μπορείτε να ελέγξετε τον αριθμό και να τον πείτε ξανά ψηφίο προς ψηφίο;"
             )
         return (
             "I couldn't verify any order with this phone number. "
@@ -1494,6 +1548,19 @@ def _build_order_details_voice_summary(result_text: str, language: str) -> str:
     cleaned = _strip_markup_for_output(raw)
     if not cleaned:
         return ""
+
+    # Never let template placeholders leak into customer-facing speech.
+    if re.search(r"\[[^\]]+\]", raw):
+        lang = (language or "en").lower()
+        if lang == "el":
+            return (
+                "Μπορώ να μοιραστώ τις λεπτομέρειες της παραγγελίας μόλις τις επιβεβαιώσω σωστά. "
+                "Θέλετε να το ελέγξω ξανά;"
+            )
+        return (
+            "I can share the order details as soon as I verify them correctly. "
+            "Would you like me to check that again?"
+        )
 
     lang = (language or "en").lower()
     lookup_state = _classify_lookup_result(cleaned)
@@ -1777,8 +1844,8 @@ def _repeat_number_prompt_for_mode(mode: str, lang: str) -> str:
     is_phone = (mode or "").lower() == "phone"
     if lang == "el":
         if is_phone:
-            return "Μπορείτε να επαναλάβετε το κινητό σας ψηφίο προς ψηφίο, παρακαλώ;"
-        return "Μπορείτε να επαναλάβετε τον αριθμό παραγγελίας ψηφίο προς ψηφίο, παρακαλώ;"
+            return "Μπορείτε να πείτε ξανά τον αριθμό τηλεφώνου σας ψηφίο προς ψηφίο, παρακαλώ;"
+        return "Μπορείτε να πείτε ξανά τον αριθμό παραγγελίας ψηφίο προς ψηφίο, παρακαλώ;"
     if is_phone:
         return "Could you please repeat your mobile number digit by digit?"
     return "Could you please repeat your order number digit by digit?"
@@ -2416,7 +2483,7 @@ def create_stt(*, is_sip_call: bool = False):
     return _create_openai_stt(language=stt_lang)
 
 
-def create_vad():
+def create_vad(*, is_sip_call: bool = False):
     """Create Voice Activity Detection tuned for better transcript completeness."""
     min_speech_duration = _as_float(
         get_agent_setting("vad_min_speech_duration", 0.15),
@@ -2426,13 +2493,16 @@ def create_vad():
     )
     # Language-aware silence delay: Greek speakers tend to pause more between digits.
     initial_lang = get_agent_language()
-    default_silence = 1.8 if initial_lang == "el" else 1.2
+    if initial_lang == "el":
+        default_silence = 2.0 if is_sip_call else 1.8
+    else:
+        default_silence = 1.4 if is_sip_call else 1.2
     
     min_silence_duration = _as_float(
         get_agent_setting("vad_min_silence_duration", default_silence),
         default_silence,
         min_value=0.2,
-        max_value=2.0,
+        max_value=3.0,
     )
 
     vad_backend = str(get_agent_setting("vad_backend", "silero") or "").strip().lower()
@@ -2478,8 +2548,11 @@ def create_vad():
         max_value=16000,
     )
     vad_activation_threshold = _as_float(
-        get_agent_setting("vad_activation_threshold", 0.72),
-        0.6,
+        get_agent_setting(
+            "vad_activation_threshold",
+            0.58 if (initial_lang == "el" and is_sip_call) else 0.64 if initial_lang == "el" else 0.72,
+        ),
+        0.58 if initial_lang == "el" else 0.6,
         min_value=0.1,
         max_value=0.9,
     )
@@ -4310,7 +4383,10 @@ async def entrypoint(ctx: JobContext):
     
     # Language-aware endpointing delay: Greek requires more patience for complete transcripts.
     initial_lang = get_agent_language()
-    default_endpointing = 1.8 if initial_lang == "el" else 1.2
+    if initial_lang == "el":
+        default_endpointing = 2.2 if is_sip_call else 1.8
+    else:
+        default_endpointing = 1.4 if is_sip_call else 1.2
     
     # Create the voice pipeline agent - tuned to avoid clipping user speech.
     min_endpointing_delay = _as_float(
@@ -4343,7 +4419,7 @@ async def entrypoint(ctx: JobContext):
     logger.info("TTS preemptive_synthesis=%s", preemptive_synthesis)
     logger.info(f"⏱️ Creating agent ({time.time() - startup_time:.1f}s)")
     agent = VoicePipelineAgent(
-        vad=create_vad(),
+        vad=create_vad(is_sip_call=is_sip_call),
         stt=create_stt(is_sip_call=is_sip_call),
         llm=create_llm(),
         tts=create_tts(),
@@ -5003,7 +5079,16 @@ async def entrypoint(ctx: JobContext):
                 reason: str,
                 suppress_s: float = 8.0,
                 snooze_s: float = 8.0,
+                delay_s: float = 0.0,
             ) -> None:
+                prompt_key = f"{current_turn_id}:{reason}:{message_text}"
+                if (
+                    int(_current_session.get("last_manual_prompt_turn_id") or 0) == current_turn_id
+                    and str(_current_session.get("last_manual_prompt_key") or "") == prompt_key
+                ):
+                    room_log("MANUAL_PROMPT_SKIPPED", reason="duplicate_same_turn", trigger=reason)
+                    return
+
                 # Robustness: Never double-respond if a manual response is already active 
                 # or if a tool was called in this exact turn.
                 if _current_session.get("forced_response_manual_say_active"):
@@ -5016,6 +5101,8 @@ async def entrypoint(ctx: JobContext):
                     room_log("MANUAL_PROMPT_SKIPPED", reason="recent_tool_call", trigger=reason)
                     return
 
+                _current_session["last_manual_prompt_turn_id"] = current_turn_id
+                _current_session["last_manual_prompt_key"] = prompt_key
                 _current_session["forced_response_manual_say_active"] = True
                 _current_session["forced_response_spoken_turn_id"] = current_turn_id
                 _current_session["forced_response_suppress_llm_until"] = time.time() + suppress_s
@@ -5029,6 +5116,15 @@ async def entrypoint(ctx: JobContext):
 
                 async def _say_prompt() -> None:
                     try:
+                        if delay_s > 0:
+                            await asyncio.sleep(delay_s)
+                            if int(_current_session.get("last_user_turn_id") or 0) != current_turn_id:
+                                room_log(
+                                    "MANUAL_PROMPT_SKIPPED",
+                                    reason="superseded_by_newer_user_turn",
+                                    trigger=reason,
+                                )
+                                return
                         # Final check before speaking to avoid race conditions
                         if _current_session.get("should_end"):
                              return
@@ -5161,10 +5257,15 @@ async def entrypoint(ctx: JobContext):
                         return False
 
                     if get_agent_language() == "el":
-                        msg = "Σας ακούω. Συνεχίστε με τα υπόλοιπα ψηφία του τηλεφώνου, παρακαλώ."
+                        msg = "Συνεχίστε με τα υπόλοιπα ψηφία του αριθμού, παρακαλώ."
                     else:
                         msg = "I’m listening. Please continue with the remaining digits of the phone number."
-                    _schedule_manual_prompt(msg, reason="phone_digits_partial", suppress_s=6.0)
+                    _schedule_manual_prompt(
+                        msg,
+                        reason="phone_digits_partial",
+                        suppress_s=6.0,
+                        delay_s=1.2,
+                    )
                     return True
 
                 _reset_phone_digit_buffer("invalid_complete_phone")
@@ -5173,7 +5274,7 @@ async def entrypoint(ctx: JobContext):
                 if get_agent_language() == "el":
                     msg = (
                         "Αυτό δεν φαίνεται να είναι πλήρης αριθμός τηλεφώνου. "
-                        f"Παρακαλώ επαναλάβετε ολόκληρο τον αριθμό, τουλάχιστον {min_digits} ψηφία, ψηφίο προς ψηφίο."
+                        f"Παρακαλώ πείτε ολόκληρο τον αριθμό ξανά, με τουλάχιστον {min_digits} ψηφία, ψηφίο προς ψηφίο."
                     )
                 else:
                     msg = (
@@ -5215,7 +5316,7 @@ async def entrypoint(ctx: JobContext):
                 _reset_phone_digit_buffer("phone_confirmation_rejected")
                 _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="phone_confirmation_rejected")
                 if get_agent_language() == "el":
-                    msg = "Εντάξει. Πείτε ξανά τον αριθμό τηλεφώνου σας, ψηφίο προς ψηφίο."
+                    msg = "Εντάξει. Πείτε ξανά τον αριθμό τηλεφώνου σας ψηφίο προς ψηφίο."
                 else:
                     msg = "Okay. Please repeat your phone number again, digit by digit."
                 _schedule_manual_prompt(msg, reason="phone_confirmation_rejected")
@@ -5231,16 +5332,21 @@ async def entrypoint(ctx: JobContext):
                 )
                 if len(combined_digits) < min_digits:
                     if get_agent_language() == "el":
-                        msg = "Σας ακούω. Συνεχίστε με τα υπόλοιπα ψηφία του τηλεφώνου, παρακαλώ."
+                        msg = "Συνεχίστε με τα υπόλοιπα ψηφία του αριθμού, παρακαλώ."
                     else:
                         msg = "I’m listening. Please continue with the remaining digits of the phone number."
-                    _schedule_manual_prompt(msg, reason="phone_digits_partial", suppress_s=6.0)
+                    _schedule_manual_prompt(
+                        msg,
+                        reason="phone_digits_partial",
+                        suppress_s=6.0,
+                        delay_s=1.2,
+                    )
                 else:
                     _reset_phone_digit_buffer("invalid_complete_phone")
                     if get_agent_language() == "el":
                         msg = (
                             "Αυτό δεν φαίνεται να είναι πλήρης αριθμός τηλεφώνου. "
-                            f"Παρακαλώ επαναλάβετε ολόκληρο τον αριθμό, τουλάχιστον {min_digits} ψηφία, ψηφίο προς ψηφίο."
+                            f"Παρακαλώ πείτε ολόκληρο τον αριθμό ξανά, με τουλάχιστον {min_digits} ψηφία, ψηφίο προς ψηφίο."
                         )
                     else:
                         msg = (
@@ -5275,7 +5381,7 @@ async def entrypoint(ctx: JobContext):
                 )
                 return True
             if get_agent_language() == "el":
-                msg = "Παρακαλώ πείτε ξανά τον αριθμό τηλεφώνου σας, ψηφίο προς ψηφίο."
+                msg = "Παρακαλώ πείτε ξανά τον αριθμό τηλεφώνου σας ψηφίο προς ψηφίο."
             else:
                 msg = "Please say your phone number again, digit by digit."
             _schedule_manual_prompt(msg, reason="awaiting_phone_recovery")
@@ -5477,7 +5583,7 @@ async def entrypoint(ctx: JobContext):
                         if get_agent_language() == "el":
                             msg = (
                                 f"Ο αριθμός παραγγελίας πρέπει να έχει από {min_d} έως {max_d} ψηφία. "
-                                f"Μπορείτε να τον επαναλάβετε ψηφίο προς ψηφίο;"
+                                f"Μπορείτε να τον πείτε ξανά ψηφίο προς ψηφίο;"
                             )
                         else:
                             msg = (
@@ -5541,14 +5647,22 @@ async def entrypoint(ctx: JobContext):
                 try:
                     if get_agent_language() == "el":
                         msg = (
-                            "Κατανοητό. Μπορείτε να μου δώσετε τον αριθμό τηλεφώνου "
-                            "που χρησιμοποιήσατε για την παραγγελία, ψηφίο προς ψηφίο?"
+                            "Εντάξει. Μπορείτε να μου δώσετε τον αριθμό τηλεφώνου "
+                            "που χρησιμοποιήσατε για την παραγγελία, ψηφίο προς ψηφίο;"
                         )
                     else:
                         msg = (
                             "No problem. Please give me the phone number used for the order, "
                             "digit by digit?"
                         )
+                    prompt_key = f"{current_turn_id}:ask_phone_after_no_order_number:{msg}"
+                    if (
+                        int(_current_session.get("last_manual_prompt_turn_id") or 0) == current_turn_id
+                        and str(_current_session.get("last_manual_prompt_key") or "") == prompt_key
+                    ):
+                        return
+                    _current_session["last_manual_prompt_turn_id"] = current_turn_id
+                    _current_session["last_manual_prompt_key"] = prompt_key
                     await send_agent_transcript(msg)
                     agent.chat_ctx.append(role="assistant", text=msg)
                     await live_agent.say(msg, allow_interruptions=True)
@@ -5562,9 +5676,17 @@ async def entrypoint(ctx: JobContext):
             _current_session["pending_phone_candidate"] = None
             _reset_phone_digit_buffer("back_to_order_flow")
             _set_support_flow_state(FLOW_CHECKING_ORDER_NUMBER, reason="order_number_provided")
-        _current_session["number_mode_lock"] = None
-        _current_session["number_mode_turn_id"] = 0
         flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
+        active_number_collection_states = {
+            FLOW_AWAITING_ORDER_NUMBER,
+            FLOW_CHECKING_ORDER_NUMBER,
+            FLOW_AWAITING_PHONE_NUMBER,
+            FLOW_AWAITING_PHONE_CONFIRMATION,
+            FLOW_CHECKING_PHONE_NUMBER,
+        }
+        if flow_state not in active_number_collection_states:
+            _current_session["number_mode_lock"] = None
+            _current_session["number_mode_turn_id"] = 0
         # inferred_mode already calculated at turn start
         phone_flow_states = PHONE_FLOW_STATES
         if (
@@ -5612,6 +5734,7 @@ async def entrypoint(ctx: JobContext):
                     asyncio.create_task(
                         _force_get_order_details(current_turn_id, "single_yes_unlock")
                     )
+                    return
                 else:
                     room_log("FULL_DETAILS_BLOCKED", reason=unlock_reason)
                     _current_session["full_order_details_allowed_until"] = 0.0
@@ -5635,6 +5758,7 @@ async def entrypoint(ctx: JobContext):
                 asyncio.create_task(
                     _force_get_order_details(current_turn_id, "explicit_request")
                 )
+                return
             else:
                 room_log("FULL_DETAILS_BLOCKED", reason=unlock_reason)
 
@@ -6165,6 +6289,8 @@ async def entrypoint(ctx: JobContext):
             _current_session["forced_response_spoken_text"] = ""
             _current_session["forced_response_transcript_sent_at"] = 0.0
             _current_session["forced_response_suppress_llm_until"] = 0.0
+            _current_session["last_manual_prompt_turn_id"] = 0
+            _current_session["last_manual_prompt_key"] = ""
             _current_session["lookup_pending"] = False
             _current_session["lookup_pending_started_at"] = 0.0
             _current_session["lookup_pending_order"] = None
@@ -6585,6 +6711,3 @@ def run_agent():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     run_agent()
-
-
-

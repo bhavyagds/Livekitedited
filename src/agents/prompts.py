@@ -478,7 +478,7 @@ def get_greeting(language: str = "el") -> str:
     logger.warning(f"⚠️ No greeting in DB for {language}, using fallback")
     if language.lower() in ("en", "english"):
         return "Hello! How can I help you today?"
-    return "Γεια σας! Πώς μπορώ να σας βοηθήσω;"
+    return "Γεια σας! Πώς μπορώ να σας βοηθήσω σήμερα;"
 
 
 def get_closing(language: str = "el") -> str:
@@ -499,7 +499,7 @@ def get_closing(language: str = "el") -> str:
     logger.warning(f"⚠️ No closing in DB for {language}, using fallback")
     if language.lower() in ("en", "english"):
         return "Thank you! Goodbye!"
-    return "Ευχαριστώ! Γεια σας!"
+    return "Σας ευχαριστώ πολύ. Να έχετε μια όμορφη μέρα!"
 
 
 def get_stt_language(language: str = "el") -> str:
