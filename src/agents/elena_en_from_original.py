@@ -39,9 +39,8 @@ from src.agents.prompts import (
     get_system_prompt, get_system_prompt_async, get_greeting, get_closing, get_stt_language,
     get_agent_language, get_agent_setting, set_runtime_language
 )
-from src.agents.tools import order_lookup, support_ticket, knowledge_base
 from src.utils import detect_language
-
+from src.agents.tools import order_lookup, support_ticket, knowledge_base
 logger = logging.getLogger(__name__)
 
 
@@ -2135,8 +2134,8 @@ def create_tts():
     if not elevenlabs_synthesis_available():
         return create_openai_tts()
 
-    agent_lang = get_agent_language()
-    auto_language_switch = _as_bool(get_agent_setting("auto_language_switch", False), default=False)
+    agent_lang = "en"
+    auto_language_switch = False
     
     # CRITICAL: Select the correct model based on language
     # eleven_turbo_v2 is ENGLISH ONLY - Greek requires multilingual model
@@ -2251,9 +2250,9 @@ def create_tts():
 
 def create_stt(*, is_sip_call: bool = False):
     """Create the Speech-to-Text instance optimized for speed."""
-    agent_lang = get_agent_language()
+    agent_lang = "en"
     stt_lang = get_stt_language(agent_lang)
-    auto_language_switch = _as_bool(get_agent_setting("auto_language_switch", False), default=False)
+    auto_language_switch = False
     stt_auto_detect = _as_bool(
         get_agent_setting("stt_auto_detect", auto_language_switch),
         default=auto_language_switch,
@@ -3152,8 +3151,8 @@ class ElenaFunctionContext(llm.FunctionContext):
         
         asyncio.create_task(delayed_end())
         
-        # Return closing message based on language
-        goodbye = get_closing(get_agent_language())
+        # English-only closing
+        goodbye = get_closing("en")
         room_log("SESSION_END_MESSAGE", text=_truncate(goodbye))
         return goodbye
 
@@ -3173,7 +3172,7 @@ async def create_initial_context(cache_task: asyncio.Task = None) -> llm.ChatCon
             logger.warning(f"Cache task exception (will retry): {e}")
     
     ctx = llm.ChatContext()
-    agent_lang = get_agent_language()
+    agent_lang = "en"
     
     # Use async version to ensure KB and prompts are loaded from DB
     system_prompt = await get_system_prompt_async(agent_lang)
@@ -3353,12 +3352,11 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.warning(f"Cache task exception (settings): {e}")
 
-    # Initialize runtime language (per-call) from DB defaults.
-    set_runtime_language(None)
-    base_language = get_agent_language()
+    # English-only runtime: lock language for this agent/session.
+    base_language = "en"
     set_runtime_language(base_language)
-    session_language = {"value": base_language}
-    auto_language_switch = _as_bool(get_agent_setting("auto_language_switch", False), default=False)
+    session_language = {"value": "en"}
+    auto_language_switch = False
     language_switch_min_turns_setting = get_agent_setting("language_switch_min_turns", 2)
     if is_sip_call:
         language_switch_min_turns_setting = get_agent_setting(
@@ -5789,82 +5787,8 @@ async def entrypoint(ctx: JobContext):
         if is_negative and not details_pending and not ticket_pending:
             _snooze_silence_prompts(120.0, reason="user_negative_closing")
 
-        if auto_language_switch:
-
-            explicit_lang = _explicit_language_request(user_text)
-            if explicit_lang and explicit_lang != session_language["value"]:
-                room_log(
-                    "LANGUAGE_SWITCH_INTENT",
-                    current=session_language["value"],
-                    requested=explicit_lang,
-                    reason="explicit_request",
-                )
-                _apply_language_switch(explicit_lang, reason="explicit_request")
-                # Extra hard override so this turn switches immediately.
-                lang_name = "English" if explicit_lang == "en" else "Greek"
-                agent.chat_ctx.append(
-                    role="system",
-                    text=(
-                        "HIGHEST PRIORITY LANGUAGE OVERRIDE:\n"
-                        f"- The user explicitly requested {lang_name}.\n"
-                        f"- Reply in {lang_name} immediately for this response.\n"
-                        "- Do not refuse. Do not say you only speak another language."
-                    ),
-                )
-            else:
-                detected_lang = detect_language(user_text, default=session_language["value"])
-                if detected_lang != session_language["value"] and not _allow_auto_language_switch(
-                    session_language["value"],
-                    detected_lang,
-                    user_text,
-                ):
-                    detected_lang = session_language["value"]
-                room_log(
-                    "USER_TEXT_LANG",
-                    current=session_language["value"],
-                    detected=detected_lang,
-                    explicit=explicit_lang or "",
-                )
-                if detected_lang != session_language["value"]:
-                    if language_switch_state["candidate"] == detected_lang:
-                        language_switch_state["count"] += 1
-                    else:
-                        language_switch_state["candidate"] = detected_lang
-                        language_switch_state["count"] = 1
-
-                    room_log(
-                        "LANGUAGE_SWITCH_CANDIDATE",
-                        current=session_language["value"],
-                        candidate=detected_lang,
-                        count=language_switch_state["count"],
-                        required=language_switch_min_turns,
-                    )
-
-                    if language_switch_state["count"] >= language_switch_min_turns:
-                        _apply_language_switch(detected_lang, reason="consecutive_detected")
-                else:
-                    language_switch_state["candidate"] = None
-                    language_switch_state["count"] = 0
-                    set_runtime_language(detected_lang)
-        else:
-            explicit_lang = _explicit_language_request(user_text)
-            if explicit_lang and explicit_lang != session_language["value"]:
-                room_log(
-                    "LANGUAGE_SWITCH_SUPPRESSED",
-                    current=session_language["value"],
-                    candidate=explicit_lang,
-                    reason="auto_switch_disabled",
-                )
-                locked_name = "Greek" if session_language["value"] == "el" else "English"
-                agent.chat_ctx.append(
-                    role="system",
-                    text=(
-                        "LANGUAGE LOCK:\n"
-                        "- Auto language switching is disabled for this call.\n"
-                        f"- Reply only in {locked_name}.\n"
-                        f"- If the caller requests another language, politely continue in {locked_name}."
-                    ),
-                )
+        # English-only mode: language switching is intentionally disabled.
+        set_runtime_language("en")
 
         try:
             detected_order_number = _extract_order_number_candidate(user_text)
@@ -6378,11 +6302,11 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.debug(f"Background audio not available: {e}")
     
-    # Get greeting based on configured language
-    agent_lang = get_agent_language()
+    # English-only greeting
+    agent_lang = "en"
     greeting_enabled = _require_bool_setting("agent_greeting_enabled")
     if greeting_enabled:
-        greeting = get_greeting(agent_lang)
+        greeting = get_greeting("en")
         logger.info(f"⏱️ Saying greeting ({time.time() - startup_time:.1f}s): {greeting[:50]}...")
         # No manual send_agent_transcript here; on_agent_speech_committed will handle it automatically.
         agent.chat_ctx.append(role="assistant", text=greeting)
