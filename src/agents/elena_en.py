@@ -197,6 +197,7 @@ class SessionState:
     silence_timeout_s: float = 12.0
     silence_max_prompts: int = 2
     silence_prompt_count: int = 0
+    silence_snooze_until: float = 0.0
     waiting_for_user: bool = False
     last_user_activity: float = 0.0
     last_agent_activity: float = 0.0
@@ -573,8 +574,6 @@ async def _run_order_lookup(agent: VoicePipelineAgent, order_number: str):
             state.support_state = "idle"
     finally:
         state.lookup_inflight = False
-        state.last_agent_activity = time.time()
-        state.waiting_for_user = True
 
 
 async def _run_phone_lookup(agent: VoicePipelineAgent, phone_number: str):
@@ -595,8 +594,6 @@ async def _run_phone_lookup(agent: VoicePipelineAgent, phone_number: str):
             state.support_state = "idle"
     finally:
         state.lookup_inflight = False
-        state.last_agent_activity = time.time()
-        state.waiting_for_user = True
 
 
 async def _run_create_ticket(agent: VoicePipelineAgent):
@@ -622,8 +619,6 @@ async def _run_create_ticket(agent: VoicePipelineAgent):
         state.ticket_issue = ""
     finally:
         state.ticket_inflight = False
-        state.last_agent_activity = time.time()
-        state.waiting_for_user = True
 
 
 # -----------------------------------------------------------------------------
@@ -672,6 +667,11 @@ async def entrypoint(ctx: JobContext):
                 return
 
         thinking_task = asyncio.create_task(_set_thinking())
+
+    def snooze_silence(seconds: float):
+        now_ts = time.time()
+        state.silence_snooze_until = max(state.silence_snooze_until, now_ts + max(0.0, seconds))
+        room_log("SILENCE_SNOOZE", until=state.silence_snooze_until, seconds=seconds)
 
     job = getattr(ctx, "job", None)
     job_id = getattr(job, "id", None) or getattr(job, "job_id", None)
@@ -818,11 +818,13 @@ async def entrypoint(ctx: JobContext):
         # 1) If lookup is in progress, keep caller informed and do not branch.
         if state.lookup_inflight:
             asyncio.create_task(set_ui_state("thinking"))
+            snooze_silence(8.0)
             asyncio.create_task(agent.say("I am still checking that now. One moment please.", allow_interruptions=True))
             return
 
         if state.ticket_inflight:
             asyncio.create_task(set_ui_state("thinking"))
+            snooze_silence(8.0)
             asyncio.create_task(agent.say("I am creating your support ticket now. One moment please.", allow_interruptions=True))
             return
 
@@ -831,6 +833,7 @@ async def entrypoint(ctx: JobContext):
             order_id = _normalize_order_id_strict(user_text)
             if order_id:
                 asyncio.create_task(set_ui_state("thinking"))
+                snooze_silence(10.0)
                 asyncio.create_task(_run_order_lookup(agent, order_id))
                 return
 
@@ -844,6 +847,7 @@ async def entrypoint(ctx: JobContext):
             phone = _normalize_phone_for_lookup(user_text)
             if phone:
                 asyncio.create_task(set_ui_state("thinking"))
+                snooze_silence(10.0)
                 asyncio.create_task(_run_phone_lookup(agent, phone))
                 return
             return
@@ -887,6 +891,7 @@ async def entrypoint(ctx: JobContext):
         if state.support_state == "ticket_confirm":
             if _is_yes(user_text):
                 asyncio.create_task(set_ui_state("thinking"))
+                snooze_silence(10.0)
                 asyncio.create_task(agent.say("Thanks. Creating your support ticket now.", allow_interruptions=True))
                 asyncio.create_task(_run_create_ticket(agent))
                 return
@@ -956,6 +961,8 @@ async def entrypoint(ctx: JobContext):
             if not state.silence_enabled or not state.waiting_for_user or state.lookup_inflight:
                 continue
             now = time.time()
+            if now < state.silence_snooze_until:
+                continue
             if (now - state.last_user_activity) < state.silence_timeout_s:
                 continue
             if (now - state.last_agent_activity) < state.silence_timeout_s:
