@@ -849,6 +849,15 @@ async def entrypoint(ctx: JobContext):
         state.waiting_for_user = True
         asyncio.create_task(set_ui_state("idle"))
 
+    # Stream interim user transcripts to the UI for realtime feel.
+    _human_input = getattr(agent, "_human_input", None)
+    if _human_input:
+        @_human_input.on("interim_transcript")
+        def _on_user_interim_transcript(ev):
+            text = (ev.text or "").strip()
+            if text:
+                asyncio.create_task(send_user_transcript(text, interim=True))
+
     @agent.on("agent_speech_committed")
     def _on_agent_speech_committed(msg):
         text = msg.content if hasattr(msg, "content") else None
@@ -902,6 +911,7 @@ async def entrypoint(ctx: JobContext):
             if _mentions_no_order_number(user_text) or _mentions_phone_lookup_intent(user_text):
                 state.support_state = "awaiting_phone"
                 room_log("FLOW_TRANSITION", from_state="awaiting_order", to_state="awaiting_phone", reason="no_order_or_phone_intent")
+                asyncio.create_task(agent.say("No problem! Could you please provide me with your phone number instead?", allow_interruptions=True))
                 return
 
             # If user already gave a full phone-like number, use phone lookup directly.
@@ -971,6 +981,8 @@ async def entrypoint(ctx: JobContext):
             asyncio.create_task(agent.say("Please describe the issue in one or two sentences.", allow_interruptions=True))
             return
 
+
+
         if state.support_state == "ticket_issue":
             state.ticket_issue = user_text
             state.support_state = "ticket_confirm"
@@ -1014,6 +1026,10 @@ async def entrypoint(ctx: JobContext):
             state.support_state = "ticket_name"
             asyncio.create_task(agent.say("Sure, I can create a support ticket. Please tell me your full name.", allow_interruptions=True))
             return
+
+    # Optional: capture agent text word-by-word if needed, but committed is safer for translations.
+    # We already have _on_agent_speech_committed.
+    
 
         # 5) Otherwise let LLM handle general query naturally.
 
