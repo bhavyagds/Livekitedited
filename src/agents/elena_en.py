@@ -151,6 +151,14 @@ def _mentions_no_order_number(text: str) -> bool:
     )
 
 
+def _mentions_phone_lookup_intent(text: str) -> bool:
+    t = (text or "").lower()
+    return bool(
+        re.search(r"\b(phone|mobile|number|call me on)\b", t)
+        or re.search(r"(check by phone|use phone|with phone)", t)
+    )
+
+
 # -----------------------------------------------------------------------------
 # Room logs and state
 # -----------------------------------------------------------------------------
@@ -830,6 +838,21 @@ async def entrypoint(ctx: JobContext):
 
         # 2) Active order-support flow
         if state.support_state in {"awaiting_order", "checking_order"}:
+            # If user indicates phone lookup path, move flow to phone collection.
+            if _mentions_no_order_number(user_text) or _mentions_phone_lookup_intent(user_text):
+                state.support_state = "awaiting_phone"
+                room_log("FLOW_TRANSITION", from_state="awaiting_order", to_state="awaiting_phone", reason="no_order_or_phone_intent")
+                return
+
+            # If user already gave a full phone-like number, use phone lookup directly.
+            phone_candidate = _normalize_phone_for_lookup(user_text)
+            if phone_candidate:
+                state.support_state = "awaiting_phone"
+                asyncio.create_task(set_ui_state("thinking"))
+                snooze_silence(10.0)
+                asyncio.create_task(_run_phone_lookup(agent, phone_candidate))
+                return
+
             order_id = _normalize_order_id_strict(user_text)
             if order_id:
                 asyncio.create_task(set_ui_state("thinking"))
@@ -837,32 +860,41 @@ async def entrypoint(ctx: JobContext):
                 asyncio.create_task(_run_order_lookup(agent, order_id))
                 return
 
-            if _mentions_no_order_number(user_text):
-                state.support_state = "awaiting_phone"
-                return
+            asyncio.create_task(
+                agent.say(
+                    "Please share your order number. If you do not have it, say that and I will check by phone number.",
+                    allow_interruptions=True,
+                )
+            )
             return
 
         # 3) Active phone-support flow
         if state.support_state in {"awaiting_phone", "checking_phone"}:
+            if _mentions_phone_lookup_intent(user_text):
+                asyncio.create_task(
+                    agent.say("Sure. Please provide the full phone number used for the order.", allow_interruptions=True)
+                )
+                return
             phone = _normalize_phone_for_lookup(user_text)
             if phone:
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(10.0)
                 asyncio.create_task(_run_phone_lookup(agent, phone))
                 return
+            asyncio.create_task(agent.say("I need the full phone number to check the order. Please repeat it.", allow_interruptions=True))
             return
 
         # 3b) Support ticket flow
         if state.support_state == "ticket_name":
             state.ticket_name = user_text
             state.support_state = "ticket_phone"
-            asyncio.create_task(agent.say("Thanks. Please share your phone number digit by digit.", allow_interruptions=True))
+            asyncio.create_task(agent.say("Thanks. Please share your phone number.", allow_interruptions=True))
             return
 
         if state.support_state == "ticket_phone":
             ticket_phone = _normalize_phone_for_lookup(user_text)
             if not ticket_phone:
-                asyncio.create_task(agent.say("Please repeat a valid phone number, digit by digit.", allow_interruptions=True))
+                asyncio.create_task(agent.say("Please repeat a valid phone number.", allow_interruptions=True))
                 return
             state.ticket_phone = ticket_phone
             state.support_state = "ticket_email"
@@ -913,7 +945,7 @@ async def entrypoint(ctx: JobContext):
         if support_intent:
             state.support_state = "awaiting_order"
             state.last_issue = user_text
-            asyncio.create_task(agent.say("I am sorry to hear that. Please provide your order number.", allow_interruptions=True))
+            room_log("FLOW_TRANSITION", from_state="idle", to_state="awaiting_order", reason="support_intent")
             return
 
         ticket_intent = bool(re.search(r"(human|representative|call me|callback|support ticket|open ticket|create ticket)", user_text.lower()))
@@ -949,13 +981,44 @@ async def entrypoint(ctx: JobContext):
     # Prefetch orders in background
     asyncio.create_task(order_lookup.prefetch_orders())
 
+    def _contextual_silence_prompt() -> str:
+        phase = state.silence_prompt_count
+        support_state = state.support_state
+
+        if support_state in {"awaiting_order", "checking_order"}:
+            if phase == 0:
+                return "Whenever you are ready, please share your order number. If you do not have it, say that and I will check by phone number."
+            return "I am still here. Please share your order number, or say you do not have it so I can check by phone."
+
+        if support_state in {"awaiting_phone", "checking_phone"}:
+            if phase == 0:
+                return "Please share the phone number used for the order when you are ready."
+            return "I am ready whenever you are. Please repeat the full phone number."
+
+        if support_state == "ticket_name":
+            return "Whenever you are ready, please tell me your full name so I can create the support ticket."
+        if support_state == "ticket_phone":
+            return "Please share your phone number when you are ready."
+        if support_state == "ticket_email":
+            return "Please share your email address when you are ready."
+        if support_state == "ticket_issue":
+            return "Please describe the issue in one or two sentences when you are ready."
+        if support_state == "ticket_confirm":
+            return "Please say yes to create the ticket, or no to cancel."
+
+        if state.last_issue:
+            if phase == 0:
+                return "I am still here to help with your issue. Please continue whenever you are ready."
+            return "No rush. I can continue helping with your issue whenever you are ready."
+
+        if phase == 0:
+            return "I am here whenever you are ready."
+        if phase == 1:
+            return "Take your time. I am still here."
+        return "I can continue whenever you are ready."
+
     # Simple silence monitor
     async def _silence_monitor():
-        prompts = [
-            "I am here when you are ready.",
-            "Take your time. I am still here.",
-            "I can continue whenever you are ready.",
-        ]
         while not state.should_end:
             await asyncio.sleep(1.0)
             if not state.silence_enabled or not state.waiting_for_user or state.lookup_inflight:
@@ -972,8 +1035,7 @@ async def entrypoint(ctx: JobContext):
                 # Hard stop to prevent repeated prompt loops.
                 continue
 
-            idx = min(state.silence_prompt_count, len(prompts) - 1)
-            text = prompts[idx]
+            text = _contextual_silence_prompt()
             state.silence_prompt_count += 1
             room_log("SILENCE_PROMPT", count=state.silence_prompt_count, text=text)
             await agent.say(text, allow_interruptions=True)
