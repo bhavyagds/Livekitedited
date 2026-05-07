@@ -973,6 +973,25 @@ async def entrypoint(ctx: JobContext):
         await agent.say(greeting, allow_interruptions=True)
     await set_ui_state("idle")
 
+    # Start background audio after greeting so first response is not delayed.
+    bg_audio_player = None
+
+    async def _start_background_audio():
+        nonlocal bg_audio_player
+        try:
+            from src.services.background_audio import create_background_audio_player
+            bg_audio_player = await create_background_audio_player()
+            if bg_audio_player:
+                ok = await bg_audio_player.start(ctx.room)
+                room_log("BG_AUDIO_START", enabled=True, started=bool(ok))
+            else:
+                room_log("BG_AUDIO_START", enabled=False, started=False)
+        except Exception as e:
+            room_log("BG_AUDIO_START_ERROR", error=str(e))
+
+    bg_audio_task = asyncio.create_task(_start_background_audio())
+    bg_audio_task.set_name("bg_audio_init")
+
     # Prevent immediate silence prompt right after startup/greeting delays.
     now = time.time()
     state.last_user_activity = now
@@ -1058,6 +1077,13 @@ async def entrypoint(ctx: JobContext):
         transcript=transcript_text or None,
     )
     room_log("CALL_END", transcript_lines=len(conversation_transcript))
+
+    try:
+        if bg_audio_player:
+            await bg_audio_player.stop()
+            room_log("BG_AUDIO_STOP", stopped=True)
+    except Exception as e:
+        room_log("BG_AUDIO_STOP_ERROR", error=str(e))
 
     try:
         if ctx.room and ctx.room.isconnected():
