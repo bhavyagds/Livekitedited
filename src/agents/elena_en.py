@@ -213,6 +213,8 @@ class SessionState:
     last_user_transcript_at: float = 0.0
     last_agent_transcript_text: str = ""
     last_agent_transcript_at: float = 0.0
+    last_clarification_prompt_text: str = ""
+    last_clarification_prompt_at: float = 0.0
 
 
 _current = {
@@ -681,6 +683,21 @@ async def entrypoint(ctx: JobContext):
         state.silence_snooze_until = max(state.silence_snooze_until, now_ts + max(0.0, seconds))
         room_log("SILENCE_SNOOZE", until=state.silence_snooze_until, seconds=seconds)
 
+    def _should_suppress_clarification(text: str, min_gap_s: float = 6.0) -> bool:
+        now_ts = time.time()
+        normalized = " ".join((text or "").strip().lower().split())
+        if not normalized:
+            return True
+        if (
+            normalized == state.last_clarification_prompt_text
+            and (now_ts - state.last_clarification_prompt_at) < max(0.0, min_gap_s)
+        ):
+            room_log("CLARIFICATION_SUPPRESSED", text=normalized, min_gap_s=min_gap_s)
+            return True
+        state.last_clarification_prompt_text = normalized
+        state.last_clarification_prompt_at = now_ts
+        return False
+
     job = getattr(ctx, "job", None)
     job_id = getattr(job, "id", None) or getattr(job, "job_id", None)
     room_logger, room_log_path = _create_room_logger(ctx.room.name, job_id)
@@ -728,6 +745,15 @@ async def entrypoint(ctx: JobContext):
     chat_ctx = llm.ChatContext()
     chat_ctx.append(role="system", text=system_prompt)
 
+    configured_endpointing_delay = _as_float(
+        get_agent_setting("min_endpointing_delay", 1.2),
+        1.2,
+        min_value=0.2,
+        max_value=3.0,
+    )
+    # Product requirement: wait at least ~2s after user stops speaking before replying.
+    effective_endpointing_delay = max(2.0, configured_endpointing_delay)
+
     agent = VoicePipelineAgent(
         vad=create_vad(),
         stt=create_stt(),
@@ -737,10 +763,15 @@ async def entrypoint(ctx: JobContext):
         fnc_ctx=ElenaFunctionContext(),
         allow_interruptions=True,
         interrupt_min_words=_as_int(get_agent_setting("interrupt_min_words", 2), 2, min_value=1, max_value=10),
-        min_endpointing_delay=_as_float(get_agent_setting("min_endpointing_delay", 1.2), 1.2, min_value=0.2, max_value=3.0),
+        min_endpointing_delay=effective_endpointing_delay,
         # Keep disabled here to avoid race where LLM starts replying before deterministic
         # memory/order flow handlers finish, which can produce double answers.
         preemptive_synthesis=_as_bool(get_agent_setting("preemptive_synthesis", False), default=False),
+    )
+    room_log(
+        "TURN_CONFIG",
+        configured_endpointing_delay=configured_endpointing_delay,
+        effective_endpointing_delay=effective_endpointing_delay,
     )
 
     conversation_transcript: list[str] = []
@@ -761,18 +792,47 @@ async def entrypoint(ctx: JobContext):
             await save_transcript_to_db(call_id, cleaned, speaker="agent")
         room_log("AGENT_TEXT", text=cleaned)
 
-    async def send_user_transcript(text: str):
+    _last_user_interim = ""
+    _last_user_interim_sent_at = 0.0
+
+    async def send_user_transcript(text: str, *, interim: bool = False):
+        nonlocal _last_user_interim, _last_user_interim_sent_at
         cleaned = (text or "").strip()
         if not cleaned:
             return
         now_ts = time.time()
+        if interim:
+            # Throttle interim updates to keep UI smooth and avoid flooding.
+            if cleaned == _last_user_interim and (now_ts - _last_user_interim_sent_at) < 0.35:
+                return
+            _last_user_interim = cleaned
+            _last_user_interim_sent_at = now_ts
+            payload = json.dumps(
+                {"type": "transcript", "speaker": "user", "text": cleaned, "interim": True},
+                ensure_ascii=False,
+            )
+            try:
+                await ctx.room.local_participant.publish_data(payload.encode("utf-8"), reliable=True)
+            except Exception:
+                pass
+            return
+
         if cleaned == state.last_user_transcript_text and (now_ts - state.last_user_transcript_at) < 1.2:
             room_log("USER_TEXT_DEDUPED", text=cleaned)
             return
+
         state.last_user_transcript_text = cleaned
         state.last_user_transcript_at = now_ts
+        _last_user_interim = ""
         conversation_transcript.append(f"User: {cleaned}")
-        await _publish_transcript(ctx, "user", cleaned)
+        payload = json.dumps(
+            {"type": "transcript", "speaker": "user", "text": cleaned, "interim": False},
+            ensure_ascii=False,
+        )
+        try:
+            await ctx.room.local_participant.publish_data(payload.encode("utf-8"), reliable=True)
+        except Exception:
+            pass
         if call_id:
             await save_transcript_to_db(call_id, cleaned, speaker="user")
         room_log("USER_TEXT", text=cleaned)
@@ -860,20 +920,17 @@ async def entrypoint(ctx: JobContext):
                 asyncio.create_task(_run_order_lookup(agent, order_id))
                 return
 
-            asyncio.create_task(
-                agent.say(
-                    "Please share your order number. If you do not have it, say that and I will check by phone number.",
-                    allow_interruptions=True,
-                )
-            )
+            prompt = "Please share your order number. If you do not have it, say that and I will check by phone number."
+            if not _should_suppress_clarification(prompt):
+                asyncio.create_task(agent.say(prompt, allow_interruptions=True))
             return
 
         # 3) Active phone-support flow
         if state.support_state in {"awaiting_phone", "checking_phone"}:
             if _mentions_phone_lookup_intent(user_text):
-                asyncio.create_task(
-                    agent.say("Sure. Please provide the full phone number used for the order.", allow_interruptions=True)
-                )
+                prompt = "Sure. Please provide the full phone number used for the order."
+                if not _should_suppress_clarification(prompt):
+                    asyncio.create_task(agent.say(prompt, allow_interruptions=True))
                 return
             phone = _normalize_phone_for_lookup(user_text)
             if phone:
@@ -881,7 +938,9 @@ async def entrypoint(ctx: JobContext):
                 snooze_silence(10.0)
                 asyncio.create_task(_run_phone_lookup(agent, phone))
                 return
-            asyncio.create_task(agent.say("I need the full phone number to check the order. Please repeat it.", allow_interruptions=True))
+            prompt = "I need the full phone number to check the order. Please share it once."
+            if not _should_suppress_clarification(prompt):
+                asyncio.create_task(agent.say(prompt, allow_interruptions=True))
             return
 
         # 3b) Support ticket flow
@@ -894,7 +953,9 @@ async def entrypoint(ctx: JobContext):
         if state.support_state == "ticket_phone":
             ticket_phone = _normalize_phone_for_lookup(user_text)
             if not ticket_phone:
-                asyncio.create_task(agent.say("Please repeat a valid phone number.", allow_interruptions=True))
+                prompt = "Please share a valid phone number."
+                if not _should_suppress_clarification(prompt):
+                    asyncio.create_task(agent.say(prompt, allow_interruptions=True))
                 return
             state.ticket_phone = ticket_phone
             state.support_state = "ticket_email"
@@ -964,6 +1025,19 @@ async def entrypoint(ctx: JobContext):
 
     # Start agent
     agent.start(ctx.room, participant)
+
+    # Stream interim user transcripts so user text appears in real time on frontend.
+    human_input = getattr(agent, "_human_input", None)
+    if human_input:
+        @human_input.on("interim_transcript")
+        def _on_interim_transcript(ev):
+            try:
+                text = ev.alternatives[0].text
+            except Exception:
+                text = None
+            if text:
+                cancel_thinking_task()
+                asyncio.create_task(send_user_transcript(text, interim=True))
 
     # Greet
     greeting_enabled = _as_bool(get_agent_setting("agent_greeting_enabled", True), default=True)
