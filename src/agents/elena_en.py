@@ -368,10 +368,63 @@ def create_stt(is_sip_call: bool = False):
     provider = str(get_agent_setting("stt_provider", "deepgram") or "deepgram").lower()
     deepgram_api_key = getattr(settings, "deepgram_api_key", None)
     if provider == "deepgram" and USE_DEEPGRAM and deepgram_api_key:
-        model = str(get_agent_setting("deepgram_stt_model", "nova-2") or "nova-2")
-        return deepgram.STT(model=model, language="en-US", api_key=deepgram_api_key)
-    model = str(get_agent_setting("openai_stt_model", "whisper-1") or "whisper-1")
-    return openai.STT(model=model, api_key=settings.openai_api_key, language="en")
+        model = str(get_agent_setting("deepgram_stt_model", "nova-3") or "nova-3").strip()
+        deepgram_base = {
+            "model": model,
+            "api_key": deepgram_api_key,
+            "interim_results": _as_bool(get_agent_setting("stt_interim_results", True), default=True),
+            "punctuate": _as_bool(get_agent_setting("stt_punctuate", True), default=True),
+            "smart_format": _as_bool(get_agent_setting("stt_smart_format", True), default=True),
+        }
+        attempts = [
+            {**deepgram_base, "language": "en-US"},
+            {**deepgram_base, "language": "en"},
+            deepgram_base.copy(),
+            {"model": model, "api_key": deepgram_api_key},
+        ]
+        last_error: Optional[Exception] = None
+        for kwargs in attempts:
+            try:
+                logger.info(
+                    "Creating Deepgram STT: model=%s language=%s interim=%s punctuate=%s smart_format=%s",
+                    kwargs.get("model"),
+                    kwargs.get("language", "auto"),
+                    kwargs.get("interim_results", False),
+                    kwargs.get("punctuate", False),
+                    kwargs.get("smart_format", False),
+                )
+                return deepgram.STT(**kwargs)
+            except TypeError as e:
+                last_error = e
+                logger.warning("Deepgram STT args not supported, retrying with fallback args: %s", e)
+                continue
+        if last_error:
+            logger.warning("Deepgram STT fallback to minimal config due to: %s", last_error)
+        return deepgram.STT(model=model, api_key=deepgram_api_key)
+
+    model = str(get_agent_setting("openai_stt_model", "gpt-4o-mini-transcribe") or "gpt-4o-mini-transcribe").strip()
+    openai_attempts = [
+        {"model": model, "api_key": settings.openai_api_key, "language": "en"},
+        {"model": model, "api_key": settings.openai_api_key},
+        {"model": "whisper-1", "api_key": settings.openai_api_key, "language": "en"},
+        {"model": "whisper-1", "api_key": settings.openai_api_key},
+    ]
+    last_error: Optional[Exception] = None
+    for kwargs in openai_attempts:
+        try:
+            logger.info(
+                "Creating OpenAI STT: model=%s language=%s",
+                kwargs.get("model"),
+                kwargs.get("language", "auto"),
+            )
+            return openai.STT(**kwargs)
+        except TypeError as e:
+            last_error = e
+            logger.warning("OpenAI STT args not supported, retrying with fallback args: %s", e)
+            continue
+    if last_error:
+        logger.warning("OpenAI STT fallback to minimal config due to: %s", last_error)
+    return openai.STT(model="whisper-1", api_key=settings.openai_api_key)
 
 
 def create_tts():
