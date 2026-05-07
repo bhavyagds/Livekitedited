@@ -311,9 +311,9 @@ export default function Memory() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b bg-slate-50 text-left">
-                    <th className="px-4 py-3 font-semibold text-slate-600 w-[28%]">Question</th>
-                    <th className="px-4 py-3 font-semibold text-slate-600 w-[32%]">Answer</th>
-                    <th className="px-4 py-3 font-semibold text-slate-600 w-[22%]">Comment</th>
+                    <th className="px-4 py-3 font-semibold text-slate-600 w-[28%]">Question (Scenario)</th>
+                    <th className="px-4 py-3 font-semibold text-slate-600 w-[32%]">Answer (Response)</th>
+                    <th className="px-4 py-3 font-semibold text-slate-600 w-[22%]">Comment (Guidelines)</th>
                     <th className="px-4 py-3 font-semibold text-slate-600 text-center w-[10%]">Active</th>
                     <th className="px-4 py-3 font-semibold text-slate-600 text-center w-[8%]">Delete</th>
                   </tr>

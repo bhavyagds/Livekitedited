@@ -319,6 +319,19 @@ def build_system_prompt(language: str = "el") -> str:
         parts.append(MINIMAL_FALLBACK_PROMPT)
         logger.warning(f"⚠️ No prompts in DB for {language}, using minimal fallback")
     
+    # Add source-of-truth precedence so KB/tools and memory don't conflict.
+    parts.append("""FACT VS BEHAVIOR PRECEDENCE (CRITICAL):
+1. FACTUAL TRUTH SOURCE:
+- For factual or business information (pricing, delivery windows, policies, menu, order status, refunds),
+  use KNOWLEDGE BASE content and tool outputs as the source of truth.
+- If tool output conflicts with any memory phrasing, follow the tool output.
+2. LONG-TERM MEMORY SCOPE:
+- Use long-term memory to control behavioral style: tone, empathy, retry phrasing, clarification style,
+  and how to ask for missing information.
+- Do not treat long-term memory as the source of changing business facts.
+3. CONFLICT RULE:
+- When KB/tool facts and memory guidance both apply, keep facts from KB/tools and apply memory only to delivery style.""")
+
     # Add knowledge base content if available
     if kb_content:
         parts.append("\n\n" + "="*60)
@@ -391,6 +404,19 @@ async def build_system_prompt_async(language: str = "el") -> str:
         parts.append(MINIMAL_FALLBACK_PROMPT)
         logger.warning(f"⚠️ No prompts in DB for {language}, using minimal fallback")
     
+    # Add source-of-truth precedence so KB/tools and memory don't conflict.
+    parts.append("""FACT VS BEHAVIOR PRECEDENCE (CRITICAL):
+1. FACTUAL TRUTH SOURCE:
+- For factual or business information (pricing, delivery windows, policies, menu, order status, refunds),
+  use KNOWLEDGE BASE content and tool outputs as the source of truth.
+- If tool output conflicts with any memory phrasing, follow the tool output.
+2. LONG-TERM MEMORY SCOPE:
+- Use long-term memory to control behavioral style: tone, empathy, retry phrasing, clarification style,
+  and how to ask for missing information.
+- Do not treat long-term memory as the source of changing business facts.
+3. CONFLICT RULE:
+- When KB/tool facts and memory guidance both apply, keep facts from KB/tools and apply memory only to delivery style.""")
+
     # Add knowledge base content if available
     if kb_content:
         parts.append("\n\n" + "="*60)
