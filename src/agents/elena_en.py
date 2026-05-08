@@ -138,7 +138,7 @@ _ORDER_WORD_TO_DIGIT: dict[str, str] = {
 
 
 def _normalize_digit_token(token: str) -> str:
-    """Lowercase + strip accents so Greek spoken digits map reliably."""
+    """Lowercase + strip accents so tokens map reliably."""
     normalized = unicodedata.normalize("NFD", (token or "").strip().lower())
     return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
 
@@ -148,7 +148,7 @@ def _normalize_digit_token(token: str) -> str:
 
 def _digits_from_phrase(text: str) -> str:
     """Convert mixed spoken-number tokens into a compact digits-only string."""
-    tokens = re.findall(r"[a-zA-Z\u0370-\u03FF0-9]+", (text or "").lower())
+    tokens = re.findall(r"[a-zA-Z0-9]+", (text or "").lower())
     digits: list[str] = []
     for token in tokens:
         normalized = _normalize_digit_token(token)
@@ -165,7 +165,7 @@ def _digits_from_phrase(text: str) -> str:
 
 
 def _extract_digit_parts(text: str) -> list[str]:
-    tokens = re.findall(r"[a-zA-Z\u0370-\u03FF0-9]+", (text or "").lower())
+    tokens = re.findall(r"[a-zA-Z0-9]+", (text or "").lower())
     parts: list[str] = []
     for token in tokens:
         normalized = _normalize_digit_token(token)
@@ -1449,13 +1449,9 @@ def _build_order_details_voice_summary(result_text: str) -> str:
                 continue
             value = re.sub(r",\s*[0-9]+(?:[.,][0-9]+)?\s*[A-Za-z€]{1,4}(?:\s+each)?\s*$", "", value).strip()
             m_qty_en = re.match(r"^(\d+)\s+of\s+(.+)$", value, flags=re.IGNORECASE)
-            m_qty_el = re.match(r"^(\d+)\s+τεμάχια\s+(.+)$", value, flags=re.IGNORECASE)
             if m_qty_en:
                 qty = int(m_qty_en.group(1))
                 name = m_qty_en.group(2).strip()
-            elif m_qty_el:
-                qty = int(m_qty_el.group(1))
-                name = m_qty_el.group(2).strip()
             else:
                 qty = 1
                 name = value.strip()
@@ -1464,79 +1460,45 @@ def _build_order_details_voice_summary(result_text: str) -> str:
                 continue
             if len(name) > 80:
                 name = name[:80].rstrip() + "..."
-            if lang == "el":
-                item_lines.append(f"{qty} x {name}" if qty > 1 else name)
-            else:
-                item_lines.append(f"{qty} x {name}" if qty > 1 else name)
+            item_lines.append(f"{qty} x {name}" if qty > 1 else name)
             if len(item_lines) >= max_items:
                 break
 
-    if lang == "el":
-        parts = []
-        if order_number:
-            parts.append(f"Ορίστε οι λεπτομέρειες για την παραγγελία {order_number}.")
-        else:
-            parts.append("Ορίστε οι λεπτομέρειες της παραγγελίας σας.")
-
-        if status == "completed":
-            parts.append("Η κατάσταση είναι ολοκληρωμένη.")
-        elif status == "cancelled":
-            parts.append("Η κατάσταση είναι ακυρωμένη.")
-        elif status:
-            parts.append(f"Η κατάσταση είναι {status}.")
-
-        if delivery_spoken:
-            parts.append(f"Η παράδοση είναι προγραμματισμένη για {delivery_spoken}.")
-
-        if amount:
-            whole, _, frac = amount.partition(".")
-            if frac:
-                parts.append(f"Το σύνολο είναι {int(whole)} ευρώ και {int(frac[:2]):02d} λεπτά.")
-            else:
-                parts.append(f"Το σύνολο είναι {int(whole)} ευρώ.")
-
-        if item_lines:
-            items_text = ", ".join(item_lines)
-            parts.append(f"Τα βασικά προϊόντα είναι {items_text}.")
-
-        parts.append("Θέλετε κάτι άλλο για αυτή την παραγγελία;")
-        summary = " ".join(parts)
+    parts = []
+    if order_number:
+        parts.append(f"Here are the details for order {order_number}.")
     else:
-        parts = []
-        if order_number:
-            parts.append(f"Here are the details for order {order_number}.")
+        parts.append("Here are your order details.")
+
+    if status == "completed":
+        parts.append("The status is completed.")
+    elif status == "cancelled":
+        parts.append("The status is cancelled.")
+    elif status:
+        parts.append(f"The status is {status}.")
+
+    delivery_total_parts: list[str] = []
+    if delivery_spoken:
+        delivery_total_parts.append(f"delivery is scheduled for {delivery_spoken}")
+
+    if amount:
+        whole, _, frac = amount.partition(".")
+        if frac:
+            delivery_total_parts.append(
+                f"the total is {int(whole)} euros and {int(frac[:2]):02d} cents"
+            )
         else:
-            parts.append("Here are your order details.")
+            delivery_total_parts.append(f"the total is {int(whole)} euros")
 
-        if status == "completed":
-            parts.append("The status is completed.")
-        elif status == "cancelled":
-            parts.append("The status is cancelled.")
-        elif status:
-            parts.append(f"The status is {status}.")
+    if delivery_total_parts:
+        parts.append("Also, " + ", and ".join(delivery_total_parts) + ".")
 
-        delivery_total_parts: list[str] = []
-        if delivery_spoken:
-            delivery_total_parts.append(f"delivery is scheduled for {delivery_spoken}")
+    if item_lines:
+        items_text = ", ".join(item_lines)
+        parts.append(f"The main items are {items_text}.")
 
-        if amount:
-            whole, _, frac = amount.partition(".")
-            if frac:
-                delivery_total_parts.append(
-                    f"the total is {int(whole)} euros and {int(frac[:2]):02d} cents"
-                )
-            else:
-                delivery_total_parts.append(f"the total is {int(whole)} euros")
-
-        if delivery_total_parts:
-            parts.append("Also, " + ", and ".join(delivery_total_parts) + ".")
-
-        if item_lines:
-            items_text = ", ".join(item_lines)
-            parts.append(f"The main items are {items_text}.")
-
-        parts.append("Would you like help with anything else on this order?")
-        summary = " ".join(parts)
+    parts.append("Would you like help with anything else on this order?")
+    summary = " ".join(parts)
 
     return re.sub(r"\s{2,}", " ", summary).strip()
 
@@ -3193,7 +3155,7 @@ async def entrypoint(ctx: JobContext):
         if any(p in lowered for p in el_phrases):
             return True
 
-        yes_tokens = {"yes", "yeah", "yep", "sure", "ok", "okay", "ναι", "εντάξει"}
+        yes_tokens = {"yes", "yeah", "yep", "sure", "ok", "okay"}
         if lowered in yes_tokens:
             prompted_at = float(_current_session.get("last_more_details_prompt_at") or 0.0)
             if prompted_at and (time.time() - prompted_at) <= 25.0:
@@ -3264,16 +3226,16 @@ async def entrypoint(ctx: JobContext):
             return False
             
         # Stiffen detection: Check for clear negative markers
-        has_negative = bool(re.search(r"(no|don t|do not|doesn t|didn t|δεν|όχι|οχι)", lowered))
-        has_order_keyword = bool(re.search(r"(order|number|παραγγελ|αριθμ)", lowered))
-        has_have_keyword = bool(re.search(r"(have|έχω|εχω|βρήκα|βρηκα)", lowered))
+        has_negative = bool(re.search(r"(no|don t|do not|doesn t|didn t)", lowered))
+        has_order_keyword = bool(re.search(r"(order|number)", lowered))
+        has_have_keyword = bool(re.search(r"(have|found)", lowered))
         
         # Guard: If they say "I have it" (positive), definitely not a "no"
         if has_have_keyword and not has_negative:
             return False
             
         # Must have a negative combined with either "order" or "have"
-        return (has_negative and (has_order_keyword or has_have_keyword)) or (lowered in {"no", "όχι", "οχι"})
+        return (has_negative and (has_order_keyword or has_have_keyword)) or (lowered == "no")
 
     def _mentions_missing_confirmation_email(text: str) -> bool:
         """
@@ -3310,11 +3272,11 @@ async def entrypoint(ctx: JobContext):
         if _mentions_no_order_number(lowered):
             return "phone"
 
-        order_hint = bool(re.search(r"(order|παραγγελ|αριθμ.*παραγγελ)", lowered))
-        phone_hint = bool(re.search(r"(phone|mobile|τηλέφων|τηλεφων|κινητ)", lowered))
+        order_hint = bool(re.search(r"(order|number.*order)", lowered))
+        phone_hint = bool(re.search(r"(phone|mobile)", lowered))
 
-        asked_for_order = bool(re.search(r"(order number|παραγγελ|αριθμ.*παραγγελ)", last_lowered))
-        asked_for_phone = bool(re.search(r"(phone|mobile|τηλέφων|τηλεφων|κινητ)", last_lowered))
+        asked_for_order = bool(re.search(r"(order number)", last_lowered))
+        asked_for_phone = bool(re.search(r"(phone|mobile)", last_lowered))
 
         if force_phone_context and not order_hint:
             if phone_hint or asked_for_phone or bool(_extract_digit_parts(lowered)):
@@ -3356,10 +3318,6 @@ async def entrypoint(ctx: JobContext):
             r"is this (?:your )?(?:phone|mobile)(?: number)? correct",
             r"did i get your (?:phone|mobile)(?: number)? right",
             r"can you confirm (?:this|your) (?:phone|mobile)(?: number)?",
-            r"(?:επιβεβαι|επιβεβαιώ).*(?:κινητ|τηλέφων)",
-            r"(?:τηλέφων|κινητ).*(?:σωστό|σωστα)",
-            r"ξανα πειτε το κινητο",
-            r"ξανά πείτε το κινητό",
         )
         return any(re.search(pattern, lowered, flags=re.IGNORECASE) for pattern in strict_patterns)
 
@@ -3398,7 +3356,7 @@ async def entrypoint(ctx: JobContext):
             return False
         return bool(
             re.search(
-                r"(repeat|say it again|digit by digit|not clear|couldn t hear|didn t hear|did not hear|could not hear|δεν .*άκουσα|δεν .*κατάλαβ|επαναλάβ|ξανά|ψηφίο προς ψηφίο)",
+                r"(repeat|say it again|digit by digit|not clear|couldn t hear|didn t hear|did not hear|could not hear)",
                 lowered,
                 flags=re.IGNORECASE,
             )
@@ -3424,7 +3382,7 @@ async def entrypoint(ctx: JobContext):
 
         # 2. Look for digits near keywords
         windows = []
-        for match in re.finditer(r"(order(?:\s+number)?|παραγγε\w*|αριθμ\w*)", normalized, flags=re.IGNORECASE):
+        for match in re.finditer(r"(order(?:\s+number)?)", normalized, flags=re.IGNORECASE):
             windows.append(normalized[match.start(): match.start() + 96])
 
         if windows:
@@ -3446,13 +3404,13 @@ async def entrypoint(ctx: JobContext):
             return False
 
         normalized_user = _normalize_switch_text(user_text)
-        if re.search(r"(order|παραγγελ|αριθμ)", normalized_user, flags=re.IGNORECASE):
+        if re.search(r"(order|number)", normalized_user, flags=re.IGNORECASE):
             return True
 
         last_agent = _normalize_switch_text(str(_current_session.get("last_agent_text") or ""))
         return bool(
             re.search(
-                r"(order number|number from your confirmation|παραγγελ|αριθμ)",
+                r"(order number|number from your confirmation)",
                 last_agent,
                 flags=re.IGNORECASE,
             )
@@ -3666,25 +3624,10 @@ async def entrypoint(ctx: JobContext):
                 "completed": "Your order is completed.",
                 "cancelled": "Your order was cancelled.",
             },
-            "el": {
-                "processing": "Η παραγγελία σας ετοιμάζεται.",
-                "in_transit": "Η παραγγελία σας είναι καθ οδόν.",
-                "delivered": "Η παραγγελία σας παραδόθηκε.",
-                "completed": "Η παραγγελία σας ολοκληρώθηκε.",
-                "cancelled": "Η παραγγελία σας ακυρώθηκε.",
-            },
         }
         return sentences.get(language, sentences["en"]).get(status, "")
 
     def _status_keywords(language: str) -> dict:
-        if language == "el":
-            return {
-                "processing": ["ετοιμάζεται"],
-                "in_transit": ["καθ οδόν", "σε μεταφορά", "στο δρόμο"],
-                "delivered": ["παραδόθηκε"],
-                "completed": ["ολοκληρώθηκε"],
-                "cancelled": ["ακυρώθηκε", "ακυρωθηκε"],
-            }
         return {
             "processing": ["processing", "being processed", "being prepared", "preparing"],
             "in_transit": ["on the way", "in transit", "out for delivery"],
@@ -4617,20 +4560,12 @@ async def entrypoint(ctx: JobContext):
             _current_session["forced_response_suppress_llm_until"] = time.time() + suppress_s
             spoken_phone = _speak_digits(normalized_phone)
 
-            if False:
-                if reprompt:
-                    confirmation_text = (
-                        f"Για να συνεχίσουμε, απαντήστε μόνο ναι ή όχι. Ο αριθμός είναι {spoken_phone}. Είναι σωστός;"
-                    )
-                else:
-                    confirmation_text = f"Για επιβεβαίωση, ο αριθμός τηλεφώνου σας είναι {spoken_phone}. Είναι σωστός;"
+            if reprompt:
+                confirmation_text = (
+                    f"To continue, please answer only yes or no. The number is {spoken_phone}. Is that correct?"
+                )
             else:
-                if reprompt:
-                    confirmation_text = (
-                        f"To continue, please answer only yes or no. The number is {spoken_phone}. Is that correct?"
-                    )
-                else:
-                    confirmation_text = f"Just to confirm, your phone number is {spoken_phone}. Is that correct?"
+                confirmation_text = f"Just to confirm, your phone number is {spoken_phone}. Is that correct?"
 
             room_log(
                 "PHONE_CONFIRMATION_PROMPT",
@@ -5083,10 +5018,7 @@ async def entrypoint(ctx: JobContext):
                         room_log("PHONE_PARTIAL_PROMPT_SKIPPED", reason="potential_noise", turn_digits=raw_digits)
                         return False
 
-                    if False:
-                        msg = "Συνεχίστε με τα υπόλοιπα ψηφία του αριθμού, παρακαλώ."
-                    else:
-                        msg = "I’m listening. Please continue with the remaining digits of the phone number."
+                    msg = "I’m listening. Please continue with the remaining digits of the phone number."
                     _schedule_manual_prompt(
                         msg,
                         reason="phone_digits_partial",
@@ -5098,16 +5030,10 @@ async def entrypoint(ctx: JobContext):
                 _reset_phone_digit_buffer("invalid_complete_phone")
                 _current_session["pending_phone_candidate"] = None
                 _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="invalid_complete_phone")
-                if False:
-                    msg = (
-                        "Αυτό δεν φαίνεται να είναι πλήρης αριθμός τηλεφώνου. "
-                        f"Παρακαλώ πείτε ολόκληρο τον αριθμό ξανά, με τουλάχιστον {min_digits} ψηφία."
-                    )
-                else:
-                    msg = (
-                        "That does not look like a complete phone number. "
-                        f"Please repeat the full number, at least {min_digits} digits."
-                    )
+                msg = (
+                    "That does not look like a complete phone number. "
+                    f"Please repeat the full number, at least {min_digits} digits."
+                )
                 _schedule_manual_prompt(msg, reason="invalid_complete_phone")
                 room_log("INVALID_OR_PARTIAL_PHONE_REJECTED", digits=combined_digits, turn_id=current_turn_id)
                 return True
@@ -5142,10 +5068,7 @@ async def entrypoint(ctx: JobContext):
                 _current_session["pending_phone_candidate"] = None
                 _reset_phone_digit_buffer("phone_confirmation_rejected")
                 _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="phone_confirmation_rejected")
-                if False:
-                    msg = "Εντάξει. Πείτε ξανά τον αριθμό τηλεφώνου σας."
-                else:
-                    msg = "Okay. Please repeat your phone number again."
+                msg = "Okay. Please repeat your phone number again."
                 _schedule_manual_prompt(msg, reason="phone_confirmation_rejected")
                 return True
 
@@ -5158,28 +5081,10 @@ async def entrypoint(ctx: JobContext):
                     max_value=15,
                 )
                 if len(combined_digits) < min_digits:
-                    if False:
-                        msg = "Συνεχίστε με τα υπόλοιπα ψηφία του αριθμού, παρακαλώ."
-                    else:
-                        msg = "I’m listening. Please continue with the remaining digits of the phone number."
-                    _schedule_manual_prompt(
-                        msg,
-                        reason="phone_digits_partial",
-                        suppress_s=6.0,
-                        delay_s=1.2,
+                    msg = (
+                        "That does not look like a complete phone number. "
+                        f"Please repeat the full number, at least {min_digits} digits."
                     )
-                else:
-                    _reset_phone_digit_buffer("invalid_complete_phone")
-                    if False:
-                        msg = (
-                            "Αυτό δεν φαίνεται να είναι πλήρης αριθμός τηλεφώνου. "
-                            f"Παρακαλώ πείτε ολόκληρο τον αριθμό ξανά, με τουλάχιστον {min_digits} ψηφία."
-                        )
-                    else:
-                        msg = (
-                            "That does not look like a complete phone number. "
-                            f"Please repeat the full number, at least {min_digits} digits."
-                        )
                     _schedule_manual_prompt(msg, reason="invalid_complete_phone")
                 return True
 
@@ -5207,10 +5112,7 @@ async def entrypoint(ctx: JobContext):
                     _force_lookup_by_phone(current_turn_id, pending_phone, "non_confirmation_reply_direct")
                 )
                 return True
-            if False:
-                msg = "Παρακαλώ πείτε ξανά τον αριθμό τηλεφώνου σας."
-            else:
-                msg = "Please say your phone number again."
+            msg = "Please say your phone number again."
             _schedule_manual_prompt(msg, reason="awaiting_phone_recovery")
             return True
 
@@ -5407,16 +5309,10 @@ async def entrypoint(ctx: JobContext):
                         _current_session["forced_response_manual_say_active"] = False
                         return
                     try:
-                        if False:
-                            msg = (
-                                f"Ο αριθμός παραγγελίας πρέπει να έχει από {min_d} έως {max_d} ψηφία. "
-                                f"Μπορείτε να τον πείτε ξανά;"
-                            )
-                        else:
-                            msg = (
-                                f"The order number should be between {min_d} and {max_d} digits. "
-                                f"Could you repeat it again?"
-                            )
+                        msg = (
+                            f"The order number should be between {min_d} and {max_d} digits. "
+                            f"Could you repeat it again?"
+                        )
                         await send_agent_transcript(msg)
                         agent.chat_ctx.append(role="assistant", text=msg)
                         await live_agent.say(msg, allow_interruptions=True)
@@ -5476,16 +5372,10 @@ async def entrypoint(ctx: JobContext):
                     _current_session["forced_response_manual_say_active"] = False
                     return
                 try:
-                    if False:
-                        msg = (
-                            "Εντάξει. Μπορείτε να μου δώσετε τον αριθμό τηλεφώνου "
-                            "που χρησιμοποιήσατε για την παραγγελία;"
-                        )
-                    else:
-                        msg = (
-                            "No problem. Please give me the phone number used for the order, "
-                            "one more time?"
-                        )
+                    msg = (
+                        "No problem. Please give me the phone number used for the order, "
+                        "one more time?"
+                    )
                     prompt_key = f"{current_turn_id}:ask_phone_after_no_order_number:{msg}"
                     if (
                         int(_current_session.get("last_manual_prompt_turn_id") or 0) == current_turn_id
