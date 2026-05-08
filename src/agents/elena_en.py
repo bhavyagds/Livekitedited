@@ -378,9 +378,9 @@ def create_stt(is_sip_call: bool = False):
         # keywords: boost confidence for individual digit words that STT often mishears
         # (e.g. "nine" → "bye", "five" → "fine", "four" → "for").
         _digit_keywords = [
-            ("zero", 1.0), ("one", 1.0), ("two", 1.0), ("three", 1.0),
-            ("four", 1.0), ("five", 1.0), ("six", 1.0), ("seven", 1.0),
-            ("eight", 1.0), ("nine", 1.0),
+            ("zero", 5.0), ("one", 5.0), ("two", 5.0), ("three", 5.0),
+            ("four", 5.0), ("five", 5.0), ("six", 5.0), ("seven", 5.0),
+            ("eight", 5.0), ("nine", 5.0),
         ]
         return deepgram.STT(
             model=model,
@@ -389,6 +389,7 @@ def create_stt(is_sip_call: bool = False):
             interim_results=True,
             numerals=True,
             smart_format=True,
+            punctuate=True,
             keywords=_digit_keywords,
         )
     model = str(get_agent_setting("openai_stt_model", "whisper-1") or "whisper-1")
@@ -799,6 +800,20 @@ async def entrypoint(ctx: JobContext):
         preemptive_synthesis=_as_bool(get_agent_setting("preemptive_synthesis", False), default=False),
         before_llm_cb=_before_llm_cb,
     )
+
+    # Stream interim user transcripts to the UI for realtime feel.
+    # Access the underlying human input handler to catch words before they are finalized.
+    human_input = getattr(agent, "_human_input", None)
+    if human_input:
+        @human_input.on("interim_transcript")
+        def _on_interim_transcript(ev):
+            try:
+                text = ev.alternatives[0].text
+            except Exception:
+                text = None
+            if text:
+                asyncio.create_task(send_user_transcript(text, interim=True))
+
     room_log(
         "TURN_CONFIG",
         configured_endpointing_delay=configured_endpointing_delay,
@@ -1094,6 +1109,10 @@ async def entrypoint(ctx: JobContext):
             r"\b(bye|goodbye|good bye|good night|see you|take care|thanks? bye|that.?s all|no thank|nothing else)",
             user_text.lower()
         ))
+        # Ignore farewell if user is providing data (digits)
+        if farewell_intent and len(re.findall(r"\d", user_text)) >= 3:
+            farewell_intent = False
+
         if farewell_intent:
             room_log("FAREWELL_DETECTED", text=user_text)
             # Let the LLM respond naturally, then end the session after it finishes speaking.

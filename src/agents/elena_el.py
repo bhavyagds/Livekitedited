@@ -377,9 +377,9 @@ def create_stt(is_sip_call: bool = False):
         # smart_format=True (SDK default): handles phone/date formatting automatically.
         # keywords: boost confidence for individual digit words that STT often mishears
         _digit_keywords = [
-            ("μηδέν", 1.0), ("ένα", 1.0), ("δύο", 1.0), ("τρία", 1.0),
-            ("τέσσερα", 1.0), ("πέντε", 1.0), ("έξι", 1.0), ("επτά", 1.0),
-            ("οκτώ", 1.0), ("εννέα", 1.0),
+            ("μηδέν", 5.0), ("ένα", 5.0), ("δύο", 5.0), ("τρία", 5.0),
+            ("τέσσερα", 5.0), ("πέντε", 5.0), ("έξι", 5.0), ("επτά", 5.0),
+            ("οκτώ", 5.0), ("εννέα", 5.0),
         ]
         return deepgram.STT(
             model=model,
@@ -388,6 +388,7 @@ def create_stt(is_sip_call: bool = False):
             interim_results=True,
             numerals=True,
             smart_format=True,
+            punctuate=True,
             keywords=_digit_keywords,
         )
     model = str(get_agent_setting("openai_stt_model", "whisper-1") or "whisper-1")
@@ -798,6 +799,20 @@ async def entrypoint(ctx: JobContext):
         preemptive_synthesis=_as_bool(get_agent_setting("preemptive_synthesis", False), default=False),
         before_llm_cb=_before_llm_cb,
     )
+
+    # Stream interim user transcripts to the UI for realtime feel.
+    # Access the underlying human input handler to catch words before they are finalized.
+    human_input = getattr(agent, "_human_input", None)
+    if human_input:
+        @human_input.on("interim_transcript")
+        def _on_interim_transcript(ev):
+            try:
+                text = ev.alternatives[0].text
+            except Exception:
+                text = None
+            if text:
+                asyncio.create_task(send_user_transcript(text, interim=True))
+
     room_log(
         "TURN_CONFIG",
         configured_endpointing_delay=configured_endpointing_delay,
@@ -1082,9 +1097,13 @@ async def entrypoint(ctx: JobContext):
 
         # 5) Detect farewell intent
         farewell_intent = bool(re.search(
-            r"\b(γεια|αντίο|καληνύχτα|τα λέμε|ευχαριστώ γεια|αυτά μόνο|τίποτα άλλο|όχι ευχαριστώ|γεια σας)\b",
+            r"\b(αντίο|καληνύχτα|ευχαριστώ γεια|αυτά μόνο|τίποτα άλλο|όχι ευχαριστώ|κλείσε το|τελειώσαμε)\b",
             user_text.lower()
         ))
+        # Ignore farewell if user is providing data (digits)
+        if farewell_intent and len(re.findall(r"\d", user_text)) >= 3:
+            farewell_intent = False
+
         if farewell_intent:
             room_log("FAREWELL_DETECTED", text=user_text)
             async def _delayed_end():
