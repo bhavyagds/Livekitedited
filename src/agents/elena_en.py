@@ -12,6 +12,7 @@ import json
 import random
 import threading
 import unicodedata
+from difflib import SequenceMatcher
 from datetime import datetime
 from typing import Annotated, Optional
 
@@ -613,6 +614,8 @@ _current_session: dict = {
     "ticket_reference": None,
     "support_flow_state": FLOW_IDLE,
     "support_issue": None,
+    "memory_items": [],
+    "last_memory_match_id": None,
 }
 
 
@@ -1078,6 +1081,7 @@ def _reset_support_session_state(reason: str = "") -> None:
     _current_session["forced_response_suppress_llm_until"] = 0.0
     _current_session["last_manual_prompt_turn_id"] = 0
     _current_session["last_manual_prompt_key"] = ""
+    _current_session["last_memory_match_id"] = None
 
     _clear_pending_lookup_wait_phrase("support_session_reset")
 
@@ -3064,6 +3068,17 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.warning(f"Cache task exception (settings): {e}")
 
+    # Load structured active memories for semantic matching (runtime, per call).
+    try:
+        from src.services.database import get_database_service
+        db = get_database_service()
+        memory_items = await db.get_memory_items(active_only=True)
+        _current_session["memory_items"] = memory_items or []
+        room_log("MEMORY_ITEMS_LOADED", count=len(_current_session["memory_items"]))
+    except Exception as e:
+        _current_session["memory_items"] = []
+        logger.warning(f"Failed to load memory items for semantic matching: {e}")
+
     # Initialize runtime language (per-call) from DB defaults.
     set_runtime_language(None)
     base_language = 'en'
@@ -3078,6 +3093,75 @@ async def entrypoint(ctx: JobContext):
         lowered = re.sub(r"[^\w\s]", " ", lowered, flags=re.UNICODE)
         lowered = re.sub(r"\s+", " ", lowered).strip()
         return lowered
+
+    def _semantic_tokens(text: str) -> set[str]:
+        normalized = _normalize_switch_text(text)
+        if not normalized:
+            return set()
+        return {
+            token for token in normalized.split()
+            if len(token) > 2 and token not in {"the", "and", "for", "with", "that", "this", "from", "have"}
+        }
+
+    def _score_memory_match(user_text: str, scenario_text: str, context_text: str = "") -> float:
+        """Lightweight semantic score (token overlap + fuzzy ratio + context hint)."""
+        user_norm = _normalize_switch_text(user_text)
+        scenario_norm = _normalize_switch_text(scenario_text)
+        if not user_norm or not scenario_norm:
+            return 0.0
+
+        user_tokens = _semantic_tokens(user_norm)
+        scenario_tokens = _semantic_tokens(scenario_norm)
+
+        overlap = 0.0
+        if user_tokens and scenario_tokens:
+            inter = user_tokens.intersection(scenario_tokens)
+            union = user_tokens.union(scenario_tokens)
+            overlap = len(inter) / max(1, len(union))
+
+        fuzzy = SequenceMatcher(None, user_norm, scenario_norm).ratio()
+
+        context_boost = 0.0
+        if context_text:
+            ctx_norm = _normalize_switch_text(context_text)
+            if ctx_norm and (
+                any(tok in ctx_norm for tok in scenario_tokens)
+                or any(tok in scenario_norm for tok in _semantic_tokens(ctx_norm))
+            ):
+                context_boost = 0.08
+
+        # Weighted blend tuned for intent-style matching.
+        return min(1.0, (0.6 * overlap) + (0.4 * fuzzy) + context_boost)
+
+    def _find_best_memory_match(user_text: str, context_text: str = "") -> Optional[dict]:
+        """Return best active memory item by semantic score."""
+        items = _current_session.get("memory_items") or []
+        if not isinstance(items, list) or not items:
+            return None
+
+        best_item = None
+        best_score = 0.0
+        for item in items:
+            question = str(item.get("question") or "").strip()
+            answer = str(item.get("answer") or "").strip()
+            if not question or not answer:
+                continue
+            score = _score_memory_match(user_text, question, context_text)
+            if score > best_score:
+                best_score = score
+                best_item = item
+
+        threshold = _as_float(
+            get_agent_setting("memory_semantic_match_threshold", 0.42),
+            0.42,
+            min_value=0.2,
+            max_value=0.9,
+        )
+        if best_item and best_score >= threshold:
+            match = dict(best_item)
+            match["_score"] = round(best_score, 4)
+            return match
+        return None
 
     def _explicit_more_order_details_request(text: str) -> bool:
         """Detect when caller explicitly asks for full order details."""
@@ -3678,6 +3762,19 @@ async def entrypoint(ctx: JobContext):
             )
         )
 
+    def _is_same_forced_response(candidate_text: str, forced_text: str) -> bool:
+        """Strict comparison so extra KB/LLM tails do not pass as the forced response."""
+        candidate_norm = _normalize_switch_text(candidate_text)
+        forced_norm = _normalize_switch_text(forced_text)
+        if not candidate_norm or not forced_norm:
+            return False
+        if candidate_norm == forced_norm:
+            return True
+        # Allow tiny punctuation/article variations, but reject appended extra content.
+        similarity = SequenceMatcher(None, candidate_norm, forced_norm).ratio()
+        length_delta = abs(len(candidate_norm) - len(forced_norm))
+        return similarity >= 0.96 and length_delta <= 12
+
     def _should_suppress_tts_text(candidate_text: str) -> tuple[bool, str]:
         """Shared suppression guard for both string and streaming TTS paths."""
         text_value = (candidate_text or "").strip()
@@ -3688,11 +3785,22 @@ async def entrypoint(ctx: JobContext):
         if _is_silence_prompt_text(text_value):
             return False, ""
 
-        if not _current_session.get("forced_response_manual_say_active"):
-            suppress_until = float(_current_session.get("forced_response_suppress_llm_until") or 0.0)
-            suppress_turn = int(_current_session.get("forced_response_spoken_turn_id") or 0)
-            latest_turn = int(_current_session.get("last_user_turn_id") or 0)
-            if suppress_until and time.time() <= suppress_until and suppress_turn == latest_turn:
+        # Memory/Manual Override Guard:
+        # If a manual response is active or pending, strictly suppress any other LLM text.
+        manual_active = bool(_current_session.get("forced_response_manual_say_active"))
+        suppress_until = float(_current_session.get("forced_response_suppress_llm_until") or 0.0)
+        suppress_turn = int(_current_session.get("forced_response_spoken_turn_id") or 0)
+        latest_turn = int(_current_session.get("last_user_turn_id") or 0)
+
+        if manual_active or (suppress_until and time.time() <= suppress_until and suppress_turn == latest_turn):
+            forced_text = str(_current_session.get("forced_response_spoken_text") or "").strip()
+            if forced_text:
+                same_as_forced = _is_same_forced_response(text_value, forced_text)
+                if not same_as_forced:
+                    room_log("LLM_STREAM_CANCELLED", reason="forced_manual_say_active", text=_truncate(text_value))
+                    return True, "forced_response_strict_guard"
+            else:
+                # If we are in a suppression window but don't have the text yet, suppress anyway
                 return True, "forced_response_mutual_exclusion"
 
         # Prevent repeated "please provide phone number" variants in the same user turn
@@ -3894,7 +4002,18 @@ async def entrypoint(ctx: JobContext):
                 async def _normalized_stream(stream):
                     raw_buffer = ""
                     normalized_buffer = ""
+                    stream_started_at = time.time()
                     async for chunk in stream:
+                        # If a memory match or other override is active for this turn, wait a tiny bit
+                        # on the very first chunk to let the on_user_speech_committed task set the markers.
+                        if not raw_buffer and _current_session.get("memory_match_active"):
+                            # Wait up to 200ms for memory override to take over
+                            wait_start = time.time()
+                            while time.time() - wait_start < 0.200:
+                                if _current_session.get("forced_response_manual_say_active"):
+                                    break
+                                await asyncio.sleep(0.02)
+                        
                         if _current_session.get("forced_response_manual_say_active"):
                             room_log("LLM_STREAM_CANCELLED", reason="manual_response_active", turn_id=int(_current_session.get("last_user_turn_id") or 0))
                             return
@@ -3964,6 +4083,17 @@ async def entrypoint(ctx: JobContext):
         get_agent_setting("preemptive_synthesis", True),
         default=True,
     )
+    # Important for memory-first behavior:
+    # with preemptive synthesis enabled, the LLM can start speaking before
+    # user_speech_committed runs memory override logic, causing KB text to leak first.
+    # Force it off when hard memory override is enabled so only memory response is spoken.
+    memory_hard_override_enabled = _as_bool(
+        get_agent_setting("memory_hard_override_enabled", True),
+        default=True,
+    )
+    if memory_hard_override_enabled and preemptive_synthesis:
+        preemptive_synthesis = False
+        room_log("PREEMPTIVE_SYNTHESIS_FORCED_OFF", reason="memory_hard_override_enabled")
     logger.info("TTS preemptive_synthesis=%s", preemptive_synthesis)
     logger.info(f"⏱️ Creating agent ({time.time() - startup_time:.1f}s)")
     agent = VoicePipelineAgent(
@@ -4523,6 +4653,68 @@ async def entrypoint(ctx: JobContext):
         finally:
             _current_session["forced_response_manual_say_active"] = False
 
+    async def _speak_memory_override(
+        turn_id: int,
+        response_text: str,
+        *,
+        memory_id: str = "",
+        score: float = 0.0,
+    ) -> None:
+        """Speak matched long-term memory response directly and suppress LLM for this turn."""
+        try:
+            if call_ended["value"] or _current_session.get("should_end"):
+                return
+            latest_turn = int(_current_session.get("last_user_turn_id") or 0)
+            if latest_turn != turn_id:
+                room_log(
+                    "MEMORY_HARD_OVERRIDE_SKIPPED",
+                    reason="newer_turn",
+                    turn_id=turn_id,
+                    latest_turn=latest_turn,
+                    memory_id=memory_id,
+                )
+                return
+
+            cleaned = _strip_markup_for_output(response_text or "").strip()
+            if not cleaned:
+                return
+
+            # Values are normally pre-armed at selection time (same event-loop tick)
+            # to avoid LLM stream leakage. Keep this as a defensive fallback.
+            suppress_s = _as_float(
+                get_agent_setting("memory_hard_override_suppress_seconds", 20.0),
+                20.0,
+                min_value=8.0,
+                max_value=90.0,
+            )
+            if int(_current_session.get("forced_response_spoken_turn_id") or 0) != turn_id:
+                _current_session["forced_response_spoken_turn_id"] = turn_id
+            _current_session["forced_response_suppress_llm_until"] = max(
+                float(_current_session.get("forced_response_suppress_llm_until") or 0.0),
+                time.time() + suppress_s,
+            )
+            _current_session["forced_response_manual_say_active"] = True
+            _current_session["forced_response_spoken_text"] = cleaned
+
+            room_log(
+                "MEMORY_HARD_OVERRIDE_SPEAKING",
+                turn_id=turn_id,
+                memory_id=memory_id,
+                score=score,
+                text=_truncate(cleaned, 220),
+            )
+            # Manual transcript send for immediate UI feedback
+            _current_session["forced_response_transcript_sent_at"] = time.time()
+            await send_agent_transcript(cleaned)
+            agent.chat_ctx.append(role="assistant", text=cleaned)
+
+            await agent.say(cleaned, allow_interruptions=True)
+            mark_agent_speaking()
+            _snooze_silence_prompts(8.0, reason="memory_hard_override_spoken")
+            room_log("MEMORY_HARD_OVERRIDE_SPOKEN", turn_id=turn_id, memory_id=memory_id, score=score)
+        finally:
+            _current_session["forced_response_manual_say_active"] = False
+
     @agent.on("user_speech_committed")
     def on_user_speech_committed(message):
         """Send user transcript to frontend and check for abuse."""
@@ -4544,10 +4736,98 @@ async def entrypoint(ctx: JobContext):
         current_turn_id = int(_current_session.get("last_user_turn_id") or 0) + 1
         _current_session["last_user_turn_id"] = current_turn_id
         
+        # Reset memory priority markers for new turn
+        _current_session["memory_match_active"] = True # Default to True to allow delay in TTS callback
+        
         # Determine initial flow state
         flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
         is_affirmative = _is_affirmative_utterance(user_text)
         is_negative = _is_negative_utterance(user_text)
+
+        # Memory-first semantic routing:
+        # If a memory scenario semantically matches, inject a hard-priority system hint.
+        # Skip during deterministic lookup flows to avoid conflicting with active order/phone collection.
+        memory_match = None
+        if flow_state not in {
+            FLOW_AWAITING_ORDER_NUMBER,
+            FLOW_CHECKING_ORDER_NUMBER,
+            FLOW_AWAITING_PHONE_NUMBER,
+            FLOW_AWAITING_PHONE_CONFIRMATION,
+            FLOW_CHECKING_PHONE_NUMBER,
+        }:
+            memory_match = _find_best_memory_match(
+                user_text,
+                context_text=str(_current_session.get("last_agent_text") or ""),
+            )
+            if not memory_match:
+                _current_session["memory_match_active"] = False # No match, allow LLM to stream immediately
+            
+            if memory_match:
+                memory_id = str(memory_match.get("id") or "")
+                memory_question = str(memory_match.get("question") or "").strip()
+                memory_answer = str(memory_match.get("answer") or "").strip()
+                memory_comment = str(memory_match.get("comment") or memory_match.get("comments") or "").strip()
+                _current_session["last_memory_match_id"] = memory_id or None
+                room_log(
+                    "MEMORY_MATCH_SELECTED",
+                    memory_id=memory_id,
+                    score=memory_match.get("_score"),
+                    scenario=_truncate(memory_question, 180),
+                )
+                agent.chat_ctx.append(
+                    role="system",
+                    text=(
+                        "MEMORY PRIORITY OVERRIDE (SEMANTIC):\n"
+                        "- The user message matches a long-term memory scenario by intent.\n"
+                        "- Use the memory response as your PRIMARY reply for this turn.\n"
+                        f"- Matched scenario: \"{memory_question}\"\n"
+                        f"- Required response baseline: \"{memory_answer}\"\n"
+                        + (f"- Extra guidance: {memory_comment}\n" if memory_comment else "")
+                        + "- Keep your wording aligned with that memory response before anything else."
+                    ),
+                )
+                hard_override_enabled = _as_bool(
+                    get_agent_setting("memory_hard_override_enabled", True),
+                    default=True,
+                )
+                hard_min_score = _as_float(
+                    get_agent_setting("memory_hard_override_min_score", 0.58),
+                    0.58,
+                    min_value=0.2,
+                    max_value=0.95,
+                )
+                match_score = float(memory_match.get("_score") or 0.0)
+                if hard_override_enabled and memory_answer and match_score >= hard_min_score:
+                    # Pre-arm suppression immediately (before scheduling async say)
+                    # so LLM streaming text cannot leak into spoken audio first.
+                    suppress_s = _as_float(
+                        get_agent_setting("memory_hard_override_suppress_seconds", 20.0),
+                        20.0,
+                        min_value=8.0,
+                        max_value=90.0,
+                    )
+                    _current_session["forced_response_spoken_turn_id"] = current_turn_id
+                    _current_session["forced_response_suppress_llm_until"] = time.time() + suppress_s
+                    _current_session["forced_response_manual_say_active"] = True
+                    _current_session["forced_response_spoken_text"] = memory_answer
+                    room_log(
+                        "MEMORY_HARD_OVERRIDE_SELECTED",
+                        turn_id=current_turn_id,
+                        memory_id=memory_id,
+                        score=match_score,
+                    )
+                    asyncio.create_task(
+                        _speak_memory_override(
+                            current_turn_id,
+                            memory_answer,
+                            memory_id=memory_id,
+                            score=match_score,
+                        )
+                    )
+                    _current_session["memory_match_active"] = False
+                    return
+        else:
+            _current_session["memory_match_active"] = False # Deterministic flow, no memory match delay
 
         # --- Early Intent/Mode Inference ---
         # We infer the number mode early to handle explicit requests to switch between 
@@ -4727,6 +5007,7 @@ async def entrypoint(ctx: JobContext):
                 if bool(_current_session.get("phone_lookup_inflight")):
                     room_log("PHONE_FLOW_TURN_IGNORED", reason="lookup_already_running", turn_id=current_turn_id)
                     return True
+
 
                 pending_lookup_phone = str(_current_session.get("lookup_pending_order") or "").strip()
                 recovered_phone = (
@@ -5581,16 +5862,30 @@ async def entrypoint(ctx: JobContext):
                 if suppress_commit:
                     # Keep the deterministic forced-response summary in transcript even inside suppression windows.
                     expected_forced_response_text = str(_current_session.get("forced_response_spoken_text") or "")
-                    expected_norm = _normalize_switch_text(expected_forced_response_text)
-                    candidate_norm = _normalize_switch_text(display_text or text)
-                    same_as_forced_response = bool(
-                        expected_norm
-                        and candidate_norm
-                        and (
-                            candidate_norm == expected_norm
-                            or candidate_norm in expected_norm
-                            or expected_norm in candidate_norm
+                    forced_transcript_sent_at = float(_current_session.get("forced_response_transcript_sent_at") or 0.0)
+                    if expected_forced_response_text and forced_transcript_sent_at:
+                        expected_norm = _normalize_switch_text(expected_forced_response_text)
+                        transcript_norm = _normalize_switch_text(display_text or text)
+                        manual_already_sent = bool(
+                            expected_norm
+                            and transcript_norm
+                            and (
+                                transcript_norm == expected_norm
+                                or transcript_norm in expected_norm
+                                or expected_norm in transcript_norm
+                            )
                         )
+                        if manual_already_sent and (time.time() - forced_transcript_sent_at) <= 20.0:
+                            room_log(
+                                "AGENT_TRANSCRIPT_DUPLICATE_SKIPPED",
+                                reason="manual_transcript_already_sent",
+                                text=_truncate(display_text or text),
+                            )
+                            _current_session["forced_response_transcript_sent_at"] = 0.0
+                            return
+                    same_as_forced_response = _is_same_forced_response(
+                        display_text or text,
+                        expected_forced_response_text,
                     )
                     # Also allow core lookup outcomes and number-collection prompts through transcript,
                     # even during forced-response windows, to avoid "spoken but missing in transcript".
