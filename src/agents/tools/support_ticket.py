@@ -11,6 +11,7 @@ from datetime import datetime
 from livekit.agents import llm
 
 from src.services.clickup import clickup_service
+from src.agents.prompts import get_agent_language
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +193,9 @@ async def create_support_ticket(
     if errors:
         error_msg = ", ".join(errors)
         logger.warning(f"Ticket validation failed: {error_msg}")
+        agent_lang = get_agent_language()
+        if agent_lang == "el":
+            return "Δεν μπορώ να δημιουργήσω το αίτημα: " + error_msg + ". Παρακαλώ διορθώστε τα στοιχεία."
         return f"Cannot create ticket: {error_msg}. Please correct the information."
     
     # Create ticket in ClickUp
@@ -205,6 +209,12 @@ async def create_support_ticket(
     
     if not result["success"]:
         logger.error(f"Failed to create ClickUp ticket: {result.get('error')}")
+        agent_lang = get_agent_language()
+        if agent_lang == "el":
+            return (
+                "Συγγνώμη, δεν μπόρεσα να δημιουργήσω το αίτημα υποστήριξης. "
+                "Παρακαλώ δοκιμάστε ξανά ή επικοινωνήστε μαζί μας απευθείας μέσω email."
+            )
         return (
             "Sorry, I couldn't create the support ticket. "
             "Please try again or contact us directly via email."
@@ -213,6 +223,13 @@ async def create_support_ticket(
     ticket_id = result["task_id"]
     logger.info(f"Support ticket created in ClickUp: {ticket_id}")
     
+    agent_lang = get_agent_language()
+    if agent_lang == "el":
+        return (
+            f"Το αίτημα υποστήριξης δημιουργήθηκε με επιτυχία. "
+            f"Ο αριθμός αναφοράς σας είναι {ticket_id}. "
+            "Η ομάδα υποστήριξής μας θα επικοινωνήσει μαζί σας σύντομα στο τηλέφωνο ή το email που δώσατε."
+        )
     return (
         f"Your support ticket has been created successfully. "
         f"Your reference number is {ticket_id}. "
@@ -257,9 +274,15 @@ async def log_customer_query(
     
     if result["success"]:
         logger.info(f"Query logged in ClickUp: {result['task_id']}")
+        agent_lang = get_agent_language()
+        if agent_lang == "el":
+            return "Έγινε! Σημείωσα την ερώτησή σας και κάποιος από την ομάδα μας θα σας απαντήσει σύντομα."
         return "Got it! I've noted your question and someone from our team will get back to you shortly."
     else:
         logger.error(f"Failed to log query: {result.get('error')}")
+        agent_lang = get_agent_language()
+        if agent_lang == "el":
+            return "Κράτησα μια σημείωση - η ομάδα μας θα επικοινωνήσει μαζί σας σύντομα."
         return "I've made a note - our team will follow up with you soon."
 
 
@@ -282,32 +305,51 @@ async def validate_ticket_field(
     """
     field_name = field_name.lower()
     
+    agent_lang = get_agent_language()
     if field_name == "name":
         cleaned = field_value.strip()
         if len(cleaned) < 2:
+            if agent_lang == "el":
+                return "Το όνομα είναι πολύ μικρό. Μπορείτε να μου πείτε το πλήρες όνομά σας;"
             return "The name is too short. Can you give me your full name?"
+        if agent_lang == "el":
+            return f"Έχω το εξής: {cleaned}. Είναι σωστό;"
         return f"I have: {cleaned}. Is that correct?"
     
     elif field_name == "phone":
         cleaned = clean_phone_number(field_value)
         if not validate_phone(cleaned):
+            if agent_lang == "el":
+                return "Ο αριθμός τηλεφώνου δεν φαίνεται σωστός. Μπορείτε να τον επαναλάβετε;"
             return "The phone number doesn't seem correct. Can you repeat it?"
         # Format for reading back
+        if agent_lang == "el":
+            return f"Έχω τον αριθμό τηλεφώνου: {cleaned}. Είναι σωστό;"
         return f"I have phone number: {cleaned}. Is that correct?"
     
     elif field_name == "email":
         cleaned = clean_email(field_value)
         if not validate_email(cleaned):
+            if agent_lang == "el":
+                return "Η διεύθυνση email δεν φαίνεται σωστή. Μπορείτε να μου την πείτε γράμμα-γράμμα;"
             return "The email address doesn't seem correct. Can you spell it out?"
+        if agent_lang == "el":
+            return f"Έχω το email: {cleaned}. Είναι σωστό;"
         return f"I have email: {cleaned}. Is that correct?"
     
     elif field_name == "issue":
         cleaned = field_value.strip()
         if len(cleaned) < 10:
+            if agent_lang == "el":
+                return "Μπορείτε να μου δώσετε περισσότερες λεπτομέρειες για το πρόβλημα;"
             return "Can you give me more details about your issue?"
         # Summarize for confirmation
         summary = cleaned[:100] + "..." if len(cleaned) > 100 else cleaned
+        if agent_lang == "el":
+            return f"Κατάλαβα ότι το πρόβλημα είναι: {summary}. Είναι σωστό;"
         return f"I understand your issue is: {summary}. Is that correct?"
     
     else:
+        if agent_lang == "el":
+            return f"Άγνωστο πεδίο: {field_name}"
         return f"Unknown field: {field_name}"

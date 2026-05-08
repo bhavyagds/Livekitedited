@@ -187,6 +187,8 @@ async def get_order_details(
         order = await shopify.lookup_order_cached(cleaned)
 
         if order is None:
+            if agent_lang == "el":
+                return f"Δεν μπόρεσα να βρω την παραγγελία {cleaned}."
             return f"I couldn't find order {cleaned}."
 
     agent_lang = get_agent_language()
