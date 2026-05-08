@@ -128,11 +128,11 @@ async def lookup_order(
         if agent_lang == "el":
             return (
                 f"Ο αριθμός παραγγελίας πρέπει να έχει από {min_digits} έως {max_digits} ψηφία. "
-                "Μπορείτε να τον επαναλάβετε ψηφίο προς ψηφίο;"
+                "Παρακαλώ επαναλάβετε το;"
             )
         return (
             f"The order number must be between {min_digits} and {max_digits} digits. "
-            "Could you repeat it digit by digit?"
+            "Could you please repeat it?"
         )
 
     logger.info(f"Looking up order: {cleaned}")
@@ -222,11 +222,11 @@ async def lookup_order_by_phone(
         if agent_lang == "el":
             return (
                 "Αυτό δεν φαίνεται να είναι πλήρης αριθμός τηλεφώνου. "
-                f"Παρακαλώ επαναλάβετε ολόκληρο τον αριθμό, τουλάχιστον {min_digits} ψηφία, ψηφίο προς ψηφίο."
+                f"Παρακαλώ επαναλάβετε ολόκληρο τον αριθμό, τουλάχιστον {min_digits} ψηφία."
             )
         return (
             "That does not look like a complete phone number. "
-            f"Please repeat the full number, at least {min_digits} digits, digit by digit."
+            f"Please repeat the full number, at least {min_digits} digits."
         )
 
     logger.info(f"Looking up orders for phone: {cleaned}")
@@ -236,11 +236,11 @@ async def lookup_order_by_phone(
         if agent_lang == "el":
             return (
                 "Δεν μπόρεσα να βρω κάποια παραγγελία με αυτόν τον αριθμό τηλεφώνου. "
-                "Μπορείτε να ελέγξετε τον αριθμό και να τον πείτε ξανά ψηφίο προς ψηφίο;"
+                "Μπορείτε να ελέγξετε τον αριθμό και να το πείτε ξανά, παρακαλώ;"
             )
         return (
             "No order was found for this phone number. "
-            "Please check the number and repeat it digit by digit."
+            "Please check the number and repeat it ."
         )
 
     for order in orders:
