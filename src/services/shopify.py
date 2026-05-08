@@ -18,6 +18,7 @@ from openai import AsyncOpenAI
 from src.config import settings
 from src.utils.greek_numbers import number_to_greek, format_price_greek, format_order_number_greek
 from src.utils.numbers import extract_digits
+from src.utils.voice_formatting import format_date_for_voice, format_currency_for_voice, format_order_number_for_voice
 
 logger = logging.getLogger(__name__)
 
@@ -706,14 +707,15 @@ class ShopifyService:
         if delivery_date:
             delivery_date = self._get_localized(order, lang, "delivery_date", delivery_date)
         
-        # Format order number and price for Greek pronunciation
+        # Format order number, price and date for natural speech
+        order_num_spoken = format_order_number_for_voice(order.order_number, lang)
+        price_spoken = format_currency_for_voice(float(order.total_price), order.currency, lang)
+        date_spoken = format_date_for_voice(delivery_date, lang) if delivery_date else None
+
         if is_greek:
-            order_num_spoken = format_order_number_greek(order.order_number)
-            price_spoken = format_price_greek(float(order.total_price), order.currency)
-            
             response = f"Η παραγγελία {order_num_spoken} {status}."
-            if delivery_date:
-                response += f" Προγραμματισμένη παράδοση στις {delivery_date}."
+            if date_spoken:
+                response += f" Προγραμματισμένη παράδοση στις {date_spoken}."
             response += f" Σύνολο: {price_spoken}."
             response += f" Πελάτης: {customer_name}."
             response += f" Διεύθυνση παράδοσης: {shipping_address}."
@@ -731,10 +733,10 @@ class ShopifyService:
             
             response += " Θέλετε περισσότερες λεπτομέρειες για αυτή την παραγγελία;"
         else:
-            response = f"Order {order.order_number} is {status}."
-            if delivery_date:
-                response += f" Scheduled for delivery on {delivery_date}."
-            response += f" Total: {order.total_price} {order.currency}."
+            response = f"Order {order_num_spoken} is {status}."
+            if date_spoken:
+                response += f" Scheduled for delivery on {date_spoken}."
+            response += f" Total: {price_spoken}."
             response += f" Customer: {customer_name}."
             response += f" Delivery address: {shipping_address}."
             
@@ -773,19 +775,21 @@ class ShopifyService:
             else:
                 item_name = fallback_title
             quantity = item.get("quantity", 1)
-            price = item.get("price", "0")
+            price_raw = item.get("price", "0")
+            price_val = float(price_raw)
+            price_spoken = format_currency_for_voice(price_val, order.currency, lang)
             # Format naturally for voice
             # Note: Item names are from Shopify, keep them as-is (may be in Greek)
             if is_greek:
                 if quantity == 1:
-                    items_list.append(f"- {item_name}, {price} {order.currency}")
+                    items_list.append(f"- {item_name}, {price_spoken}")
                 else:
-                    items_list.append(f"- {quantity} τεμάχια {item_name}, {price} {order.currency} το ένα")
+                    items_list.append(f"- {quantity} τεμάχια {item_name}, {price_spoken} το ένα")
             else:
                 if quantity == 1:
-                    items_list.append(f"- {item_name}, {price} {order.currency}")
+                    items_list.append(f"- {item_name}, {price_spoken}")
                 else:
-                    items_list.append(f"- {quantity} of {item_name}, {price} {order.currency} each")
+                    items_list.append(f"- {quantity} of {item_name}, {price_spoken} each")
         
         items_text = "\n".join(items_list) if items_list else "No items"
         
@@ -805,7 +809,8 @@ class ShopifyService:
         refunds = raw.get("refunds", [])
         if refunds:
             total_refunded = sum(float(r.get("transactions", [{}])[0].get("amount", 0)) for r in refunds if r.get("transactions"))
-            refund_status = f"Refunded: {total_refunded} {order.currency}"
+            refund_spoken = format_currency_for_voice(total_refunded, order.currency, lang)
+            refund_status = f"Refunded: {refund_spoken}"
         
         # Delivery info from note_attributes
         delivery_date = "Not scheduled"
@@ -846,17 +851,22 @@ class ShopifyService:
             if order.subscription_bundle_id:
                 subscription_info += f"\n  - Bundle ID: {order.subscription_bundle_id}"
         
+        # Spoken versions for the summary
+        order_num_spoken = format_order_number_for_voice(order.order_number, lang)
+        date_spoken = format_date_for_voice(delivery_date, lang) if delivery_date != "Not scheduled" else delivery_date
+        total_spoken = format_currency_for_voice(float(order.total_price), order.currency, lang)
+
         # Build comprehensive response
-        response = f"""ORDER DETAILS FOR #{order.order_number}:
+        response = f"""ORDER DETAILS FOR #{order_num_spoken}:
 - Status: {status}
 - Customer: {customer_name}
 - Email: {customer_email}
 - Phone: {customer_phone}
 - Delivery Address: {shipping_address}
-- Delivery Date: {delivery_date} {delivery_time}
+- Delivery Date: {date_spoken} {delivery_time}
 - Payment: {financial_status}
 - Refund Status: {refund_status}
-- Total: {order.total_price} {order.currency}
+- Total: {total_spoken}
 - SUBSCRIPTION: {subscription_info}
 - Items ({order.item_count}):
 {items_text}
