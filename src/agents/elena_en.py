@@ -1043,7 +1043,13 @@ async def entrypoint(ctx: JobContext):
         # 3c) Memory is handled through system prompt context (single-response path).
 
         # 4) Detect support intent from any general turn.
-        support_intent = bool(re.search(r"(problem|issue|complaint|order problem|wrong order|late order|my order)", user_text.lower()))
+        # Use narrower patterns to avoid matching issue *descriptions* (e.g. "received wrong order")
+        # when the user is inside an LLM-managed ticket flow.
+        support_intent = bool(re.search(
+            r"\b(problem|issue|complaint)\b"
+            r"|\b(order problem|issue with.{0,20}order|problem with.{0,20}order)",
+            user_text.lower()
+        ))
         if support_intent:
             # Do NOT suppress LLM here — let the LLM ask for the order number naturally.
             state.support_state = "awaiting_order"
@@ -1051,7 +1057,13 @@ async def entrypoint(ctx: JobContext):
             room_log("FLOW_TRANSITION", from_state="idle", to_state="awaiting_order", reason="support_intent")
             return
 
-        ticket_intent = bool(re.search(r"(human|representative|call me|callback|support ticket|open ticket|create ticket)", user_text.lower()))
+        ticket_intent = bool(re.search(
+            r"(human|representative|call me|callback"
+            r"|support ticket|open ticket|create ticket"
+            r"|raise.{0,5}ticket|file.{0,5}ticket|submit.{0,5}ticket|log.{0,5}ticket"
+            r"|open.{0,5}complaint|raise.{0,5}complaint|file.{0,5}complaint)",
+            user_text.lower()
+        ))
         if ticket_intent:
             state.support_state = "ticket_name"
             suppress_llm()
