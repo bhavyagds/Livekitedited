@@ -1344,11 +1344,11 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
         if lang == "el":
             return (
                 "Δεν μπόρεσα να επιβεβαιώσω τα στοιχεία αυτής της παραγγελίας. "
-                "Μπορείτε να ελέγξετε τον αριθμό και να τον πείτε ξανά ψηφίο προς ψηφίο;"
+                "Μπορείτε να ελέγξετε τον αριθμό και να τον πείτε ξανά;"
             )
         return (
             "I couldn't verify this order from the details I received. "
-            "Please check the order number and repeat it digit by digit."
+            "Please check the order number and repeat it again."
         )
 
     def _digits_spaced(raw: str) -> str:
@@ -1491,22 +1491,22 @@ def _build_phone_lookup_voice_summary(result_text: str, language: str) -> str:
         if lang == "el":
             return (
                 "Δεν μπόρεσα να βρω κάποια παραγγελία με αυτόν τον αριθμό τηλεφώνου. "
-                "Μπορείτε να ελέγξετε τον αριθμό και να τον πείτε ξανά ψηφίο προς ψηφίο;"
+                "Μπορείτε να ελέγξετε τον αριθμό και να τον πείτε ξανά;"
             )
         return (
             "I couldn't find any order with this phone number. "
-            "Please check the number and repeat it digit by digit."
+            "Please check the number and repeat it again."
         )
 
     if lookup_state == "unknown":
         if lang == "el":
             return (
                 "Δεν μπόρεσα να επιβεβαιώσω κάποια παραγγελία με αυτόν τον αριθμό τηλεφώνου. "
-                "Μπορείτε να ελέγξετε τον αριθμό και να τον πείτε ξανά ψηφίο προς ψηφίο;"
+                "Μπορείτε να ελέγξετε τον αριθμό και να τον πείτε ξανά;"
             )
         return (
             "I couldn't verify any order with this phone number. "
-            "Please check the phone number and repeat it digit by digit."
+            "Please check the phone number and repeat it again."
         )
 
     if (
@@ -1824,11 +1824,10 @@ def _repeat_number_prompt_for_mode(mode: str, lang: str) -> str:
     is_phone = (mode or "").lower() == "phone"
     if lang == "el":
         if is_phone:
-            return "Μπορείτε να πείτε ξανά τον αριθμό τηλεφώνου σας ψηφίο προς ψηφίο, παρακαλώ;"
-        return "Μπορείτε να πείτε ξανά τον αριθμό παραγγελίας ψηφίο προς ψηφίο, παρακαλώ;"
+            return "Μπορείτε να πείτε ξανά τον αριθμό τηλεφώνου σας παρακαλώ;"
+        return "Μπορείτε να πείτε ξανά τον αριθμό παραγγελίας παρακαλώ;"
     if is_phone:
-        return "Could you please repeat your mobile number digit by digit?"
-    return "Could you please repeat your order number digit by digit?"
+    return "Could you please repeat your order number?"
 
 
 def _lookup_progress_prompt() -> str:
@@ -2775,8 +2774,8 @@ class ElenaFunctionContext(llm.FunctionContext):
             if not _normalize_phone_for_lookup(phone):
                 room_log("TOOL_RESULT_BLOCKED", name="lookup_order_by_phone", reason="number_mode_mismatch")
                 if lang == "el":
-                    return "Αυτό δεν μοιάζει με αριθμό τηλεφώνου. Δώστε μου το τηλέφωνό σας ψηφίο προς ψηφίο."
-                return "That doesn't look like a phone number. Please share your phone number digit by digit."
+                    return "Αυτό δεν μοιάζει με αριθμό τηλεφώνου. Δώστε μου το τηλέφωνό σας."
+                return "That doesn't look like a phone number. Please share your phone number."
 
         normalized_phone = _normalize_phone_for_lookup(phone)
         if not normalized_phone:
@@ -3446,7 +3445,7 @@ async def entrypoint(ctx: JobContext):
         parts = _extract_digit_parts(lowered)
         if len(parts) >= 3:
             return True
-        return bool(re.search(r"(digit by digit|ψηφίο προς ψηφίο|ένα, δύο|one two)", lowered))
+        return bool(re.search(r"(ψηφίο προς ψηφίο|ένα, δύο|one two)", lowered))
 
     def _is_short_utterance(text: str) -> bool:
         lowered = _normalize_switch_text(text)
@@ -4926,9 +4925,9 @@ async def entrypoint(ctx: JobContext):
                 if not raw_digits:
                     if _is_short_utterance(user_text) or not (user_text or "").strip():
                         if True:
-                            msg = "Παρακαλώ πείτε τον αριθμό τηλεφώνου που χρησιμοποιήσατε για την παραγγελία, ψηφίο προς ψηφίο."
+                            msg = "Παρακαλώ πείτε τον αριθμό τηλεφώνου που χρησιμοποιήσατε για την παραγγελία."
                         else:
-                            msg = "Please provide the phone number used for the order, digit by digit."
+                            msg = "Please provide the phone number used for the order."
                         _schedule_manual_prompt(msg, reason="awaiting_phone_digits")
                         return True
                     return False
@@ -4980,12 +4979,12 @@ async def entrypoint(ctx: JobContext):
                 if True:
                     msg = (
                         "Αυτό δεν φαίνεται να είναι πλήρης αριθμός τηλεφώνου. "
-                        f"Παρακαλώ πείτε ολόκληρο τον αριθμό ξανά, με τουλάχιστον {min_digits} ψηφία, ψηφίο προς ψηφίο."
+                        f"Παρακαλώ πείτε ολόκληρο τον αριθμό ξανά, με τουλάχιστον {min_digits} ψηφία."
                     )
                 else:
                     msg = (
                         "That does not look like a complete phone number. "
-                        f"Please repeat the full number, at least {min_digits} digits, digit by digit."
+                        f"Please repeat the full number, at least {min_digits} digits."
                     )
                 _schedule_manual_prompt(msg, reason="invalid_complete_phone")
                 room_log("INVALID_OR_PARTIAL_PHONE_REJECTED", digits=combined_digits, turn_id=current_turn_id)
@@ -5022,9 +5021,9 @@ async def entrypoint(ctx: JobContext):
                 _reset_phone_digit_buffer("phone_confirmation_rejected")
                 _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="phone_confirmation_rejected")
                 if True:
-                    msg = "Εντάξει. Πείτε ξανά τον αριθμό τηλεφώνου σας ψηφίο προς ψηφίο."
+                    msg = "Εντάξει. Πείτε ξανά τον αριθμό τηλεφώνου σας."
                 else:
-                    msg = "Okay. Please repeat your phone number again, digit by digit."
+                    msg = "Okay. Please repeat your phone number again."
                 _schedule_manual_prompt(msg, reason="phone_confirmation_rejected")
                 return True
 
@@ -5052,12 +5051,12 @@ async def entrypoint(ctx: JobContext):
                     if True:
                         msg = (
                             "Αυτό δεν φαίνεται να είναι πλήρης αριθμός τηλεφώνου. "
-                            f"Παρακαλώ πείτε ολόκληρο τον αριθμό ξανά, με τουλάχιστον {min_digits} ψηφία, ψηφίο προς ψηφίο."
+                            f"Παρακαλώ πείτε ολόκληρο τον αριθμό ξανά, με τουλάχιστον {min_digits} ψηφία."
                         )
                     else:
                         msg = (
                             "That does not look like a complete phone number. "
-                            f"Please repeat the full number, at least {min_digits} digits, digit by digit."
+                            f"Please repeat the full number, at least {min_digits} digits."
                         )
                     _schedule_manual_prompt(msg, reason="invalid_complete_phone")
                 return True
@@ -5087,9 +5086,9 @@ async def entrypoint(ctx: JobContext):
                 )
                 return True
             if True:
-                msg = "Παρακαλώ πείτε ξανά τον αριθμό τηλεφώνου σας ψηφίο προς ψηφίο."
+                msg = "Παρακαλώ πείτε ξανά τον αριθμό τηλεφώνου σας."
             else:
-                msg = "Please say your phone number again, digit by digit."
+                msg = "Please say your phone number again."
             _schedule_manual_prompt(msg, reason="awaiting_phone_recovery")
             return True
 
@@ -5289,12 +5288,12 @@ async def entrypoint(ctx: JobContext):
                         if True:
                             msg = (
                                 f"Ο αριθμός παραγγελίας πρέπει να έχει από {min_d} έως {max_d} ψηφία. "
-                                f"Μπορείτε να τον πείτε ξανά ψηφίο προς ψηφίο;"
+                                f"Μπορείτε να τον πείτε ξανά;"
                             )
                         else:
                             msg = (
                                 f"The order number should be between {min_d} and {max_d} digits. "
-                                f"Could you repeat it digit by digit?"
+                                f"Could you repeat it again?"
                             )
                         await send_agent_transcript(msg)
                         agent.chat_ctx.append(role="assistant", text=msg)
@@ -5317,7 +5316,7 @@ async def entrypoint(ctx: JobContext):
                     text=(
                         "SUPPORT FLOW - ORDER NUMBER STILL MISSING:\n"
                         f"- The caller has not provided a valid {min_d}-{max_d} digit order number yet.\n"
-                        "- Ask them to repeat the order number digit by digit.\n"
+                        "- Ask them to repeat the order number.\n"
                         "- Do not switch to phone lookup unless they explicitly say they don't have an order number."
                     ),
                 )
@@ -5354,12 +5353,12 @@ async def entrypoint(ctx: JobContext):
                     if True:
                         msg = (
                             "Εντάξει. Μπορείτε να μου δώσετε τον αριθμό τηλεφώνου "
-                            "που χρησιμοποιήσατε για την παραγγελία, ψηφίο προς ψηφίο;"
+                            "που χρησιμοποιήσατε για την παραγγελία;"
                         )
                     else:
                         msg = (
                             "No problem. Please give me the phone number used for the order, "
-                            "digit by digit?"
+                            "one more time?"
                         )
                     prompt_key = f"{current_turn_id}:ask_phone_after_no_order_number:{msg}"
                     if (
@@ -6040,21 +6039,39 @@ async def entrypoint(ctx: JobContext):
     # =========================================================================
     async def monitor_silence():
         """Monitor for user silence and prompt them."""
-        agent_lang = 'el'
-        
-        # Silence prompts based on language
-        if agent_lang == "el":
-            prompts = [
-                "Είμαι εδώ όταν είστε έτοιμοι.",
-                "Πάρτε τον χρόνο σας. Είμαι ακόμη εδώ.",
-                "Θα τερματίσω την κλήση προς το παρόν. Μπορείτε να μας καλέσετε ξανά οποιαδήποτε στιγμή.",
-            ]
-        else:
-            prompts = [
-                "I’m here when you’re ready.",
-                "Take your time. I’m still here.",
-                "I’ll end the call for now. You can call us again anytime.",
-            ]
+        # Contextual prompts for elena_el.py
+        def _get_contextual_silence_prompt(count):
+            state = _current_session.get("support_flow_state", FLOW_IDLE)
+            
+            # Goodbye prompt (last one)
+            if count >= silence_tracker["max_prompts"] - 1:
+                return "Θα τερματίσω την κλήση για τώρα. Μπορείτε να μας καλέσετε ξανά οποιαδήποτε στιγμή."
+
+            # State-specific prompts
+            if state == FLOW_AWAITING_ORDER_NUMBER:
+                if count == 0:
+                    return "Όποτε είστε έτοιμοι, παρακαλώ πείτε μου τον αριθμό παραγγελίας σας."
+                return "Είμαι ακόμα εδώ. Παρακαλώ δώστε μου τον αριθμό παραγγελίας για να δω τις λεπτομέρειες."
+            
+            if state in PHONE_FLOW_STATES:
+                if count == 0:
+                    return "Παρακαλώ πείτε μου τον αριθμό τηλεφώνου που χρησιμοποιήσατε για την παραγγελία."
+                return "Είμαι έτοιμη όποτε θέλετε. Παρακαλώ πείτε μου τον αριθμό τηλεφώνου."
+
+            # Default / Idle contextual nudge
+            last_msg = ""
+            for msg in reversed(agent.chat_ctx.messages):
+                if msg.role == "assistant" and msg.text:
+                    last_msg = msg.text
+                    break
+            
+            if last_msg:
+                if count == 0:
+                    return "Είμαι ακόμα εδώ για να βοηθήσω. Θέλετε να συνεχίσουμε?"
+                return "Πάρτε τον χρόνο σας. Είμαι ακόμα εδώ αν χρειάζεστε βοήθεια με κάτι άλλο."
+            
+            return "Είμαι εδώ όταν είστε έτοιμοι."
+
         try:
             while not _current_session["should_end"] and silence_tracker["enabled"]:
                 await asyncio.sleep(1.0)  # Check every second
