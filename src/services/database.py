@@ -38,22 +38,31 @@ from src.models.base import Base
 
 logger = logging.getLogger(__name__)
 
-# Create async engine
-engine = create_async_engine(
-    settings.postgres_url,
-    echo=settings.debug,
-    pool_pre_ping=True,
-    pool_size=5,
-    max_overflow=10,
-)
+_engine = None
+_async_session = None
 
-# Create async session factory
-async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+def get_engine():
+    global _engine
+    if _engine is None:
+        _engine = create_async_engine(
+            settings.postgres_url,
+            echo=settings.debug,
+            pool_pre_ping=True,
+            pool_size=5,
+            max_overflow=10,
+        )
+    return _engine
+
+def get_session_factory():
+    global _async_session
+    if _async_session is None:
+        _async_session = async_sessionmaker(get_engine(), class_=AsyncSession, expire_on_commit=False)
+    return _async_session
 
 
 async def init_db():
     """Initialize database tables."""
-    async with engine.begin() as conn:
+    async with get_engine().begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         
         # Self-healing: Check if agent_memories has is_active column
@@ -77,14 +86,14 @@ async def init_db():
 
 async def get_session() -> AsyncSession:
     """Get an async database session."""
-    async with async_session() as session:
+    async with get_session_factory()() as session:
         yield session
 
 
 @asynccontextmanager
 async def get_db():
     """Context manager for database sessions."""
-    session = async_session()
+    session = get_session_factory()()
     try:
         yield session
         await session.commit()

@@ -3040,7 +3040,7 @@ async def entrypoint(ctx: JobContext):
         _current_session["call_id"] = db_call_id
         room_log("CALL_RECORDED", db_call_id=db_call_id)
     
-    asyncio.create_task(record_call_async())
+    record_task = asyncio.create_task(record_call_async())
     
     # Initialize transcript collection
     conversation_transcript = []
@@ -3487,13 +3487,19 @@ async def entrypoint(ctx: JobContext):
         
         return info_items
     
-    async def send_agent_transcript(text: str):
-        """Send spoken agent text to frontend chat in realtime."""
+    async def send_agent_transcript(text: str, *, source: str = "manual"):
+        """Send spoken agent text to frontend chat in realtime.
+
+        To prevent duplicate or unsaid transcript lines, we only publish
+        entries that come from committed speech callbacks.
+        """
         nonlocal conversation_transcript
         try:
             # Don't drop transcripts if the call is ending; we still want to log them.
             # Only return if we've already handled the final DB recording.
             if call_ended["value"]:
+                return
+            if source != "commit":
                 return
             cleaned = _strip_markup_for_output(text)
             if not cleaned:
@@ -3889,6 +3895,9 @@ async def entrypoint(ctx: JobContext):
                     raw_buffer = ""
                     normalized_buffer = ""
                     async for chunk in stream:
+                        if _current_session.get("forced_response_manual_say_active"):
+                            room_log("LLM_STREAM_CANCELLED", reason="manual_response_active", turn_id=int(_current_session.get("last_user_turn_id") or 0))
+                            return
                         chunk_text = _extract_chunk_text(chunk)
                         if not chunk_text:
                             continue
@@ -5595,6 +5604,12 @@ async def entrypoint(ctx: JobContext):
                                 _normalize_switch_text(display_text or text),
                                 flags=re.IGNORECASE,
                             )
+                        ) or bool(
+                            re.search(
+                                r"(checking|searching|looking up|one moment|moment please|wait a second|μια στιγμή|περιμένετε|το ελέγχω)",
+                                _normalize_switch_text(display_text or text),
+                                flags=re.IGNORECASE,
+                            )
                         )
                     )
                     if not same_as_forced_response and not keep_core_message:
@@ -5606,29 +5621,7 @@ async def entrypoint(ctx: JobContext):
                         )
                         return
                 transcript_text = _format_agent_text_for_transcript(display_text or text)
-                expected_forced_response_text = str(_current_session.get("forced_response_spoken_text") or "")
-                forced_transcript_sent_at = float(_current_session.get("forced_response_transcript_sent_at") or 0.0)
-                if expected_forced_response_text and forced_transcript_sent_at:
-                    expected_norm = _normalize_switch_text(expected_forced_response_text)
-                    transcript_norm = _normalize_switch_text(transcript_text)
-                    same_as_forced_response = bool(
-                        expected_norm
-                        and transcript_norm
-                        and (
-                            transcript_norm == expected_norm
-                            or transcript_norm in expected_norm
-                            or expected_norm in transcript_norm
-                        )
-                    )
-                    if same_as_forced_response and (time.time() - forced_transcript_sent_at) <= 20.0:
-                        room_log(
-                            "AGENT_TRANSCRIPT_DUPLICATE_SKIPPED",
-                            reason="manual_transcript_already_sent",
-                            text=_truncate(transcript_text),
-                        )
-                        _current_session["forced_response_transcript_sent_at"] = 0.0
-                        return
-                asyncio.create_task(send_agent_transcript(transcript_text))
+                asyncio.create_task(send_agent_transcript(transcript_text, source="commit"))
                 asyncio.create_task(send_agent_info(transcript_text))
                 _current_session["last_agent_text"] = transcript_text
                 
@@ -5864,7 +5857,10 @@ async def entrypoint(ctx: JobContext):
         """Handle when the room is disconnected."""
         logger.info("Room disconnected")
         asyncio.create_task(handle_call_end("room_disconnected"))
-    
+    # Ensure call is recorded before starting to have db_call_id
+    if record_task:
+        await record_task
+        
     agent.start(ctx.room, participant)
     logger.info(f"⏱️ Agent started ({time.time() - startup_time:.1f}s)")
 
@@ -5925,6 +5921,8 @@ async def entrypoint(ctx: JobContext):
     # =========================================================================
     # SILENCE MONITORING - Prompt user if no response
     # =========================================================================
+    async def monitor_silence():
+        """Monitor for user silence and prompt them."""
         # Contextual prompts for elena_en.py
         def _get_contextual_silence_prompt(count):
             state = _current_session.get("support_flow_state", FLOW_IDLE)
@@ -6047,8 +6045,9 @@ async def entrypoint(ctx: JobContext):
                 # Only trigger if:
                 # 1. User hasn't spoken for silence_timeout seconds
                 # 2. Agent finished speaking at least silence_timeout seconds ago
+                # 3. Extra grace period of 2s since last agent activity to avoid overlapping prompts
                 if time_since_user >= silence_tracker["silence_timeout"] and \
-                   time_since_agent >= silence_tracker["silence_timeout"]:
+                   time_since_agent >= max(silence_tracker["silence_timeout"], 2.0):
                     
                     prompt_count = silence_tracker["prompt_count"]
                     
