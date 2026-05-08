@@ -201,6 +201,7 @@ class SessionState:
     ticket_email: str = ""
     ticket_issue: str = ""
     should_end: bool = False
+    disconnect_reason: str = "session_end"
     silence_enabled: bool = True
     silence_timeout_s: float = 12.0
     silence_max_prompts: int = 2
@@ -349,6 +350,7 @@ class ElenaFunctionContext(llm.FunctionContext):
     async def end_session(self) -> str:
         """End the current voice session gracefully with a closing message."""
         _current["state"].should_end = True
+        _current["state"].disconnect_reason = "agent_tool_end"
         msg = get_closing("en")
         room_log("SESSION_END_REQUESTED", message=msg)
         return msg
@@ -818,7 +820,7 @@ async def entrypoint(ctx: JobContext):
                 pass
             return
 
-        if cleaned == state.last_user_transcript_text and (now_ts - state.last_user_transcript_at) < 1.2:
+        if cleaned == state.last_user_transcript_text and (now_ts - state.last_user_transcript_at) < 5.0:
             room_log("USER_TEXT_DEDUPED", text=cleaned)
             return
 
@@ -874,6 +876,9 @@ async def entrypoint(ctx: JobContext):
     @agent.on("user_stopped_speaking")
     def _on_user_stopped_speaking():
         schedule_thinking_state()
+        # Fast-track the latest interim as a final transcript for immediate UI feedback.
+        if _last_user_interim:
+            asyncio.create_task(send_user_transcript(_last_user_interim, interim=False))
 
     @agent.on("user_speech_committed")
     def _on_user_speech_committed(msg):
@@ -1031,12 +1036,14 @@ async def entrypoint(ctx: JobContext):
     def _on_participant_disconnected(participant_info):
         if participant_info.identity == participant.identity:
             state.should_end = True
+            state.disconnect_reason = "participant_disconnected"
 
     # Start agent
     agent.start(ctx.room, participant)
 
     # Stream interim user transcripts so user text appears in real time on frontend.
     human_input = getattr(agent, "human_input", None) or getattr(agent, "_human_input", None)
+    room_log("HUMAN_INPUT_ATTACH", found=bool(human_input))
     if human_input:
         @human_input.on("interim_transcript")
         def _on_interim_transcript(ev):
@@ -1136,11 +1143,16 @@ async def entrypoint(ctx: JobContext):
                 continue
 
             if state.silence_prompt_count >= state.silence_max_prompts:
-                # Hard stop to prevent repeated prompt loops.
-                continue
+                # Disconnect after too much silence to free up resources.
+                room_log("SILENCE_TERMINATION", count=state.silence_prompt_count)
+                state.should_end = True
+                state.disconnect_reason = "silence_termination"
+                break
 
             text = _contextual_silence_prompt()
             state.silence_prompt_count += 1
+            # Snooze for 15s to allow the agent to finish speaking and the user to react.
+            state.silence_snooze_until = time.time() + 15.0
             room_log("SILENCE_PROMPT", count=state.silence_prompt_count, text=text)
             await agent.say(text, allow_interruptions=True)
 
@@ -1150,6 +1162,9 @@ async def entrypoint(ctx: JobContext):
     while not state.should_end:
         await asyncio.sleep(0.5)
 
+    # Short delay to allow the last spoken sentence (e.g., closing message) to reach the user.
+    await asyncio.sleep(3.0)
+
     # Cleanup and call end
     silence_task.cancel()
     transcript_text = "\n".join(conversation_transcript)
@@ -1158,7 +1173,7 @@ async def entrypoint(ctx: JobContext):
         room_name=ctx.room.name,
         status="completed",
         duration_seconds=None,
-        disconnect_reason="session_end",
+        disconnect_reason=state.disconnect_reason,
         transcript=transcript_text or None,
     )
     room_log("CALL_END", transcript_lines=len(conversation_transcript))
