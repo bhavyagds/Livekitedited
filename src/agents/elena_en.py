@@ -371,7 +371,7 @@ def create_stt(is_sip_call: bool = False):
     provider = str(get_agent_setting("stt_provider", "deepgram") or "deepgram").lower()
     deepgram_api_key = getattr(settings, "deepgram_api_key", None)
     if provider == "deepgram" and USE_DEEPGRAM and deepgram_api_key:
-        model = str(get_agent_setting("deepgram_stt_model", "nova-2") or "nova-2")
+        model = str(get_agent_setting("deepgram_stt_model", "nova-3") or "nova-3")
         # numerals=True: forces Deepgram to output spoken digits as numerals
         # (e.g. "seven seven three" → "773") which makes phone number parsing reliable.
         # smart_format=True (SDK default): handles phone/date formatting automatically.
