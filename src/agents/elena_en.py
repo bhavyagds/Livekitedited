@@ -216,6 +216,7 @@ class SessionState:
     last_agent_transcript_at: float = 0.0
     last_clarification_prompt_text: str = ""
     last_clarification_prompt_at: float = 0.0
+    suppress_llm_until: float = 0.0
 
 
 _current = {
@@ -756,6 +757,14 @@ async def entrypoint(ctx: JobContext):
     # Product requirement: wait at least ~1.2s after user stops speaking before replying.
     effective_endpointing_delay = max(1.2, configured_endpointing_delay)
 
+    def _before_llm_cb(agent_instance, chat_ctx):
+        """Gate the LLM when the deterministic handler has already replied via agent.say()."""
+        if time.time() < state.suppress_llm_until:
+            room_log("LLM_SUPPRESSED", until=state.suppress_llm_until)
+            return False
+        from livekit.agents.pipeline.pipeline_agent import _default_before_llm_cb
+        return _default_before_llm_cb(agent_instance, chat_ctx)
+
     agent = VoicePipelineAgent(
         vad=create_vad(),
         stt=create_stt(),
@@ -769,6 +778,7 @@ async def entrypoint(ctx: JobContext):
         # Keep disabled here to avoid race where LLM starts replying before deterministic
         # memory/order flow handlers finish, which can produce double answers.
         preemptive_synthesis=_as_bool(get_agent_setting("preemptive_synthesis", False), default=False),
+        before_llm_cb=_before_llm_cb,
     )
     room_log(
         "TURN_CONFIG",
@@ -777,6 +787,11 @@ async def entrypoint(ctx: JobContext):
     )
 
     conversation_transcript: list[str] = []
+
+    def suppress_llm(seconds: float = 10.0):
+        """Suppress LLM synthesis for the next N seconds (used when handler replies deterministically)."""
+        state.suppress_llm_until = time.time() + seconds
+        room_log("LLM_SUPPRESS_SET", seconds=seconds)
 
     async def send_agent_transcript(text: str):
         cleaned = (text or "").strip()
@@ -909,6 +924,7 @@ async def entrypoint(ctx: JobContext):
             if _mentions_no_order_number(user_text) or _mentions_phone_lookup_intent(user_text):
                 state.support_state = "awaiting_phone"
                 room_log("FLOW_TRANSITION", from_state="awaiting_order", to_state="awaiting_phone", reason="no_order_or_phone_intent")
+                suppress_llm()
                 asyncio.create_task(agent.say("No problem! Could you please provide me with your phone number instead?", allow_interruptions=True))
                 return
 
@@ -916,6 +932,7 @@ async def entrypoint(ctx: JobContext):
             phone_candidate = _normalize_phone_for_lookup(user_text)
             if phone_candidate:
                 state.support_state = "awaiting_phone"
+                suppress_llm()
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(10.0)
                 asyncio.create_task(_run_phone_lookup(agent, phone_candidate))
@@ -923,6 +940,7 @@ async def entrypoint(ctx: JobContext):
 
             order_id = _normalize_order_id_strict(user_text)
             if order_id:
+                suppress_llm()
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(10.0)
                 asyncio.create_task(_run_order_lookup(agent, order_id))
@@ -930,6 +948,7 @@ async def entrypoint(ctx: JobContext):
 
             prompt = "Please share your order number. If you do not have it, say that and I will check by phone number."
             if not _should_suppress_clarification(prompt):
+                suppress_llm()
                 asyncio.create_task(agent.say(prompt, allow_interruptions=True))
             return
 
@@ -938,16 +957,19 @@ async def entrypoint(ctx: JobContext):
             if _mentions_phone_lookup_intent(user_text):
                 prompt = "Sure. Please provide the full phone number used for the order."
                 if not _should_suppress_clarification(prompt):
+                    suppress_llm()
                     asyncio.create_task(agent.say(prompt, allow_interruptions=True))
                 return
             phone = _normalize_phone_for_lookup(user_text)
             if phone:
+                suppress_llm()
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(10.0)
                 asyncio.create_task(_run_phone_lookup(agent, phone))
                 return
             prompt = "I need the full phone number to check the order. Please share it once."
             if not _should_suppress_clarification(prompt):
+                suppress_llm()
                 asyncio.create_task(agent.say(prompt, allow_interruptions=True))
             return
 
@@ -955,6 +977,7 @@ async def entrypoint(ctx: JobContext):
         if state.support_state == "ticket_name":
             state.ticket_name = user_text
             state.support_state = "ticket_phone"
+            suppress_llm()
             asyncio.create_task(agent.say("Thanks. Please share your phone number.", allow_interruptions=True))
             return
 
@@ -963,19 +986,23 @@ async def entrypoint(ctx: JobContext):
             if not ticket_phone:
                 prompt = "Please share a valid phone number."
                 if not _should_suppress_clarification(prompt):
+                    suppress_llm()
                     asyncio.create_task(agent.say(prompt, allow_interruptions=True))
                 return
             state.ticket_phone = ticket_phone
             state.support_state = "ticket_email"
+            suppress_llm()
             asyncio.create_task(agent.say("Got it. Now please share your email address.", allow_interruptions=True))
             return
 
         if state.support_state == "ticket_email":
             if not _looks_like_email(user_text):
+                suppress_llm()
                 asyncio.create_task(agent.say("Please share a valid email address.", allow_interruptions=True))
                 return
             state.ticket_email = user_text.strip()
             state.support_state = "ticket_issue"
+            suppress_llm()
             asyncio.create_task(agent.say("Please describe the issue in one or two sentences.", allow_interruptions=True))
             return
 
@@ -988,11 +1015,13 @@ async def entrypoint(ctx: JobContext):
                 f"I have your details as name {state.ticket_name}, phone {state.ticket_phone}, and email {state.ticket_email}. "
                 "Should I create the support ticket now?"
             )
+            suppress_llm()
             asyncio.create_task(agent.say(confirm_text, allow_interruptions=True))
             return
 
         if state.support_state == "ticket_confirm":
             if _is_yes(user_text):
+                suppress_llm()
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(10.0)
                 asyncio.create_task(agent.say("Thanks. Creating your support ticket now.", allow_interruptions=True))
@@ -1004,8 +1033,10 @@ async def entrypoint(ctx: JobContext):
                 state.ticket_phone = ""
                 state.ticket_email = ""
                 state.ticket_issue = ""
+                suppress_llm()
                 asyncio.create_task(agent.say("No problem. I have cancelled the ticket request.", allow_interruptions=True))
                 return
+            suppress_llm()
             asyncio.create_task(agent.say("Please say yes to create the ticket, or no to cancel.", allow_interruptions=True))
             return
 
@@ -1014,6 +1045,7 @@ async def entrypoint(ctx: JobContext):
         # 4) Detect support intent from any general turn.
         support_intent = bool(re.search(r"(problem|issue|complaint|order problem|wrong order|late order|my order)", user_text.lower()))
         if support_intent:
+            # Do NOT suppress LLM here — let the LLM ask for the order number naturally.
             state.support_state = "awaiting_order"
             state.last_issue = user_text
             room_log("FLOW_TRANSITION", from_state="idle", to_state="awaiting_order", reason="support_intent")
@@ -1022,6 +1054,7 @@ async def entrypoint(ctx: JobContext):
         ticket_intent = bool(re.search(r"(human|representative|call me|callback|support ticket|open ticket|create ticket)", user_text.lower()))
         if ticket_intent:
             state.support_state = "ticket_name"
+            suppress_llm()
             asyncio.create_task(agent.say("Sure, I can create a support ticket. Please tell me your full name.", allow_interruptions=True))
             return
 
