@@ -372,7 +372,25 @@ def create_stt(is_sip_call: bool = False):
     deepgram_api_key = getattr(settings, "deepgram_api_key", None)
     if provider == "deepgram" and USE_DEEPGRAM and deepgram_api_key:
         model = str(get_agent_setting("deepgram_stt_model", "nova-2") or "nova-2")
-        return deepgram.STT(model=model, language="en-US", api_key=deepgram_api_key, interim_results=True)
+        # numerals=True: forces Deepgram to output spoken digits as numerals
+        # (e.g. "seven seven three" → "773") which makes phone number parsing reliable.
+        # smart_format=True (SDK default): handles phone/date formatting automatically.
+        # keywords: boost confidence for individual digit words that STT often mishears
+        # (e.g. "nine" → "bye", "five" → "fine", "four" → "for").
+        _digit_keywords = [
+            ("zero", 1.0), ("one", 1.0), ("two", 1.0), ("three", 1.0),
+            ("four", 1.0), ("five", 1.0), ("six", 1.0), ("seven", 1.0),
+            ("eight", 1.0), ("nine", 1.0),
+        ]
+        return deepgram.STT(
+            model=model,
+            language="en-US",
+            api_key=deepgram_api_key,
+            interim_results=True,
+            numerals=True,
+            smart_format=True,
+            keywords=_digit_keywords,
+        )
     model = str(get_agent_setting("openai_stt_model", "whisper-1") or "whisper-1")
     return openai.STT(model=model, api_key=settings.openai_api_key, language="en")
 
@@ -626,6 +644,7 @@ async def _run_create_ticket(agent: VoicePipelineAgent):
         room_log("TICKET_CREATE_RESULT", result=_truncate(result))
         await agent.say(result, allow_interruptions=True)
         state.support_state = "idle"
+        state.last_issue = ""  # clear so silence monitor uses generic prompt, not "still here to help"
         state.ticket_name = ""
         state.ticket_phone = ""
         state.ticket_email = ""
@@ -1023,7 +1042,7 @@ async def entrypoint(ctx: JobContext):
             if _is_yes(user_text):
                 suppress_llm()
                 asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(10.0)
+                snooze_silence(30.0)  # ticket creation can take up to ~20s
                 asyncio.create_task(agent.say("Thanks. Creating your support ticket now.", allow_interruptions=True))
                 asyncio.create_task(_run_create_ticket(agent))
                 return
@@ -1068,6 +1087,21 @@ async def entrypoint(ctx: JobContext):
             state.support_state = "ticket_name"
             suppress_llm()
             asyncio.create_task(agent.say("Sure, I can create a support ticket. Please tell me your full name.", allow_interruptions=True))
+            return
+
+        # 5) Detect farewell intent — set should_end so silence monitor stops after LLM says goodbye.
+        farewell_intent = bool(re.search(
+            r"\b(bye|goodbye|good bye|good night|see you|take care|thanks? bye|that.?s all|no thank|nothing else)",
+            user_text.lower()
+        ))
+        if farewell_intent:
+            room_log("FAREWELL_DETECTED", text=user_text)
+            # Let the LLM respond naturally, then end the session after it finishes speaking.
+            async def _delayed_end():
+                await asyncio.sleep(6.0)  # give LLM time to speak its goodbye
+                state.should_end = True
+                state.disconnect_reason = "farewell"
+            asyncio.create_task(_delayed_end())
             return
 
     # Optional: capture agent text word-by-word if needed, but committed is safer for translations.
@@ -1177,7 +1211,7 @@ async def entrypoint(ctx: JobContext):
     async def _silence_monitor():
         while not state.should_end:
             await asyncio.sleep(1.0)
-            if not state.silence_enabled or not state.waiting_for_user or state.lookup_inflight:
+            if not state.silence_enabled or not state.waiting_for_user or state.lookup_inflight or state.ticket_inflight:
                 continue
             now = time.time()
             if now < state.silence_snooze_until:
