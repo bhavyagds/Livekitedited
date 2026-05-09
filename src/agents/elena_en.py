@@ -1,4 +1,4 @@
-"""
+﻿"""
 Meallion Voice AI - Elena English Agent (clean rewrite)
 English-only voice agent with deterministic order/phone support flow.
 """
@@ -156,18 +156,6 @@ def _mentions_phone_lookup_intent(text: str) -> bool:
     return bool(
         re.search(r"\b(phone|mobile|number|call me on)\b", t)
         or re.search(r"(check by phone|use phone|with phone)", t)
-    )
-
-
-def _is_order_or_phone_collection_prompt(text: str) -> bool:
-    """True when agent text already asked user to share order/phone number."""
-    t = (text or "").lower()
-    if not t:
-        return False
-    return bool(
-        re.search(r"(provide|share|tell me|please).*(order number|phone number|mobile number)", t)
-        or re.search(r"(order number|phone number|mobile number).*(provide|share|tell me|please)", t)
-        or re.search(r"(do not have it|don't have it|check by phone number)", t)
     )
 
 
@@ -383,27 +371,8 @@ def create_stt(is_sip_call: bool = False):
     provider = str(get_agent_setting("stt_provider", "deepgram") or "deepgram").lower()
     deepgram_api_key = getattr(settings, "deepgram_api_key", None)
     if provider == "deepgram" and USE_DEEPGRAM and deepgram_api_key:
-        model = "nova-2"
-        # numerals=True: forces Deepgram to output spoken digits as numerals
-        # (e.g. "seven seven three" → "773") which makes phone number parsing reliable.
-        # smart_format=True (SDK default): handles phone/date formatting automatically.
-        # keywords: boost confidence for individual digit words that STT often mishears
-        # (e.g. "nine" → "bye", "five" → "fine", "four" → "for").
-        _digit_keywords = [
-            ("zero", 1.5), ("one", 1.5), ("two", 1.5), ("three", 1.5),
-            ("four", 1.5), ("five", 1.5), ("six", 1.5), ("seven", 1.5),
-            ("eight", 1.5), ("nine", 1.5),
-        ]
-        return deepgram.STT(
-            model=model,
-            language="en-US",
-            api_key=deepgram_api_key,
-            interim_results=True,
-            numerals=False,
-            smart_format=False,
-            punctuate=True,
-
-        )
+        model = str(get_agent_setting("deepgram_stt_model", "nova-2") or "nova-2")
+        return deepgram.STT(model=model, language="en-US", api_key=deepgram_api_key, interim_results=True)
     model = str(get_agent_setting("openai_stt_model", "whisper-1") or "whisper-1")
     return openai.STT(model=model, api_key=settings.openai_api_key, language="en")
 
@@ -568,8 +537,7 @@ def _build_memory_prompt_block(memory_items: list[dict]) -> str:
 def create_vad(is_sip_call: bool = False):
     min_speech = _as_float(get_agent_setting("vad_min_speech_duration", 0.15), 0.15, min_value=0.05, max_value=1.0)
     min_silence = _as_float(get_agent_setting("vad_min_silence_duration", 1.2 if is_sip_call else 1.0), 1.0, min_value=0.1, max_value=3.0)
-    # threshold=0.6: slightly more aggressive to filter out background noise
-    return silero.VAD.load(min_speech_duration=min_speech, min_silence_duration=min_silence, activation_threshold=0.6)
+    return silero.VAD.load(min_speech_duration=min_speech, min_silence_duration=min_silence)
 
 
 # -----------------------------------------------------------------------------
@@ -658,7 +626,6 @@ async def _run_create_ticket(agent: VoicePipelineAgent):
         room_log("TICKET_CREATE_RESULT", result=_truncate(result))
         await agent.say(result, allow_interruptions=True)
         state.support_state = "idle"
-        state.last_issue = ""  # clear so silence monitor uses generic prompt, not "still here to help"
         state.ticket_name = ""
         state.ticket_phone = ""
         state.ticket_email = ""
@@ -788,7 +755,7 @@ async def entrypoint(ctx: JobContext):
         max_value=3.0,
     )
     # Product requirement: wait at least ~1.2s after user stops speaking before replying.
-    effective_endpointing_delay = max(1.5, configured_endpointing_delay)
+    effective_endpointing_delay = max(1.2, configured_endpointing_delay)
 
     def _before_llm_cb(agent_instance, chat_ctx):
         """Gate the LLM when the deterministic handler has already replied via agent.say()."""
@@ -813,20 +780,6 @@ async def entrypoint(ctx: JobContext):
         preemptive_synthesis=_as_bool(get_agent_setting("preemptive_synthesis", False), default=False),
         before_llm_cb=_before_llm_cb,
     )
-
-    # Stream interim user transcripts to the UI for realtime feel.
-    # Access the underlying human input handler to catch words before they are finalized.
-    human_input = getattr(agent, "_human_input", None)
-    if human_input:
-        @human_input.on("interim_transcript")
-        def _on_interim_transcript(ev):
-            try:
-                text = ev.alternatives[0].text
-            except Exception:
-                text = None
-            if text:
-                asyncio.create_task(send_user_transcript(text, interim=True))
-
     room_log(
         "TURN_CONFIG",
         configured_endpointing_delay=configured_endpointing_delay,
@@ -1014,13 +967,9 @@ async def entrypoint(ctx: JobContext):
                 snooze_silence(10.0)
                 asyncio.create_task(_run_phone_lookup(agent, phone))
                 return
-            prompt = None
-            # Only prompt for the full number if the user actually tried to give digits.
-            digit_count = len(re.findall(r"\d", phone or user_text))
-            if digit_count >= 3:
-                prompt = "I need the full phone number to check the order. Please share it once."
-            if prompt and not _should_suppress_clarification(prompt):
-                suppress_llm(15.0)
+            prompt = "I need the full phone number to check the order. Please share it once."
+            if not _should_suppress_clarification(prompt):
+                suppress_llm()
                 asyncio.create_task(agent.say(prompt, allow_interruptions=True))
             return
 
@@ -1074,7 +1023,7 @@ async def entrypoint(ctx: JobContext):
             if _is_yes(user_text):
                 suppress_llm()
                 asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(30.0)  # ticket creation can take up to ~20s
+                snooze_silence(10.0)
                 asyncio.create_task(agent.say("Thanks. Creating your support ticket now.", allow_interruptions=True))
                 asyncio.create_task(_run_create_ticket(agent))
                 return
@@ -1094,13 +1043,7 @@ async def entrypoint(ctx: JobContext):
         # 3c) Memory is handled through system prompt context (single-response path).
 
         # 4) Detect support intent from any general turn.
-        # Use narrower patterns to avoid matching issue *descriptions* (e.g. "received wrong order")
-        # when the user is inside an LLM-managed ticket flow.
-        support_intent = bool(re.search(
-            r"\b(problem|issue|complaint)\b"
-            r"|\b(order problem|issue with.{0,20}order|problem with.{0,20}order)",
-            user_text.lower()
-        ))
+        support_intent = bool(re.search(r"(problem|issue|complaint|order problem|wrong order|late order|my order)", user_text.lower()))
         if support_intent:
             # Do NOT suppress LLM here — let the LLM ask for the order number naturally.
             state.support_state = "awaiting_order"
@@ -1108,36 +1051,11 @@ async def entrypoint(ctx: JobContext):
             room_log("FLOW_TRANSITION", from_state="idle", to_state="awaiting_order", reason="support_intent")
             return
 
-        ticket_intent = bool(re.search(
-            r"(human|representative|call me|callback"
-            r"|support ticket|open ticket|create ticket"
-            r"|raise.{0,5}ticket|file.{0,5}ticket|submit.{0,5}ticket|log.{0,5}ticket"
-            r"|open.{0,5}complaint|raise.{0,5}complaint|file.{0,5}complaint)",
-            user_text.lower()
-        ))
+        ticket_intent = bool(re.search(r"(human|representative|call me|callback|support ticket|open ticket|create ticket)", user_text.lower()))
         if ticket_intent:
             state.support_state = "ticket_name"
             suppress_llm()
             asyncio.create_task(agent.say("Sure, I can create a support ticket. Please tell me your full name.", allow_interruptions=True))
-            return
-
-        # 5) Detect farewell intent — set should_end so silence monitor stops after LLM says goodbye.
-        farewell_intent = bool(re.search(
-            r"\b(bye|goodbye|good bye|good night|see you|take care|thanks? bye|that.?s all|no thank|nothing else)",
-            user_text.lower()
-        ))
-        # Ignore farewell if user is providing data (digits)
-        if farewell_intent and len(re.findall(r"\d", user_text)) >= 3:
-            farewell_intent = False
-
-        if farewell_intent:
-            room_log("FAREWELL_DETECTED", text=user_text)
-            # Let the LLM respond naturally, then end the session after it finishes speaking.
-            async def _delayed_end():
-                await asyncio.sleep(6.0)  # give LLM time to speak its goodbye
-                state.should_end = True
-                state.disconnect_reason = "farewell"
-            asyncio.create_task(_delayed_end())
             return
 
     # Optional: capture agent text word-by-word if needed, but committed is safer for translations.
@@ -1247,7 +1165,7 @@ async def entrypoint(ctx: JobContext):
     async def _silence_monitor():
         while not state.should_end:
             await asyncio.sleep(1.0)
-            if not state.silence_enabled or not state.waiting_for_user or state.lookup_inflight or state.ticket_inflight:
+            if not state.silence_enabled or not state.waiting_for_user or state.lookup_inflight:
                 continue
             now = time.time()
             if now < state.silence_snooze_until:
@@ -1255,15 +1173,6 @@ async def entrypoint(ctx: JobContext):
             if (now - state.last_user_activity) < state.silence_timeout_s:
                 continue
             if (now - state.last_agent_activity) < state.silence_timeout_s:
-                continue
-            if (
-                state.silence_prompt_count == 0
-                and state.support_state in {"awaiting_order", "checking_order", "awaiting_phone", "checking_phone"}
-                and _is_order_or_phone_collection_prompt(state.last_agent_transcript_text)
-                and (now - state.last_agent_transcript_at) <= 25.0
-            ):
-                state.last_agent_activity = now
-                room_log("SILENCE_PROMPT_SKIPPED", reason="recent_collection_prompt")
                 continue
 
             if state.silence_prompt_count >= state.silence_max_prompts:
