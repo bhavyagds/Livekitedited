@@ -159,6 +159,18 @@ def _mentions_phone_lookup_intent(text: str) -> bool:
     )
 
 
+def _is_order_or_phone_collection_prompt(text: str) -> bool:
+    """True when agent text already asked user to share order/phone number."""
+    t = (text or "").lower()
+    if not t:
+        return False
+    return bool(
+        re.search(r"(provide|share|tell me|please).*(order number|phone number|mobile number)", t)
+        or re.search(r"(order number|phone number|mobile number).*(provide|share|tell me|please)", t)
+        or re.search(r"(do not have it|don't have it|check by phone number)", t)
+    )
+
+
 # -----------------------------------------------------------------------------
 # Room logs and state
 # -----------------------------------------------------------------------------
@@ -801,6 +813,19 @@ async def entrypoint(ctx: JobContext):
         before_llm_cb=_before_llm_cb,
     )
 
+    # Stream interim user transcripts to the UI for realtime feel.
+    # Access the underlying human input handler to catch words before they are finalized.
+    human_input = getattr(agent, "_human_input", None)
+    if human_input:
+        @human_input.on("interim_transcript")
+        def _on_interim_transcript(ev):
+            try:
+                text = ev.alternatives[0].text
+            except Exception:
+                text = None
+            if text:
+                asyncio.create_task(send_user_transcript(text, interim=True))
+
     room_log(
         "TURN_CONFIG",
         configured_endpointing_delay=configured_endpointing_delay,
@@ -832,10 +857,9 @@ async def entrypoint(ctx: JobContext):
 
     _last_user_interim = ""
     _last_user_interim_sent_at = 0.0
-    _last_user_final = ""
 
     async def send_user_transcript(text: str, *, interim: bool = False):
-        nonlocal _last_user_interim, _last_user_interim_sent_at, _last_user_final
+        nonlocal _last_user_interim, _last_user_interim_sent_at
         cleaned = (text or "").strip()
         if not cleaned:
             return
@@ -851,20 +875,18 @@ async def entrypoint(ctx: JobContext):
                 ensure_ascii=False,
             )
             try:
-                # FIX: use reliable=True so interim packets are never silently dropped.
-                await ctx.room.local_participant.publish_data(payload.encode("utf-8"), reliable=True)
+                # Use unreliable delivery for interims to minimize latency.
+                await ctx.room.local_participant.publish_data(payload.encode("utf-8"), reliable=False)
             except Exception:
                 pass
             return
 
-        # FIX: deduplicate finals using _last_user_final so that STT-corrected finals
-        # still go through even when they match the fast-tracked interim text, but only
-        # skip if this exact text was already sent AND no new interim has arrived since.
-        if cleaned == _last_user_final and cleaned != _last_user_interim:
+        if cleaned == state.last_user_transcript_text and (now_ts - state.last_user_transcript_at) < 5.0:
             room_log("USER_TEXT_DEDUPED", text=cleaned)
             return
 
-        _last_user_final = cleaned
+        state.last_user_transcript_text = cleaned
+        state.last_user_transcript_at = now_ts
         _last_user_interim = ""
         conversation_transcript.append(f"User: {cleaned}")
         payload = json.dumps(
@@ -1228,6 +1250,15 @@ async def entrypoint(ctx: JobContext):
             if (now - state.last_user_activity) < state.silence_timeout_s:
                 continue
             if (now - state.last_agent_activity) < state.silence_timeout_s:
+                continue
+            if (
+                state.silence_prompt_count == 0
+                and state.support_state in {"awaiting_order", "checking_order", "awaiting_phone", "checking_phone"}
+                and _is_order_or_phone_collection_prompt(state.last_agent_transcript_text)
+                and (now - state.last_agent_transcript_at) <= 25.0
+            ):
+                state.last_agent_activity = now
+                room_log("SILENCE_PROMPT_SKIPPED", reason="recent_collection_prompt")
                 continue
 
             if state.silence_prompt_count >= state.silence_max_prompts:
