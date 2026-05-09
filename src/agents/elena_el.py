@@ -398,27 +398,41 @@ def create_stt(is_sip_call: bool = False):
     provider = str(get_agent_setting("stt_provider", "deepgram") or "deepgram").lower()
     deepgram_api_key = getattr(settings, "deepgram_api_key", None)
     if provider == "deepgram" and USE_DEEPGRAM and deepgram_api_key:
-        model = "nova-2"
-        # numerals=True: forces Deepgram to output spoken digits as numerals
-        # (e.g. "seven seven three" → "773") which makes phone number parsing reliable.
-        # smart_format=True (SDK default): handles phone/date formatting automatically.
-        # keywords: boost confidence for individual digit words that STT often mishears
-        _digit_keywords = [
-            ("μηδέν", 1.5), ("ένα", 1.5), ("δύο", 1.5), ("τρία", 1.5),
-            ("τέσσερα", 1.5), ("πέντε", 1.5), ("έξι", 1.5), ("επτά", 1.5),
-            ("οκτώ", 1.5), ("εννέα", 1.5),
-        ]
-        return deepgram.STT(
-            model=model,
-            language="el",
-            api_key=deepgram_api_key,
-            interim_results=True,
-            numerals=False,
-            smart_format=False,
-            punctuate=True,
-        )
-    model = str(get_agent_setting("openai_stt_model", "whisper-1") or "whisper-1")
-    return openai.STT(model=model, api_key=settings.openai_api_key, language="el")
+        # Use the model configured in the DB, defaulting to nova-3 (same as English).
+        model = str(get_agent_setting("deepgram_stt_model", "nova-3") or "nova-3").strip()
+
+        # Base config matching elena_original.py / elena_en.py style — smart_format=True
+        # is critical for reliable digit transcription (e.g. "επτά επτά" → "77").
+        base = {
+            "model": model,
+            "language": "el",
+            "interim_results": True,
+            "punctuate": True,
+            "smart_format": True,
+        }
+
+        # Try with explicit api_key first; fall back without it (some SDK versions
+        # reject api_key as an unknown kwarg).
+        for kwargs in [
+            {**base, "api_key": deepgram_api_key},
+            base,
+        ]:
+            try:
+                logger.info(
+                    "Creating Deepgram STT (EL): model=%s language=el smart_format=True api_key_passed=%s",
+                    model,
+                    "api_key" in kwargs,
+                )
+                return deepgram.STT(**kwargs)
+            except TypeError as e:
+                logger.warning("Deepgram STT args not supported, retrying with fallback args: %s", e)
+                continue
+
+        # Hard fallback: minimal args only
+        return deepgram.STT(model=model, language="el")
+
+    openai_model = str(get_agent_setting("openai_stt_model", "whisper-1") or "whisper-1")
+    return openai.STT(model=openai_model, api_key=settings.openai_api_key, language="el")
 
 
 def create_tts():
@@ -837,19 +851,6 @@ async def entrypoint(ctx: JobContext):
         before_llm_cb=_before_llm_cb,
     )
 
-    # Stream interim user transcripts to the UI for realtime feel.
-    # Access the underlying human input handler to catch words before they are finalized.
-    human_input = getattr(agent, "_human_input", None)
-    if human_input:
-        @human_input.on("interim_transcript")
-        def _on_interim_transcript(ev):
-            try:
-                text = ev.alternatives[0].text
-            except Exception:
-                text = None
-            if text:
-                asyncio.create_task(send_user_transcript(text, interim=True))
-
     room_log(
         "TURN_CONFIG",
         configured_endpointing_delay=configured_endpointing_delay,
@@ -995,15 +996,15 @@ async def entrypoint(ctx: JobContext):
             if _mentions_no_order_number(user_text) or _mentions_phone_lookup_intent(user_text):
                 state.support_state = "awaiting_phone"
                 room_log("FLOW_TRANSITION", from_state="awaiting_order", to_state="awaiting_phone", reason="no_order_or_phone_intent")
-                suppress_llm()
-                asyncio.create_task(agent.say("Κανένα πρόβλημα! Μπορείτε να μου δώσετε τον αριθμό τηλεφώνου σας αντ' αυτού;", allow_interruptions=True))
+                # Let the LLM handle the transition sentence naturally.
                 return
 
             # If user already gave a full phone-like number, use phone lookup directly.
             phone_candidate = _normalize_phone_for_lookup(user_text)
             if phone_candidate:
                 state.support_state = "awaiting_phone"
-                suppress_llm()
+                agent.interrupt()  # Cancel any in-progress LLM speech immediately
+                suppress_llm(15.0)
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(10.0)
                 asyncio.create_task(_run_phone_lookup(agent, phone_candidate))
@@ -1011,16 +1012,16 @@ async def entrypoint(ctx: JobContext):
 
             order_id = _normalize_order_id_strict(user_text)
             if order_id:
-                suppress_llm()
+                agent.interrupt()  # Cancel any in-progress LLM speech immediately
+                suppress_llm(15.0)
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(10.0)
                 asyncio.create_task(_run_order_lookup(agent, order_id))
                 return
 
-            prompt = "Παρακαλώ πείτε μου τον αριθμό παραγγελίας σας. Αν δεν τον έχετε, πείτε το και θα τον βρω με το τηλέφωνό σας."
-            if not _should_suppress_clarification(prompt):
-                suppress_llm()
-                asyncio.create_task(agent.say(prompt, allow_interruptions=True))
+            # Let the LLM ask for the order number naturally to avoid double-talking.
+            # We only provide deterministic fallback prompts if we fall through 
+            # to phone number collection.
             return
 
         # 3) Active phone-support flow
@@ -1033,7 +1034,8 @@ async def entrypoint(ctx: JobContext):
                 return
             phone = _normalize_phone_for_lookup(user_text)
             if phone:
-                suppress_llm()
+                agent.interrupt()  # Cancel any in-progress LLM speech immediately
+                suppress_llm(15.0)
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(10.0)
                 asyncio.create_task(_run_phone_lookup(agent, phone))
@@ -1092,7 +1094,7 @@ async def entrypoint(ctx: JobContext):
             if _is_yes(user_text):
                 suppress_llm()
                 asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(30.0)
+                snooze_silence(10.0)
                 asyncio.create_task(agent.say("Ευχαριστώ. Δημιουργώ το αίτημα τώρα.", allow_interruptions=True))
                 asyncio.create_task(_run_create_ticket(agent))
                 return
@@ -1119,6 +1121,26 @@ async def entrypoint(ctx: JobContext):
             state.support_state = "awaiting_order"
             state.last_issue = user_text
             room_log("FLOW_TRANSITION", from_state="idle", to_state="awaiting_order", reason="support_intent")
+            
+            # Check if an Order ID or Phone was already provided in this same sentence.
+            order_id = _normalize_order_id_strict(user_text)
+            if order_id:
+                agent.interrupt()  # Cancel any in-progress LLM speech immediately
+                suppress_llm(15.0)
+                asyncio.create_task(set_ui_state("thinking"))
+                snooze_silence(10.0)
+                asyncio.create_task(_run_order_lookup(agent, order_id))
+                return
+            
+            phone = _normalize_phone_for_lookup(user_text)
+            if phone:
+                state.support_state = "awaiting_phone"
+                agent.interrupt()  # Cancel any in-progress LLM speech immediately
+                suppress_llm(15.0)
+                asyncio.create_task(set_ui_state("thinking"))
+                snooze_silence(10.0)
+                asyncio.create_task(_run_phone_lookup(agent, phone))
+                return
             return
 
         ticket_intent = bool(re.search(
@@ -1129,7 +1151,8 @@ async def entrypoint(ctx: JobContext):
         ))
         if ticket_intent:
             state.support_state = "ticket_name"
-            suppress_llm()
+            agent.interrupt()  # Cancel any in-progress LLM speech immediately
+            suppress_llm(15.0)
             asyncio.create_task(agent.say("Βεβαίως, μπορώ να δημιουργήσω ένα αίτημα υποστήριξης. Παρακαλώ πείτε μου το πλήρες όνομά σας.", allow_interruptions=True))
             return
 
