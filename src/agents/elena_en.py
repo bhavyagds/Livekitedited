@@ -1014,9 +1014,13 @@ async def entrypoint(ctx: JobContext):
                 snooze_silence(10.0)
                 asyncio.create_task(_run_phone_lookup(agent, phone))
                 return
-            prompt = "I need the full phone number to check the order. Please share it once."
-            if not _should_suppress_clarification(prompt):
-                suppress_llm()
+            prompt = None
+            # Only prompt for the full number if the user actually tried to give digits.
+            digit_count = len(re.findall(r"\d", phone or user_text))
+            if digit_count >= 3:
+                prompt = "I need the full phone number to check the order. Please share it once."
+            if prompt and not _should_suppress_clarification(prompt):
+                suppress_llm(15.0)
                 asyncio.create_task(agent.say(prompt, allow_interruptions=True))
             return
 
