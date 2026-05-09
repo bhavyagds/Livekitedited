@@ -170,11 +170,11 @@ def convert_numbers_in_text(text: str) -> str:
         
         whole_greek = number_to_greek(int(whole))
         
-        # Convert decimal part digit by digit or as number
+        # Convert decimal part one digit at a time or as number
         if len(decimal) <= 2:
             decimal_greek = number_to_greek(int(decimal))
         else:
-            # For longer decimals, read digit by digit
+            # For longer decimals, read one digit at a time
             decimal_greek = " ".join(MONOPSIIFIA[int(d)] for d in decimal)
         
         return f"{whole_greek} κόμμα {decimal_greek}"

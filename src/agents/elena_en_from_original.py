@@ -39,8 +39,9 @@ from src.agents.prompts import (
     get_system_prompt, get_system_prompt_async, get_greeting, get_closing, get_stt_language,
     get_agent_language, get_agent_setting, set_runtime_language
 )
-from src.utils import detect_language
 from src.agents.tools import order_lookup, support_ticket, knowledge_base
+from src.utils import detect_language
+
 logger = logging.getLogger(__name__)
 
 
@@ -132,44 +133,6 @@ _ORDER_WORD_TO_DIGIT: dict[str, str] = {
     "seven": "7",
     "eight": "8",
     "nine": "9",
-    # Greek
-    "\u03bc\u03b7\u03b4\u03ad\u03bd": "0",
-    "\u03bc\u03b7\u03b4\u03b5\u03bd": "0",
-    "\u03ad\u03bd\u03b1": "1",
-    "\u03b5\u03bd\u03b1": "1",
-    "\u03b4\u03cd\u03bf": "2",
-    "\u03b4\u03c5\u03bf": "2",
-    "\u03c4\u03c1\u03af\u03b1": "3",
-    "\u03c4\u03c1\u03b9\u03b1": "3",
-    "\u03c4\u03ad\u03c3\u03c3\u03b5\u03c1\u03b1": "4",
-    "\u03c4\u03b5\u03c3\u03c3\u03b5\u03c1\u03b1": "4",
-    "\u03c0\u03ad\u03bd\u03c4\u03b5": "5",
-    "\u03c0\u03b5\u03bd\u03c4\u03b5": "5",
-    "\u03ad\u03be\u03b9": "6",
-    "\u03b5\u03be\u03b9": "6",
-    "\u03b5\u03c0\u03c4\u03ac": "7",
-    "\u03b5\u03c0\u03c4\u03b1": "7",
-    "\u03b5\u03c6\u03c4\u03ac": "7",
-    "\u03b5\u03c6\u03c4\u03b1": "7",
-    "\u03bf\u03ba\u03c4\u03ce": "8",
-    "\u03bf\u03ba\u03c4\u03c9": "8",
-    "\u03b5\u03bd\u03bd\u03ad\u03b1": "9",
-    "\u03b5\u03bd\u03bd\u03b5\u03b1": "9",
-    # Common transliterations
-    "ena": "1",
-    "dyo": "2",
-    "tria": "3",
-    "tessera": "4",
-    "pente": "5",
-    "eksi": "6",
-    "epta": "7",
-    "okto": "8",
-    "ennea": "9",
-    # Common STT variants for Greek "εννιά"
-    "\u03bd\u03b5\u03b1": "9",
-    "\u03bd\u03b9\u03b1": "9",
-    "\u03b5\u03bd\u03b9\u03b1": "9",
-    "\u03b5\u03bd\u03b9\u03ac": "9",
 }
 
 
@@ -179,31 +142,7 @@ def _normalize_digit_token(token: str) -> str:
     return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
 
 
-def _extract_greek_mobile_from_digits(raw_digits: str) -> Optional[str]:
-    """
-    Extract best Greek mobile candidate (69XXXXXXXX) from a noisy digit stream.
-    Handles extra prefixes/noise and picks the last valid 10-digit window.
-    """
-    digits = re.sub(r"\D", "", raw_digits or "")
-    if not digits:
-        return None
-
-    candidates: list[str] = []
-
-    def _collect(stream: str) -> None:
-        if re.fullmatch(r"69\d{8}", stream):
-            candidates.append(stream)
-        for match in re.finditer(r"69\d{8}", stream):
-            candidates.append(match.group(0))
-
-    _collect(digits)
-
-    if digits.startswith("0030"):
-        _collect(digits[4:])
-    elif digits.startswith("30") and len(digits) > 10:
-        _collect(digits[2:])
-
-    return candidates[-1] if candidates else None
+# Greek mobile extraction removed in elena_en.py
 
 
 def _digits_from_phrase(text: str) -> str:
@@ -267,14 +206,6 @@ def _normalize_order_id_strict(raw_text: str) -> Optional[str]:
 def _normalize_phone_for_lookup(raw_text: str) -> Optional[str]:
     """
     Normalize spoken phone text into a complete phone number for Shopify lookup.
-
-    Rules:
-    - Reject partial numbers.
-    - Accept configured market pattern if provided.
-    - By default, accept:
-      - Greek mobile: 69XXXXXXXX
-      - Greek international mobile: 3069XXXXXXXX or 003069XXXXXXXX
-      - Generic full phone numbers: 10 to 15 digits
     """
     normalized = (raw_text or "").strip().lower()
     if not normalized:
@@ -288,7 +219,7 @@ def _normalize_phone_for_lookup(raw_text: str) -> Optional[str]:
     configured_regex = str(
         get_agent_setting(
             "phone_lookup_regex",
-            r"^(?:69\d{8}|30\d{10}|0030\d{10}|\d{10,15})$",
+            r"^\d{10,15}$",
         )
         or ""
     ).strip()
@@ -298,10 +229,6 @@ def _normalize_phone_for_lookup(raw_text: str) -> Optional[str]:
                 return compact
         except re.error:
             room_log("INVALID_PHONE_REGEX_SETTING", regex=configured_regex)
-
-    greek_mobile = _extract_greek_mobile_from_digits(compact)
-    if greek_mobile:
-        return greek_mobile
 
     min_digits = _as_int(
         get_agent_setting("phone_lookup_min_digits", 10),
@@ -320,38 +247,24 @@ def _normalize_phone_for_lookup(raw_text: str) -> Optional[str]:
     return None
 
 
-def _speak_digits(raw: str, language: str) -> str:
+def _speak_digits(raw: str) -> str:
     """Convert digits into digit-by-digit spoken words for reliable confirmations."""
     digits = re.sub(r"\D", "", raw or "")
     if not digits:
         return ""
 
-    if (language or "").lower() == "el":
-        words = {
-            "0": "μηδέν",
-            "1": "ένα",
-            "2": "δύο",
-            "3": "τρία",
-            "4": "τέσσερα",
-            "5": "πέντε",
-            "6": "έξι",
-            "7": "επτά",
-            "8": "οκτώ",
-            "9": "εννέα",
-        }
-    else:
-        words = {
-            "0": "zero",
-            "1": "one",
-            "2": "two",
-            "3": "three",
-            "4": "four",
-            "5": "five",
-            "6": "six",
-            "7": "seven",
-            "8": "eight",
-            "9": "nine",
-        }
+    words = {
+        "0": "zero",
+        "1": "one",
+        "2": "two",
+        "3": "three",
+        "4": "four",
+        "5": "five",
+        "6": "six",
+        "7": "seven",
+        "8": "eight",
+        "9": "nine",
+    }
 
     return " ".join(words[digit] for digit in digits)
 
@@ -805,8 +718,6 @@ def _is_affirmative_utterance(text: str) -> bool:
         "right", "absolutely", "definitely", "of course", "exactly",
         "that s right", "that is right", "that s correct", "that is correct",
         "go ahead", "please go ahead", "yes please", "yes go ahead",
-        "ναι", "ενταξει", "εντάξει", "σωστα", "σωστά",
-        "ναι ευχαριστω", "ναι παρακαλώ", "βεβαιως", "ακριβως",
     }
     # Exact match first
     if normalized in yes_tokens:
@@ -823,7 +734,7 @@ def _is_negative_utterance(text: str) -> bool:
     normalized = _normalize_intent_text(text)
     if not normalized:
         return False
-    no_tokens = {"no", "nope", "nah", "not now", "οχι", "όχι", "οχι ευχαριστω", "όχι ευχαριστώ"}
+    no_tokens = {"no", "nope", "nah", "not now"}
     # Handle "No. Thanks."
     if "no thanks" in normalized or "no. thanks" in normalized:
         return True
@@ -887,14 +798,12 @@ def _classify_lookup_result(result_text: str) -> str:
         "couldn t find order",
         "couldn't find order",
         "could not find order",
-        # Single-order variants (from order_lookup.py and get_order_details)
         "couldn t find that order",
         "could not find that order",
         "i couldn t find that order",
         "i could not find that order",
         "i couldn t find order",
         "i could not find order",
-        # Phone lookup not-found strings
         "no order was found for this phone",
         "no order was found for this phone number",
         "couldn t find any order with this phone number",
@@ -922,22 +831,6 @@ def _classify_lookup_result(result_text: str) -> str:
         "no orders were found",
         "didn t find any orders",
         "did not find any orders",
-        "δεν μπορώ να βρω την παραγγελία",
-        "δεν μπορω να βρω την παραγγελια",
-        "δεν βρήκα την παραγγελία",
-        "δεν βρηκα την παραγγελια",
-        "δεν βρέθηκε παραγγελία",
-        "δεν βρεθηκε παραγγελια",
-        "δεν βρέθηκαν παραγγελίες",
-        "δεν βρεθηκαν παραγγελιες",
-        "δεν φαίνεται έγκυρος αριθμός παραγγελίας",
-        "δεν φαινεται εγκυρος αριθμος παραγγελιας",
-        "δεν βρέθηκε καμία παραγγελία",
-        "δεν βρεθηκε καμια παραγγελια",
-        "δεν βρηκαμε παραγγελιες",
-        # Phone-specific Greek
-        "δεν βρέθηκε παραγγελία με αυτον τον αριθμο τηλεφωνου",
-        "δεν βρεθηκε παραγγελια με αυτον τον αριθμο τηλεφωνου",
         "no orders found for this phone",
         "couldn't find any orders matching the phone",
         "couldn t find any orders matching the phone",
@@ -947,8 +840,6 @@ def _classify_lookup_result(result_text: str) -> str:
         "couldn t find any orders for this phone",
         "could not find any orders for this phone",
         "couldn't find any orders for this phone",
-        "σωστό αριθμό παραγγελίας",
-        "σωστο αριθμο παραγγελιας",
     )
     if any(marker in normalized for marker in not_found_markers):
         return "not_found"
@@ -965,35 +856,27 @@ def _classify_lookup_result(result_text: str) -> str:
         "order details for",
         "here are the details for order",
         "would you like more details about this order",
-        "βρήκα την παραγγελία σας",
-        "βρηκα την παραγγελια σας",
-        "στοιχεία παραγγελίας",
-        "λεπτομέρειες παραγγελίας",
-        "θέλετε περισσότερες λεπτομέρειες",
     )
     if any(marker in normalized for marker in strong_found_markers):
         return "found"
 
     has_order_ref = bool(
         re.search(r"\border\s*#?\s*\d{3,8}\b", normalized)
-        or re.search(r"\bπαραγγε\w*\s*#?\s*\d{3,8}\b", normalized)
     )
     has_status = bool(
         re.search(
-            r"\b(status|is completed|was cancelled|completed|cancelled|fulfilled|unfulfilled|paid|"
-            r"κατάσταση|ολοκληρώθηκε|ακυρώθηκε)\b",
+            r"\b(status|is completed|was cancelled|completed|cancelled|fulfilled|unfulfilled|paid)\b",
             normalized,
         )
     )
     has_delivery_signal = bool(
         re.search(
-            r"\b(delivery date|scheduled for delivery|delivery is scheduled|delivery|"
-            r"παράδοση|προγραμματισμένη παράδοση)\b",
+            r"\b(delivery date|scheduled for delivery|delivery is scheduled|delivery)\b",
             normalized,
         )
     )
     has_total_signal = bool(
-        re.search(r"\b(total|subtotal|σύνολο|συνολο)\b", normalized)
+        re.search(r"\b(total|subtotal)\b", normalized)
     )
     has_items_signal = bool(re.search(r"\b(line items|items \(|items:)\b", normalized))
 
@@ -1337,7 +1220,7 @@ def _should_block_silence_prompt(reason: str = "") -> bool:
     return False
 
 
-def _build_order_voice_summary(result_text: str, language: str) -> str:
+def _build_order_voice_summary(result_text: str) -> str:
     """
     Convert raw lookup output into concise voice-safe summary.
     Keeps only status/date/total and formats order/date for speech.
@@ -1346,25 +1229,14 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
     if not text:
         return ""
 
-    lang = (language or "en").lower()
     lookup_state = _classify_lookup_result(text)
 
     if lookup_state == "not_found":
-        if lang == "el":
-            return (
-                "Λυπάμαι, αλλά δεν μπόρεσα να βρω την παραγγελία σας με τα στοιχεία που μου δώσατε. "
-                "Παρακαλώ ελέγξτε ξανά τον αριθμό παραγγελίας στο email επιβεβαίωσης που λάβατε."
-            )
         return (
             "I'm sorry, but I couldn't find your order with the details provided. "
             "Please double-check the order number from the confirmation email you received."
         )
     if lookup_state == "unknown":
-        if lang == "el":
-            return (
-                "Δεν μπόρεσα να επιβεβαιώσω τα στοιχεία αυτής της παραγγελίας. "
-                "Μπορείτε να ελέγξετε τον αριθμό και να τον πείτε ξανά ψηφίο προς ψηφίο;"
-            )
         return (
             "I couldn't verify this order from the details I received. "
             "Please check the order number and repeat it digit by digit."
@@ -1377,31 +1249,17 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
         
         # For long numbers (phone numbers, order IDs), always speak digit-by-digit
         if len(digits) > 4:
-            return _speak_digits(digits, lang)
+            return _speak_digits(digits)
             
-        if lang == "el":
-            try:
-                from src.utils.greek_numbers import number_to_greek
-                return number_to_greek(int(digits))
-            except Exception:
-                return _speak_digits(digits, lang)
-        
         # For English, if not digit-by-digit, at least space them out for TTS
         return " ".join(digits)
 
     def _month_name(month: int) -> str:
-        if lang == "el":
-            names = {
-                1: "Ιανουαρίου", 2: "Φεβρουαρίου", 3: "Μαρτίου", 4: "Απριλίου",
-                5: "Μαΐου", 6: "Ιουνίου", 7: "Ιουλίου", 8: "Αυγούστου",
-                9: "Σεπτεμβρίου", 10: "Οκτωβρίου", 11: "Νοεμβρίου", 12: "Δεκεμβρίου",
-            }
-        else:
-            names = {
-                1: "January", 2: "February", 3: "March", 4: "April",
-                5: "May", 6: "June", 7: "July", 8: "August",
-                9: "September", 10: "October", 11: "November", 12: "December",
-            }
+        names = {
+            1: "January", 2: "February", 3: "March", 4: "April",
+            5: "May", 6: "June", 7: "July", 8: "August",
+            9: "September", 10: "October", 11: "November", 12: "December",
+        }
         return names.get(month, "")
 
     def _format_date(raw_date: str) -> str:
@@ -1416,56 +1274,20 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
         return f"{day:02d}/{month:02d}"
 
     order_match = re.search(r"(?i)\border\s*#?\s*(\d{3,8})\b", text)
-    if not order_match:
-        order_match = re.search(r"(?i)\bπαραγγε\w*\s*(\d{3,8})\b", text)
     order_number = order_match.group(1) if order_match else ""
 
     # Handle both "is completed" and "is currently completed" forms.
-    # Allow capturing multiple words (e.g. "being prepared", "on the way") by including spaces in the group.
     status_match = re.search(r"(?i)\bis(?:\s+currently)?\s+([a-z\s]{2,30}?)(?:\.|\s+delivery|\s+scheduled|$)", text)
     status = (status_match.group(1).strip().lower() if status_match else "")
-    if not status:
-        if re.search(r"(?i)\bολοκληρ", text):
-            status = "completed"
-        elif re.search(r"(?i)\bακυρ", text):
-            status = "cancelled"
 
     date_match = re.search(
-        r"(?i)(?:delivery(?:\s+on)?|scheduled for delivery on|παράδοση(?:\s+στις)?)\s*[:\-]?\s*(\d{4}[/-]\d{2}[/-]\d{2})",
+        r"(?i)(?:delivery(?:\s+on)?|scheduled for delivery on)\s*[:\-]?\s*(\d{4}[/-]\d{2}[/-]\d{2})",
         text,
     )
     spoken_date = _format_date(date_match.group(1)) if date_match else ""
 
     total_match = re.search(r"(?i)\btotal\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?)", text)
-    if not total_match:
-        total_match = re.search(r"(?i)\bσύνολο\s*[:\-]?\s*([0-9]+(?:[.,][0-9]+)?)", text)
     amount = (total_match.group(1).replace(",", ".") if total_match else "")
-
-    if lang == "el":
-        intro = "Ευχαριστώ για την αναμονή. Βρήκα την παραγγελία σας."
-        if status == "completed":
-            status_phrase = "έχει ολοκληρωθεί"
-        elif status == "cancelled":
-            status_phrase = "έχει ακυρωθεί"
-        elif status:
-            status_phrase = f"είναι σε κατάσταση {status}"
-        else:
-            status_phrase = "βρέθηκε"
-        parts = [intro]
-        if order_number:
-            parts.append(f"Ο αριθμός παραγγελίας {order_number} {status_phrase}.")
-        else:
-            parts.append(f"Η παραγγελία σας {status_phrase}.")
-        if spoken_date:
-            parts.append(f"Η παράδοση είναι προγραμματισμένη για {spoken_date}.")
-        if amount:
-            whole, _, frac = amount.partition(".")
-            if frac:
-                parts.append(f"Το σύνολο είναι {int(whole)} ευρώ και {int(frac[:2]):02d} λεπτά.")
-            else:
-                parts.append(f"Το σύνολο είναι {int(whole)} ευρώ.")
-        parts.append("Θέλετε περισσότερες λεπτομέρειες για αυτή την παραγγελία;")
-        return re.sub(r"\s{2,}", " ", " ".join(parts)).strip()
 
     intro = "Thanks for waiting. I found your order."
     if status == "completed":
@@ -1493,7 +1315,9 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
     return re.sub(r"\s{2,}", " ", " ".join(parts)).strip()
 
 
-def _build_phone_lookup_voice_summary(result_text: str, language: str) -> str:
+
+
+def _build_phone_lookup_voice_summary(result_text: str) -> str:
     """
     Build voice-safe summary for phone lookups.
     Preserve explicit phone not-found wording from the tool output.
@@ -1502,27 +1326,16 @@ def _build_phone_lookup_voice_summary(result_text: str, language: str) -> str:
     if not text:
         return ""
 
-    lang = (language or "en").lower()
     lookup_state = _classify_lookup_result(text)
     normalized = _normalize_intent_text(text)
 
     if lookup_state == "not_found":
-        if lang == "el":
-            return (
-                "Δεν μπόρεσα να βρω κάποια παραγγελία με αυτόν τον αριθμό τηλεφώνου. "
-                "Μπορείτε να ελέγξετε τον αριθμό και να τον πείτε ξανά ψηφίο προς ψηφίο;"
-            )
         return (
             "I couldn't find any order with this phone number. "
             "Please check the number and repeat it digit by digit."
         )
 
     if lookup_state == "unknown":
-        if lang == "el":
-            return (
-                "Δεν μπόρεσα να επιβεβαιώσω κάποια παραγγελία με αυτόν τον αριθμό τηλεφώνου. "
-                "Μπορείτε να ελέγξετε τον αριθμό και να τον πείτε ξανά ψηφίο προς ψηφίο;"
-            )
         return (
             "I couldn't verify any order with this phone number. "
             "Please check the phone number and repeat it digit by digit."
@@ -1533,12 +1346,12 @@ def _build_phone_lookup_voice_summary(result_text: str, language: str) -> str:
         or "could not understand that phone number" in normalized
         or "phone number must" in normalized
     ):
-        return _repeat_number_prompt_for_mode("phone", lang)
+        return _repeat_number_prompt_for_mode("phone")
 
-    return _build_order_voice_summary(text, lang) or text
+    return _build_order_voice_summary(text) or text
 
 
-def _build_order_details_voice_summary(result_text: str, language: str) -> str:
+def _build_order_details_voice_summary(result_text: str) -> str:
     """
     Convert raw get_order_details output into a concise, voice-safe response.
     Never return raw multiline tool payload to avoid long or unstable speech.
@@ -1550,21 +1363,14 @@ def _build_order_details_voice_summary(result_text: str, language: str) -> str:
 
     # Never let template placeholders leak into customer-facing speech.
     if re.search(r"\[[^\]]+\]", raw):
-        lang = (language or "en").lower()
-        if lang == "el":
-            return (
-                "Μπορώ να μοιραστώ τις λεπτομέρειες της παραγγελίας μόλις τις επιβεβαιώσω σωστά. "
-                "Θέλετε να το ελέγξω ξανά;"
-            )
         return (
             "I can share the order details as soon as I verify them correctly. "
             "Would you like me to check that again?"
         )
 
-    lang = (language or "en").lower()
     lookup_state = _classify_lookup_result(cleaned)
     if lookup_state == "not_found":
-        return _build_order_voice_summary(cleaned, lang)
+        return _build_order_voice_summary(cleaned)
 
     max_items = _as_int(
         get_agent_setting("order_details_voice_max_items", 5),
@@ -1578,18 +1384,11 @@ def _build_order_details_voice_summary(result_text: str, language: str) -> str:
         return re.sub(r"\D", "", raw_value or "")
 
     def _month_name(month: int) -> str:
-        if lang == "el":
-            names = {
-                1: "Ιανουαρίου", 2: "Φεβρουαρίου", 3: "Μαρτίου", 4: "Απριλίου",
-                5: "Μαΐου", 6: "Ιουνίου", 7: "Ιουλίου", 8: "Αυγούστου",
-                9: "Σεπτεμβρίου", 10: "Οκτωβρίου", 11: "Νοεμβρίου", 12: "Δεκεμβρίου",
-            }
-        else:
-            names = {
-                1: "January", 2: "February", 3: "March", 4: "April",
-                5: "May", 6: "June", 7: "July", 8: "August",
-                9: "September", 10: "October", 11: "November", 12: "December",
-            }
+        names = {
+            1: "January", 2: "February", 3: "March", 4: "April",
+            5: "May", 6: "June", 7: "July", 8: "August",
+            9: "September", 10: "October", 11: "November", 12: "December",
+        }
         return names.get(month, "")
 
     def _format_date(raw_value: str) -> str:
@@ -1838,13 +1637,9 @@ def _is_lookup_wait_ack_only_text(text: str) -> bool:
     return not has_results
 
 
-def _repeat_number_prompt_for_mode(mode: str, lang: str) -> str:
+def _repeat_number_prompt_for_mode(mode: str) -> str:
     """Recovery prompt when number capture/validation is unclear."""
     is_phone = (mode or "").lower() == "phone"
-    if lang == "el":
-        if is_phone:
-            return "Μπορείτε να πείτε ξανά τον αριθμό τηλεφώνου σας ψηφίο προς ψηφίο, παρακαλώ;"
-        return "Μπορείτε να πείτε ξανά τον αριθμό παραγγελίας ψηφίο προς ψηφίο, παρακαλώ;"
     if is_phone:
         return "Could you please repeat your mobile number digit by digit?"
     return "Could you please repeat your order number digit by digit?"
@@ -1852,8 +1647,6 @@ def _repeat_number_prompt_for_mode(mode: str, lang: str) -> str:
 
 def _lookup_progress_prompt() -> str:
     """Progress prompt while deterministic lookup is still in progress."""
-    if get_agent_language() == "el":
-        return "Ελέγχω ακόμη τα στοιχεία της παραγγελίας σας. Μία στιγμή ακόμη, παρακαλώ."
     return "I’m still checking your order details. One more moment, please."
 
 
@@ -2135,31 +1928,9 @@ def create_tts():
         return create_openai_tts()
 
     agent_lang = "en"
-    auto_language_switch = False
     
-    # CRITICAL: Select the correct model based on language
-    # eleven_turbo_v2 is ENGLISH ONLY - Greek requires multilingual model
-    configured_model = settings.elevenlabs_model
-    if auto_language_switch:
-        if configured_model not in {"eleven_multilingual_v2", "eleven_turbo_v2_5"}:
-            tts_model = "eleven_multilingual_v2"
-            logger.warning(
-                "TTS: overriding %s -> %s for auto language switching",
-                configured_model,
-                tts_model,
-            )
-        else:
-            tts_model = configured_model
-    elif agent_lang == "el" and configured_model == "eleven_turbo_v2":
-        # Override to multilingual for Greek support
-        tts_model = "eleven_multilingual_v2"
-        logger.warning("TTS: overriding %s -> %s for Greek support", configured_model, tts_model)
-    elif agent_lang == "el" and "turbo" in configured_model.lower() and "v2_5" not in configured_model:
-        # eleven_turbo_v2 doesn't support Greek, v2.5 does
-        tts_model = "eleven_turbo_v2_5"
-        logger.warning("TTS: overriding %s -> %s for Greek support", configured_model, tts_model)
-    else:
-        tts_model = configured_model
+    # TTS model selection for English-only elena_en.py
+    tts_model = settings.elevenlabs_model
     
     logger.info("TTS model selected: %s (language: %s)", tts_model, agent_lang)
     
@@ -2251,17 +2022,8 @@ def create_tts():
 def create_stt(*, is_sip_call: bool = False):
     """Create the Speech-to-Text instance optimized for speed."""
     agent_lang = "en"
-    stt_lang = get_stt_language(agent_lang)
-    auto_language_switch = False
-    stt_auto_detect = _as_bool(
-        get_agent_setting("stt_auto_detect", auto_language_switch),
-        default=auto_language_switch,
-    )
-    sip_stt_auto_detect = _as_bool(
-        get_agent_setting("sip_stt_auto_detect", False),
-        default=False,
-    )
-    effective_stt_auto_detect = stt_auto_detect and (not is_sip_call or sip_stt_auto_detect)
+    stt_lang = "en-US"
+    effective_stt_auto_detect = False
     openai_stt_model = str(get_agent_setting("openai_stt_model", "whisper-1") or "whisper-1").strip()
     deepgram_stt_model = str(get_agent_setting("deepgram_stt_model", "nova-3") or "nova-3").strip()
     # Bias OpenAI STT to preserve source language (Greek/English) instead of translating.
@@ -2425,21 +2187,9 @@ def create_stt(*, is_sip_call: bool = False):
     if not provider:
         provider = "deepgram" if USE_DEEPGRAM else "openai"
 
-    if auto_language_switch and not effective_stt_auto_detect:
-        if is_sip_call and not sip_stt_auto_detect:
-            logger.info(
-                "Auto language switch enabled, but SIP STT auto detect is disabled; using fixed STT language: %s",
-                stt_lang,
-            )
-        else:
-            logger.info(
-                "Auto language switch enabled, but STT auto detect is disabled; using fixed STT language: %s",
-                stt_lang,
-            )
-    
     # Use Deepgram as primary when selected; OpenAI remains the fallback.
     if provider == "deepgram" and USE_DEEPGRAM:
-        use_auto_detect = auto_language_switch and effective_stt_auto_detect
+        use_auto_detect = False  # English-only: no auto language detection
         fallback_language = None if use_auto_detect else stt_lang
         fallback = _create_openai_stt(language=fallback_language)
         try:
@@ -2466,15 +2216,7 @@ def create_stt(*, is_sip_call: bool = False):
         )
         return FailoverSTT(primary, fallback)
 
-    if auto_language_switch and effective_stt_auto_detect:
-        try:
-            logger.info("Using OpenAI STT - model: %s - language: auto", openai_stt_model)
-            room_log("STT_PROVIDER", provider="openai", model=openai_stt_model, language="auto")
-            return _create_openai_stt(language=None)
-        except TypeError as e:
-            logger.warning("OpenAI STT auto language failed (%s); falling back to %s", e, stt_lang)
-    
-    # Fallback to OpenAI Whisper
+    # Fallback to OpenAI Whisper (English only)
     if provider == "deepgram" and not USE_DEEPGRAM:
         logger.warning("Deepgram requested but not available; falling back to OpenAI Whisper")
     logger.info("Using OpenAI STT - model: %s - language: %s", openai_stt_model, stt_lang)
@@ -2491,7 +2233,7 @@ def create_vad(*, is_sip_call: bool = False):
         max_value=0.8,
     )
     # Language-aware silence delay: Greek speakers tend to pause more between digits.
-    initial_lang = get_agent_language()
+    initial_lang = 'en'
     if initial_lang == "el":
         default_silence = 2.0 if is_sip_call else 1.8
     else:
@@ -2588,27 +2330,18 @@ class ElenaFunctionContext(llm.FunctionContext):
 
     def _pick_lookup_wait_phrase(self) -> str:
         """Pick a natural, non-repeating wait phrase based on current language."""
-        lang = get_agent_language()
         silence_grace_s = _as_float(
             get_agent_setting("order_lookup_silence_grace_seconds", 30.0),
             30.0,
             min_value=20.0,
             max_value=60.0,
         )
-        if lang == "en":
-            phrases = (
-                "Got it. Please give me a moment to check the details for you.",
-                "Okay, I have it. One moment while I pull up the details.",
-                "Thanks, let me check that for you right away.",
-                "Perfect, I’ll quickly look this up for you now.",
-            )
-        else:
-            phrases = (
-                "Ωραία, το έχω. Δώστε μου μια στιγμή να το ελέγξω.",
-                "Εντάξει, το πήρα. Μια στιγμή να δω τις λεπτομέρειες.",
-                "Τέλεια, ευχαριστώ. Το ελέγχω αμέσως για εσάς.",
-                "Σας ευχαριστώ, το έχω. Δώστε μου ένα λεπτό να το βρω.",
-            )
+        phrases = (
+            "Got it. Please give me a moment to check the details for you.",
+            "Okay, I have it. One moment while I pull up the details.",
+            "Thanks, let me check that for you right away.",
+            "Perfect, I’ll quickly look this up for you now.",
+        )
 
         last_phrase = _current_session.get("last_lookup_wait_phrase")
         options = [p for p in phrases if p != last_phrase] or list(phrases)
@@ -2617,7 +2350,7 @@ class ElenaFunctionContext(llm.FunctionContext):
         _current_session["pending_lookup_wait_phrase"] = phrase
         _current_session["pending_lookup_wait_phrase_set_at"] = time.time()
         _snooze_silence_prompts(silence_grace_s, reason="lookup_wait_ack")
-        room_log("TOOL_WAIT_ACK_SELECTED", language=lang, phrase=_truncate(phrase))
+        room_log("TOOL_WAIT_ACK_SELECTED", phrase=_truncate(phrase))
         return phrase
 
     async def _run_tool_with_silence_pause(self, name: str, coro):
@@ -2634,7 +2367,7 @@ class ElenaFunctionContext(llm.FunctionContext):
         order_number: Annotated[str, llm.TypeInfo(description="The order number (min 4 digits)")],
     ) -> str:
         """Look up an order. Returns brief status first. Use get_order_details for more info."""
-        lang = get_agent_language()
+        lang = 'en'
 
         # 0. Empty/Non-numeric Guard: If user says they don't have it, don't try to validate
         if not any(char.isdigit() for char in order_number or ""):
@@ -2656,8 +2389,6 @@ class ElenaFunctionContext(llm.FunctionContext):
             if not _normalize_order_id_strict(order_number):
                 room_log("TOOL_RESULT_BLOCKED", name="lookup_order", reason="number_mode_mismatch")
                 expected = _expected_order_digits()
-                if lang == "el":
-                    return f"Αυτό δεν μοιάζει με αριθμό παραγγελίας. Δώστε μου τον αριθμό παραγγελίας σας (τουλάχιστον {expected} ψηφία)."
                 return f"That doesn't look like an order number. Please share your order number (at least {expected} digits)."
 
         strict_order = _normalize_order_id_strict(order_number)
@@ -2665,8 +2396,6 @@ class ElenaFunctionContext(llm.FunctionContext):
             min_d, max_d = _order_digit_range()
             room_log("TOOL_RESULT_BLOCKED", name="lookup_order", reason="invalid_order_id_format", input=order_number)
             _set_support_flow_state(FLOW_AWAITING_ORDER_NUMBER, reason="invalid_order_format")
-            if lang == "el":
-                return f"Ο αριθμός παραγγελίας πρέπει να έχει από {min_d} έως {max_d} ψηφία. Μπορείτε να τον πείτε ξανά;"
             return f"The order number must be between {min_d} and {max_d} digits. Could you say it again?"
 
         # We now have a valid order id, so move flow authority back to order lookup.
@@ -2711,7 +2440,7 @@ class ElenaFunctionContext(llm.FunctionContext):
                 _current_session["forced_response_suppress_llm_until"] = time.time() + 15.0
                 room_log("LLM_SUPPRESSED_AFTER_NOT_FOUND", order_number=strict_order)
 
-            summary = _build_order_voice_summary(result, get_agent_language()) or result
+            summary = _build_order_voice_summary(result) or result
             return summary
         finally:
             _clear_lookup_pending("lookup_order_finished")
@@ -2725,7 +2454,7 @@ class ElenaFunctionContext(llm.FunctionContext):
         order_number: Annotated[str, llm.TypeInfo(description="Order number or 'last' for most recent")] = "last",
     ) -> str:
         """Get FULL order details (items, prices, address). Use after lookup_order when customer wants more info."""
-        lang = get_agent_language()
+        lang = 'en'
         current_turn = int(_current_session.get("last_user_turn_id") or 0)
         forced_turn = int(_current_session.get("details_forced_turn_id") or 0)
         forced_pending_turn = int(_current_session.get("details_forced_pending_turn_id") or 0)
@@ -2734,23 +2463,17 @@ class ElenaFunctionContext(llm.FunctionContext):
             in_flight_text = _strip_markup_for_output(str(_current_session.get("forced_response_spoken_text") or ""))
             if in_flight_text:
                 return in_flight_text
-            if lang == "el":
-                return "Το ελέγχω ήδη και θα σας πω αμέσως τις λεπτομέρειες."
             return "I am already fetching those details and will share them in a moment."
         if bool(_current_session.get("details_lookup_inflight")):
             room_log("TOOL_RESULT_BLOCKED", name="get_order_details", reason="forced_lookup_inflight")
             in_flight_text = _strip_markup_for_output(str(_current_session.get("forced_response_spoken_text") or ""))
             if in_flight_text:
                 return in_flight_text
-            if lang == "el":
-                return "Το ελέγχω ήδη και θα σας πω αμέσως τις λεπτομέρειες."
             return "I am already fetching those details and will share them in a moment."
         now = time.time()
         allowed_until = float(_current_session.get("full_order_details_allowed_until") or 0.0)
         if now > allowed_until:
             room_log("TOOL_RESULT_BLOCKED", name="get_order_details", reason="explicit_details_required")
-            if lang == "el":
-                return "Μπορώ να δώσω όλες τις λεπτομέρειες μόλις μου πείτε ναι. Θέλετε να συνεχίσουμε με πλήρη στοιχεία παραγγελίας;"
             return "I can share full order details as soon as you say yes. Would you like the complete order details now?"
 
         last_state = str(_current_session.get("last_lookup_state") or "unknown")
@@ -2758,8 +2481,6 @@ class ElenaFunctionContext(llm.FunctionContext):
         expected = _expected_order_digits()
         if last_state != "found" or not re.fullmatch(rf"\d{{{expected}}}", anchor_order):
             room_log("TOOL_RESULT_BLOCKED", name="get_order_details", reason="missing_found_lookup_anchor")
-            if lang == "el":
-                return "Χρειάζομαι πρώτα μια έγκυρη παραγγελία που να έχει βρεθεί για να δώσω πλήρεις λεπτομέρειες."
             return "I first need a valid found order before I can share full details."
 
         requested_order = anchor_order if str(order_number or "").lower() == "last" else (
@@ -2767,8 +2488,6 @@ class ElenaFunctionContext(llm.FunctionContext):
         )
         if requested_order != anchor_order:
             room_log("TOOL_RESULT_BLOCKED", name="get_order_details", reason="order_anchor_mismatch")
-            if lang == "el":
-                return "Μπορώ να δώσω λεπτομέρειες μόνο για την τελευταία παραγγελία που βρέθηκε. Δώστε ξανά τον ίδιο αριθμό παραγγελίας."
             return "I can only share details for the last found order. Please provide that same order number again."
 
         _current_session["full_order_details_allowed_until"] = 0.0
@@ -2786,12 +2505,10 @@ class ElenaFunctionContext(llm.FunctionContext):
                 order_lookup.get_order_details(requested_order),
             )
             room_log("TOOL_RESULT", name="get_order_details", result=_truncate(result))
-            spoken_summary = _build_order_details_voice_summary(result, get_agent_language())
+            spoken_summary = _build_order_details_voice_summary(result)
             if not spoken_summary:
-                spoken_summary = _build_order_voice_summary(result, get_agent_language()) or (
-                    "Δεν βρήκα λεπτομέρειες για αυτή την παραγγελία."
-                    if get_agent_language() == "el"
-                    else "I could not find details for this order."
+                spoken_summary = _build_order_voice_summary(result) or (
+                    "I could not find details for this order."
                 )
             room_log("ORDER_DETAILS_FORMATTED", order_number=order_number, result=_truncate(spoken_summary))
             if _as_bool(get_agent_setting("order_lookup_wait_phrase_enabled", True), default=True):
@@ -2810,7 +2527,7 @@ class ElenaFunctionContext(llm.FunctionContext):
         phone: Annotated[str, llm.TypeInfo(description="The customer's phone number")],
     ) -> str:
         """Look up orders by customer phone number. Use when order number is unknown."""
-        lang = get_agent_language()
+        lang = 'en'
 
         # 0. Empty/Non-numeric Guard: If user says they don't have it, don't try to validate
         if not any(char.isdigit() for char in phone or ""):
@@ -2836,16 +2553,12 @@ class ElenaFunctionContext(llm.FunctionContext):
             in_flight_text = _strip_markup_for_output(str(_current_session.get("forced_response_spoken_text") or ""))
             if in_flight_text:
                 return in_flight_text
-            if lang == "el":
-                return "Το ελέγχω ήδη και θα σας απαντήσω αμέσως."
             return "I am already checking that phone number and will respond in a moment."
         if bool(_current_session.get("phone_lookup_inflight")):
             room_log("TOOL_RESULT_BLOCKED", name="lookup_order_by_phone", reason="forced_lookup_inflight")
             in_flight_text = _strip_markup_for_output(str(_current_session.get("forced_response_spoken_text") or ""))
             if in_flight_text:
                 return in_flight_text
-            if lang == "el":
-                return "Το ελέγχω ήδη και θα σας απαντήσω αμέσως."
             return "I am already checking that phone number and will respond in a moment."
 
         # 2. Validation Guard: Ensure it's not a mismatched mode if we're locked
@@ -2856,8 +2569,6 @@ class ElenaFunctionContext(llm.FunctionContext):
             # Only block if it doesn't look like a valid phone number
             if not _normalize_phone_for_lookup(phone):
                 room_log("TOOL_RESULT_BLOCKED", name="lookup_order_by_phone", reason="number_mode_mismatch")
-                if lang == "el":
-                    return "Αυτό δεν μοιάζει με αριθμό τηλεφώνου. Δώστε μου το τηλέφωνό σας ψηφίο προς ψηφίο."
                 return "That doesn't look like a phone number. Please share your phone number digit by digit."
 
         normalized_phone = _normalize_phone_for_lookup(phone)
@@ -2876,7 +2587,7 @@ class ElenaFunctionContext(llm.FunctionContext):
                 max_value=40.0,
             )
             _snooze_silence_prompts(invalid_recovery_grace, reason="invalid_phone_recovery")
-            return _repeat_number_prompt_for_mode("phone", lang)
+            return _repeat_number_prompt_for_mode("phone")
 
         # removed hard gate here to allow parity with order number lookup
         attempt_id = _start_phone_lookup_attempt(normalized_phone, "tool:lookup_order_by_phone")
@@ -2904,8 +2615,6 @@ class ElenaFunctionContext(llm.FunctionContext):
                     phone=normalized_phone,
                     reason="stale_tool_attempt",
                 )
-                if lang == "el":
-                    return "Το ελέγχω ήδη με τα πιο πρόσφατα στοιχεία και θα σας απαντήσω αμέσως."
                 return "I am already checking with the latest phone number and will respond in a moment."
 
             room_log("TOOL_RESULT", name="lookup_order_by_phone", result=_truncate(result))
@@ -2929,7 +2638,7 @@ class ElenaFunctionContext(llm.FunctionContext):
                 _current_session["forced_response_suppress_llm_until"] = time.time() + 15.0
                 room_log("LLM_SUPPRESSED_AFTER_PHONE_NOT_FOUND", phone=normalized_phone)
 
-            summary = _build_phone_lookup_voice_summary(result, get_agent_language()) or result
+            summary = _build_phone_lookup_voice_summary(result) or result
             return summary
         finally:
             if _is_phone_lookup_attempt_active(attempt_id, normalized_phone):
@@ -2948,17 +2657,10 @@ class ElenaFunctionContext(llm.FunctionContext):
         issue_description: Annotated[str, llm.TypeInfo(description="Description of the issue")],
     ) -> str:
         """Create a support ticket. Collect ALL 4 fields one by one before calling this."""
-        lang = get_agent_language()
+        lang = 'en'
         existing_ref = str(_current_session.get("ticket_reference") or "").strip()
         if _current_session.get("ticket_created"):
             room_log("TOOL_RESULT_BLOCKED", name="create_support_ticket", reason="already_created")
-            if lang == "el":
-                if existing_ref:
-                    return (
-                        f"Έχουμε ήδη δημιουργήσει αίτημα υποστήριξης με αριθμό αναφοράς {existing_ref}. "
-                        "Ένας συνάδελφός μας θα επικοινωνήσει μαζί σας σύντομα."
-                    )
-                return "Έχουμε ήδη δημιουργήσει αίτημα υποστήριξης. Ένας συνάδελφός μας θα επικοινωνήσει μαζί σας σύντομα."
             if existing_ref:
                 return (
                     f"I already created your support request with reference number {existing_ref}. "
@@ -2979,11 +2681,6 @@ class ElenaFunctionContext(llm.FunctionContext):
             _current_session["ticket_confirmation_pending"] = True
             _current_session["ticket_confirmation_pending_until"] = now + 180.0
             room_log("TOOL_RESULT_BLOCKED", name="create_support_ticket", reason="issue_confirmation_required")
-            if lang == "el":
-                return (
-                    "Πριν δημιουργήσω το αίτημα υποστήριξης, θέλω μια τελική επιβεβαίωση για το πρόβλημα που περιγράψατε. "
-                    "Αν είναι σωστό, πείτε ναι και προχωράω αμέσως."
-                )
             return (
                 "Before I create the support request, I need one final confirmation of the issue you described. "
                 "If that's correct, say yes and I will submit it right away."
@@ -3082,7 +2779,7 @@ class ElenaFunctionContext(llm.FunctionContext):
         query: Annotated[str, llm.TypeInfo(description="The question to search for")],
     ) -> str:
         """Search the knowledge base for answers to common questions."""
-        language = get_agent_language()
+        language = "en"
         room_log("TOOL_CALL", name="search_knowledge_base", query=query, language=language)
         result = await self._run_tool_with_silence_pause(
             "search_knowledge_base",
@@ -3110,7 +2807,7 @@ class ElenaFunctionContext(llm.FunctionContext):
         comments: Annotated[str, llm.TypeInfo(description="Any extra comments or feedback provided by user")] = None,
     ) -> str:
         """Save a long-term memory about the user's question, answer, and comments for future training. Use this when you get feedback or an interesting Q/A."""
-        lang = get_agent_language()
+        lang = 'en'
         try:
             from src.services.database import get_database_service
             db = get_database_service()
@@ -3151,7 +2848,7 @@ class ElenaFunctionContext(llm.FunctionContext):
         
         asyncio.create_task(delayed_end())
         
-        # English-only closing
+        # Return closing message based on language
         goodbye = get_closing("en")
         room_log("SESSION_END_MESSAGE", text=_truncate(goodbye))
         return goodbye
@@ -3172,12 +2869,18 @@ async def create_initial_context(cache_task: asyncio.Task = None) -> llm.ChatCon
             logger.warning(f"Cache task exception (will retry): {e}")
     
     ctx = llm.ChatContext()
-    agent_lang = "en"
+    agent_lang = 'en'
     
     # Use async version to ensure KB and prompts are loaded from DB
     system_prompt = await get_system_prompt_async(agent_lang)
-    
-    logger.info(f"Using {agent_lang} system prompt (from database), length: {len(system_prompt)} chars")
+
+    has_memory_block = "LONG-TERM MEMORY" in system_prompt
+    logger.info(
+        "Using %s system prompt (from database), length=%s chars, memory_block=%s",
+        agent_lang,
+        len(system_prompt),
+        has_memory_block,
+    )
     ctx.append(role="system", text=system_prompt)
     return ctx
 
@@ -3187,7 +2890,7 @@ async def entrypoint(ctx: JobContext):
     global _current_session
     
     startup_time = time.time()
-    logger.info(f"Elena agent starting for room: {ctx.room.name}")
+    logger.info(f"Elena EN agent starting for room: {ctx.room.name} (job: {ctx.job.id})")
     logger.warning("VOICE_AGENT_VERSION: phone-confirmation-hard-gate-2026-04-28-v4")
     
     # Track call timing for metrics
@@ -3352,26 +3055,10 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.warning(f"Cache task exception (settings): {e}")
 
-    # English-only runtime: lock language for this agent/session.
-    base_language = "en"
+    # Initialize runtime language (per-call) from DB defaults.
+    set_runtime_language(None)
+    base_language = 'en'
     set_runtime_language(base_language)
-    session_language = {"value": "en"}
-    auto_language_switch = False
-    language_switch_min_turns_setting = get_agent_setting("language_switch_min_turns", 2)
-    if is_sip_call:
-        language_switch_min_turns_setting = get_agent_setting(
-            "sip_language_switch_min_turns",
-            language_switch_min_turns_setting,
-        )
-    language_switch_min_turns = _as_int(
-        language_switch_min_turns_setting,
-        2,
-        min_value=1,
-        max_value=5,
-    )
-    language_switch_state = {"candidate": None, "count": 0}
-    language_lock_state = {"el": 0, "en": 0, "el_last": "", "en_last": ""}
-    language_lock_cache: dict[tuple[str, str], str] = {}
 
     def _normalize_switch_text(text: str) -> str:
         """Normalize text for robust language-switch intent detection."""
@@ -3382,79 +3069,6 @@ async def entrypoint(ctx: JobContext):
         lowered = re.sub(r"[^\w\s]", " ", lowered, flags=re.UNICODE)
         lowered = re.sub(r"\s+", " ", lowered).strip()
         return lowered
-
-    def _explicit_language_request(text: str) -> Optional[str]:
-        """Detect explicit caller requests to change response language."""
-        lowered = _normalize_switch_text(text)
-        if not lowered:
-            return None
-
-        english_requests = (
-            "speak english",
-            "speak in english",
-            "can you speak english",
-            "can you speak in english",
-            "can we speak english",
-            "can we speak in english",
-            "in english",
-            "english please",
-            "switch to english",
-            "switch language to english",
-            "talk in english",
-            "reply in english",
-            "respond in english",
-            "answer in english",
-            "details in english",
-            "english language",
-            "mila agglika",
-            "sta agglika",
-            "μιλα αγγλικα",
-            "στα αγγλικα",
-            "μίλα αγγλικά",
-            "στα αγγλικά",
-        )
-        greek_requests = (
-            "speak greek",
-            "speak in greek",
-            "can you speak greek",
-            "can you speak in greek",
-            "can we speak greek",
-            "can we speak in greek",
-            "in greek",
-            "greek please",
-            "switch to greek",
-            "switch language to greek",
-            "talk in greek",
-            "reply in greek",
-            "respond in greek",
-            "answer in greek",
-            "greek language",
-            "mila ellinika",
-            "sta ellinika",
-            "μιλα ελληνικα",
-            "στα ελληνικα",
-            "μίλα ελληνικά",
-            "στα ελληνικά",
-        )
-
-        if any(phrase in lowered for phrase in english_requests):
-            return "en"
-        if any(phrase in lowered for phrase in greek_requests):
-            return "el"
-
-        # Fallback intent heuristics for broader phrasing coverage.
-        english_token = ("english" in lowered) or ("αγγλικ" in lowered)
-        greek_token = ("greek" in lowered) or ("ελληνικ" in lowered) or ("ellinik" in lowered)
-        switch_verbs = (
-            "speak", "talk", "reply", "respond", "answer", "switch", "language",
-            "μιλα", "μίλα", "μιλησουμε", "μιλήσουμε", "απάντηση",
-        )
-        has_switch_verb = any(v in lowered for v in switch_verbs)
-        if english_token and has_switch_verb:
-            return "en"
-        if greek_token and has_switch_verb:
-            return "el"
-        return None
 
     def _explicit_more_order_details_request(text: str) -> bool:
         """Detect when caller explicitly asks for full order details."""
@@ -3531,7 +3145,7 @@ async def entrypoint(ctx: JobContext):
         text = (raw_text or "").strip()
         if not text:
             return text
-        if get_agent_language() != "el":
+        if True:
             return text
 
         if not _is_phone_confirmation_prompt(text):
@@ -3567,6 +3181,27 @@ async def entrypoint(ctx: JobContext):
             
         # Must have a negative combined with either "order" or "have"
         return (has_negative and (has_order_keyword or has_have_keyword)) or (lowered in {"no", "όχι", "οχι"})
+
+    def _mentions_missing_confirmation_email(text: str) -> bool:
+        """
+        Detect when caller indicates they cannot access confirmation email,
+        which usually means they cannot provide an order number.
+        """
+        lowered = _normalize_switch_text(text)
+        if not lowered:
+            return False
+        return bool(
+            re.search(
+                r"(didn t get|did not get|don t have|do not have|can t find|cannot find|didn t receive|did not receive).*(confirmation|email|mail)",
+                lowered,
+                flags=re.IGNORECASE,
+            )
+            or re.search(
+                r"(confirmation|email|mail).*(didn t get|did not get|don t have|do not have|can t find|cannot find|didn t receive|did not receive)",
+                lowered,
+                flags=re.IGNORECASE,
+            )
+        )
 
     def _infer_number_mode(user_text: str, last_agent_text: str) -> Optional[str]:
         """
@@ -3636,6 +3271,19 @@ async def entrypoint(ctx: JobContext):
             r"ξανά πείτε το κινητό",
         )
         return any(re.search(pattern, lowered, flags=re.IGNORECASE) for pattern in strict_patterns)
+
+    def _is_phone_number_collection_prompt(text: str) -> bool:
+        """Detect prompts asking user to provide phone number (not confirmation)."""
+        lowered = _normalize_switch_text(text)
+        if not lowered:
+            return False
+        patterns = (
+            r"(provide|give|share|say|repeat).*(phone|mobile)(?: number)?",
+            r"(phone|mobile)(?: number)?.*(provide|give|share|say|repeat)",
+            r"digit by digit",
+            r"used for the order",
+        )
+        return any(re.search(pattern, lowered, flags=re.IGNORECASE) for pattern in patterns)
 
     def _can_unlock_full_details(user_text: str) -> tuple[bool, str]:
         """Allow full details only when we have a found lookup for the same order."""
@@ -3720,129 +3368,6 @@ async def entrypoint(ctx: JobContext):
             )
         )
 
-    def _english_switch_confident(text: str) -> bool:
-        """
-        Return True only when transcript strongly looks like real English.
-        This prevents Greek speech transliterated into latin characters
-        from incorrectly switching the call to English.
-        """
-        raw = (text or "").strip()
-        if not raw:
-            return False
-
-        # If any Greek script exists, do not treat as English auto-switch.
-        if re.search(r"[\u0370-\u03FF\u1F00-\u1FFF]", raw):
-            return False
-
-        lowered = raw.lower()
-        tokens = re.findall(r"[a-z']+", lowered)
-        if len(tokens) < 4:
-            return False
-
-        # Function/content words that appear frequently in real English utterances.
-        english_markers = {
-            "i", "you", "we", "they", "he", "she", "it",
-            "am", "is", "are", "was", "were",
-            "have", "has", "had", "do", "did", "can",
-            "the", "a", "an", "to", "for", "of", "in", "on", "with", "and",
-            "please", "my", "your", "order", "problem", "food",
-        }
-        marker_hits = sum(1 for t in tokens if t in english_markers)
-        marker_ratio = marker_hits / max(len(tokens), 1)
-
-        # Be strict from Greek -> English: require clear English signal.
-        return marker_hits >= 2 and marker_ratio >= 0.22
-
-    def _allow_auto_language_switch(current_lang: str, detected_lang: str, text: str) -> bool:
-        """Gate automatic switching to reduce false positives from noisy STT output."""
-        if detected_lang == current_lang:
-            return False
-        if current_lang == "el" and detected_lang == "en":
-            allowed = _english_switch_confident(text)
-            if not allowed:
-                room_log(
-                    "LANGUAGE_SWITCH_SUPPRESSED",
-                    current=current_lang,
-                    candidate=detected_lang,
-                    reason="low_english_confidence",
-                )
-            return allowed
-        return True
-
-    def _apply_language_switch(new_lang: str, reason: str) -> None:
-        """Switch runtime/session language and append a scoped system hint."""
-        session_language["value"] = new_lang
-        set_runtime_language(new_lang)
-        language_switch_state["candidate"] = None
-        language_switch_state["count"] = 0
-        lang_name = "Greek" if new_lang == "el" else "English"
-        agent.chat_ctx.append(
-            role="system",
-            text=(
-                "LANGUAGE SWITCH:\n"
-                f"- Respond in {lang_name} for this response and until the caller switches again."
-            ),
-        )
-        room_log("LANGUAGE_SWITCH", language=new_lang, reason=reason)
-
-    def _get_language_lock_phrase(expected_lang: str, source_text: str) -> str:
-        """Rotate lock phrases but keep deterministic output for the same source text."""
-        phrases = {
-            "el": [
-                "Παρακαλώ, μπορείτε να συνεχίσετε στα ελληνικά; Ευχαριστώ!",
-                "Συνεχίζουμε στα ελληνικά. Πείτε μου πώς μπορώ να βοηθήσω.",
-                "Θα συνεχίσω στα ελληνικά. Πείτε μου το αίτημά σας.",
-                "Μπορούμε να προχωρήσουμε στα ελληνικά. Πώς μπορώ να σας εξυπηρετήσω;",
-            ],
-            "en": [
-                "Please continue in English. Thank you!",
-                "We will continue in English. Tell me how I can help.",
-                "I will continue in English. Please share your request.",
-                "Let's proceed in English. How can I assist you?",
-            ],
-        }
-        options = phrases.get(expected_lang) or phrases["en"]
-        cache_key = (expected_lang, (source_text or "").strip())
-        cached = language_lock_cache.get(cache_key)
-        if cached:
-            return cached
-
-        idx = int(language_lock_state.get(expected_lang, 0)) % len(options)
-        selected = options[idx]
-        last_key = f"{expected_lang}_last"
-        if len(options) > 1 and selected == language_lock_state.get(last_key):
-            idx = (idx + 1) % len(options)
-            selected = options[idx]
-
-        language_lock_state[expected_lang] = idx + 1
-        language_lock_state[last_key] = selected
-        language_lock_cache[cache_key] = selected
-        if len(language_lock_cache) > 200:
-            language_lock_cache.clear()
-        return selected
-
-    def _enforce_locked_output_language(text: str) -> str:
-        """
-        Keep agent output in the admin-selected language when auto switching is disabled.
-        This is a hard guardrail for noisy user requests like "reply in English".
-        """
-        if not text:
-            return text
-        if auto_language_switch:
-            return text
-
-        expected_lang = session_language["value"]
-        detected_lang = detect_language(text, default=expected_lang)
-        if detected_lang == expected_lang:
-            return text
-
-        room_log(
-            "LANGUAGE_OUTPUT_NORMALIZED",
-            expected=expected_lang,
-            detected=detected_lang,
-            reason="auto_switch_disabled",
-        )
-        return _get_language_lock_phrase(expected_lang, text)
 
     # Initialize abuse tracker for this session
     from src.utils.abuse_handler import AbuseTracker, check_and_respond_to_abuse
@@ -3879,6 +3404,7 @@ async def entrypoint(ctx: JobContext):
         "snooze_until": 0.0,
         "last_lookup_progress_prompt_at": 0.0,
         "lookup_progress_prompt_count": 0,
+        "prompt_in_progress": False,  # Prevent concurrent silence prompts
     }
     _current_session["silence_tracker"] = silence_tracker
     
@@ -4088,7 +3614,7 @@ async def entrypoint(ctx: JobContext):
         if time.time() - last_lookup_status["updated_at"] > 180:
             return text
 
-        language = last_lookup_status["language"] or get_agent_language()
+        language = last_lookup_status["language"] or 'en'
         expected_status = last_lookup_status["status"]
         keywords = _status_keywords(language)
         lower = text.lower()
@@ -4157,6 +3683,19 @@ async def entrypoint(ctx: JobContext):
             if suppress_until and time.time() <= suppress_until and suppress_turn == latest_turn:
                 return True, "forced_response_mutual_exclusion"
 
+        # Prevent repeated "please provide phone number" variants in the same user turn
+        # after a deterministic/manual phone prompt has already been spoken.
+        latest_turn = int(_current_session.get("last_user_turn_id") or 0)
+        last_manual_turn = int(_current_session.get("last_manual_prompt_turn_id") or 0)
+        flow_state = str(_current_session.get("support_flow_state") or FLOW_IDLE)
+        if (
+            flow_state in {FLOW_AWAITING_PHONE_NUMBER, FLOW_CHECKING_PHONE_NUMBER}
+            and latest_turn
+            and last_manual_turn == latest_turn
+            and _is_phone_number_collection_prompt(text_value)
+        ):
+            return True, "duplicate_phone_collection_prompt_same_turn"
+
         retry_guard_s = _as_float(
             get_agent_setting("forced_details_retry_guard_seconds", 120.0),
             120.0,
@@ -4208,7 +3747,7 @@ async def entrypoint(ctx: JobContext):
                     )
                     if not lookup_started:
                         mode = str(_current_session.get("number_mode_lock") or "phone")
-                        replacement = _repeat_number_prompt_for_mode(mode, get_agent_language())
+                        replacement = _repeat_number_prompt_for_mode(mode)
                         _current_session["pending_lookup_wait_phrase"] = None
                         _current_session["pending_lookup_wait_phrase_set_at"] = 0.0
                         invalid_recovery_grace = _as_float(
@@ -4259,7 +3798,7 @@ async def entrypoint(ctx: JobContext):
                     elif pending_phrase:
                         # Expire stale pending phrase to avoid polluting unrelated turns.
                         _clear_pending_lookup_wait_phrase("expired")
-                text = _enforce_locked_output_language(text)
+                # Language lock removed: English-only module
 
                 from src.utils import (
                     apply_prosody,
@@ -4267,7 +3806,7 @@ async def entrypoint(ctx: JobContext):
                     normalize_numeric_ids_for_tts,
                     normalize_punctuation_for_tts,
                 )
-                agent_lang = get_agent_language()
+                agent_lang = 'en'
                 use_ssml = _as_bool(get_agent_setting("tts_use_ssml", False), default=False)
                 tts_engine = getattr(agent_instance, "_tts", None) or getattr(agent_instance, "tts", None)
                 tts_provider = "unknown"
@@ -4328,7 +3867,7 @@ async def entrypoint(ctx: JobContext):
                     normalize_numeric_ids_for_tts,
                     normalize_punctuation_for_tts,
                 )
-                agent_lang = get_agent_language()
+                agent_lang = 'en'
 
                 def _extract_chunk_text(chunk) -> str:
                     if isinstance(chunk, str):
@@ -4350,7 +3889,7 @@ async def entrypoint(ctx: JobContext):
                         raw_buffer += chunk_text
                         updated = _enforce_order_status(raw_buffer)
                         updated = _strip_tts_style_leakage(updated)
-                        updated = _enforce_locked_output_language(updated)
+                        # Language lock removed: English-only module
                         updated = normalize_time_colons(updated)
                         updated = normalize_numeric_ids_for_tts(updated, language=agent_lang)
                         updated = normalize_punctuation_for_tts(updated)
@@ -4376,11 +3915,12 @@ async def entrypoint(ctx: JobContext):
             logger.error(f"Error in before_tts_callback: {e}")
         return text  # Return text unchanged on error
     # Wait for context that was started earlier (should be ready by now)
+    logger.info("⏱️ Awaiting context_task...")
     initial_ctx = await context_task
     logger.info(f"⏱️ Context ready ({time.time() - startup_time:.1f}s)")
     
     # Language-aware endpointing delay: Greek requires more patience for complete transcripts.
-    initial_lang = get_agent_language()
+    initial_lang = 'en'
     if initial_lang == "el":
         default_endpointing = 2.2 if is_sip_call else 1.8
     else:
@@ -4404,12 +3944,7 @@ async def entrypoint(ctx: JobContext):
         min_endpointing_delay,
         interrupt_min_words,
     )
-    logger.info(
-        "Language switch config: auto_language_switch=%s min_turns=%s call_type=%s",
-        auto_language_switch,
-        language_switch_min_turns,
-        call_type,
-    )
+    logger.info("Language mode: English-only (no auto switch), call_type=%s", call_type)
     preemptive_synthesis = _as_bool(
         get_agent_setting("preemptive_synthesis", True),
         default=True,
@@ -4609,18 +4144,16 @@ async def entrypoint(ctx: JobContext):
                 trigger=trigger_reason,
             )
 
-            spoken_summary = _build_order_details_voice_summary(result, get_agent_language())
+            spoken_summary = _build_order_details_voice_summary(result)
             if not spoken_summary:
-                spoken_summary = _build_order_voice_summary(result, get_agent_language()) or (
+                spoken_summary = _build_order_voice_summary(result) or (
                     "I could not find details for this order."
-                    if get_agent_language() == "en"
-                    else "Δεν μπόρεσα να βρω λεπτομέρειες για αυτή την παραγγελία."
+                    
                 )
 
             prefix = (
                 "Thanks for waiting."
-                if get_agent_language() == "en"
-                else "Ευχαριστώ για την αναμονή."
+                
             )
             final_text = f"{prefix} {spoken_summary}".strip()
             room_log(
@@ -4734,7 +4267,7 @@ async def entrypoint(ctx: JobContext):
                 _current_session["details_confirmation_pending_until"] = 0.0
                 _current_session["full_order_details_allowed_until"] = 0.0
 
-            spoken_summary = _build_order_voice_summary(result, get_agent_language()) or result
+            spoken_summary = _build_order_voice_summary(result) or result
             await send_agent_transcript(spoken_summary)
             agent.chat_ctx.append(role="assistant", text=spoken_summary)
             live_agent = _current_session.get("agent")
@@ -4826,7 +4359,7 @@ async def entrypoint(ctx: JobContext):
             _snooze_silence_prompts(45.0, reason="phone_watchdog_started")
             _pause_silence_for_tool("phone_watchdog_work")
 
-            wait_msg = "Μισό λεπτό, ψάχνω την παραγγελία σας." if get_agent_language() == "el" else "Just a moment, I am searching for your order."
+            wait_msg = "Just a moment, I am searching for your order."
             live_agent = _current_session.get("agent")
             if live_agent and scheduled_at > 0.0: # Only say wait msg if we are taking over from LLM
                  await live_agent.say(wait_msg, allow_interruptions=False)
@@ -4855,7 +4388,7 @@ async def entrypoint(ctx: JobContext):
                 _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason=f"phone_watchdog_{lookup_state}")
                 _current_session["details_confirmation_pending"] = False
 
-            spoken_summary = _build_phone_lookup_voice_summary(result, get_agent_language()) or result
+            spoken_summary = _build_phone_lookup_voice_summary(result) or result
             await send_agent_transcript(spoken_summary)
             agent.chat_ctx.append(role="assistant", text=spoken_summary)
             if live_agent:
@@ -4937,9 +4470,9 @@ async def entrypoint(ctx: JobContext):
 
             _current_session["forced_response_spoken_turn_id"] = turn_id
             _current_session["forced_response_suppress_llm_until"] = time.time() + suppress_s
-            spoken_phone = _speak_digits(normalized_phone, get_agent_language())
+            spoken_phone = _speak_digits(normalized_phone)
 
-            if get_agent_language() == "el":
+            if False:
                 if reprompt:
                     confirmation_text = (
                         f"Για να συνεχίσουμε, απαντήστε μόνο ναι ή όχι. Ο αριθμός είναι {spoken_phone}. Είναι σωστός;"
@@ -5217,7 +4750,7 @@ async def entrypoint(ctx: JobContext):
 
                 if not raw_digits:
                     if _is_short_utterance(user_text) or not (user_text or "").strip():
-                        if get_agent_language() == "el":
+                        if False:
                             msg = "Παρακαλώ πείτε τον αριθμό τηλεφώνου που χρησιμοποιήσατε για την παραγγελία, ψηφίο προς ψηφίο."
                         else:
                             msg = "Please provide the phone number used for the order, digit by digit."
@@ -5254,7 +4787,7 @@ async def entrypoint(ctx: JobContext):
                         room_log("PHONE_PARTIAL_PROMPT_SKIPPED", reason="potential_noise", turn_digits=raw_digits)
                         return False
 
-                    if get_agent_language() == "el":
+                    if False:
                         msg = "Συνεχίστε με τα υπόλοιπα ψηφία του αριθμού, παρακαλώ."
                     else:
                         msg = "I’m listening. Please continue with the remaining digits of the phone number."
@@ -5269,7 +4802,7 @@ async def entrypoint(ctx: JobContext):
                 _reset_phone_digit_buffer("invalid_complete_phone")
                 _current_session["pending_phone_candidate"] = None
                 _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="invalid_complete_phone")
-                if get_agent_language() == "el":
+                if False:
                     msg = (
                         "Αυτό δεν φαίνεται να είναι πλήρης αριθμός τηλεφώνου. "
                         f"Παρακαλώ πείτε ολόκληρο τον αριθμό ξανά, με τουλάχιστον {min_digits} ψηφία, ψηφίο προς ψηφίο."
@@ -5313,7 +4846,7 @@ async def entrypoint(ctx: JobContext):
                 _current_session["pending_phone_candidate"] = None
                 _reset_phone_digit_buffer("phone_confirmation_rejected")
                 _set_support_flow_state(FLOW_AWAITING_PHONE_NUMBER, reason="phone_confirmation_rejected")
-                if get_agent_language() == "el":
+                if False:
                     msg = "Εντάξει. Πείτε ξανά τον αριθμό τηλεφώνου σας ψηφίο προς ψηφίο."
                 else:
                     msg = "Okay. Please repeat your phone number again, digit by digit."
@@ -5329,7 +4862,7 @@ async def entrypoint(ctx: JobContext):
                     max_value=15,
                 )
                 if len(combined_digits) < min_digits:
-                    if get_agent_language() == "el":
+                    if False:
                         msg = "Συνεχίστε με τα υπόλοιπα ψηφία του αριθμού, παρακαλώ."
                     else:
                         msg = "I’m listening. Please continue with the remaining digits of the phone number."
@@ -5341,7 +4874,7 @@ async def entrypoint(ctx: JobContext):
                     )
                 else:
                     _reset_phone_digit_buffer("invalid_complete_phone")
-                    if get_agent_language() == "el":
+                    if False:
                         msg = (
                             "Αυτό δεν φαίνεται να είναι πλήρης αριθμός τηλεφώνου. "
                             f"Παρακαλώ πείτε ολόκληρο τον αριθμό ξανά, με τουλάχιστον {min_digits} ψηφία, ψηφίο προς ψηφίο."
@@ -5378,7 +4911,7 @@ async def entrypoint(ctx: JobContext):
                     _force_lookup_by_phone(current_turn_id, pending_phone, "non_confirmation_reply_direct")
                 )
                 return True
-            if get_agent_language() == "el":
+            if False:
                 msg = "Παρακαλώ πείτε ξανά τον αριθμό τηλεφώνου σας ψηφίο προς ψηφίο."
             else:
                 msg = "Please say your phone number again, digit by digit."
@@ -5578,7 +5111,7 @@ async def entrypoint(ctx: JobContext):
                         _current_session["forced_response_manual_say_active"] = False
                         return
                     try:
-                        if get_agent_language() == "el":
+                        if False:
                             msg = (
                                 f"Ο αριθμός παραγγελίας πρέπει να έχει από {min_d} έως {max_d} ψηφία. "
                                 f"Μπορείτε να τον πείτε ξανά ψηφίο προς ψηφίο;"
@@ -5623,7 +5156,11 @@ async def entrypoint(ctx: JobContext):
                     ),
                 )
 
-        if _mentions_no_order_number(user_text):
+        no_order_recovery = _mentions_no_order_number(user_text) or (
+            flow_state == FLOW_AWAITING_ORDER_NUMBER
+            and _mentions_missing_confirmation_email(user_text)
+        )
+        if no_order_recovery:
             _reset_phone_collection_state("user_has_no_order_number")
             _clear_lookup_pending("user_has_no_order_number")
             _clear_pending_lookup_wait_phrase("user_has_no_order_number")
@@ -5643,7 +5180,7 @@ async def entrypoint(ctx: JobContext):
                     _current_session["forced_response_manual_say_active"] = False
                     return
                 try:
-                    if get_agent_language() == "el":
+                    if False:
                         msg = (
                             "Εντάξει. Μπορείτε να μου δώσετε τον αριθμό τηλεφώνου "
                             "που χρησιμοποιήσατε για την παραγγελία, ψηφίο προς ψηφίο;"
@@ -5668,6 +5205,45 @@ async def entrypoint(ctx: JobContext):
                     _current_session["forced_response_manual_say_active"] = False
 
             asyncio.create_task(_ask_phone_number())
+            return
+        elif (
+            flow_state == FLOW_AWAITING_ORDER_NUMBER
+            and not normalized_order_candidate
+            and not has_digits
+        ):
+            # Deterministic safety net:
+            # If caller stays in support flow but provides contextual text (e.g. "I didn't get the email"),
+            # do not wait for LLM/tool timing. Respond immediately with the next valid options.
+            _current_session["forced_response_manual_say_active"] = True
+            _current_session["forced_response_spoken_turn_id"] = current_turn_id
+            _current_session["forced_response_suppress_llm_until"] = time.time() + 8.0
+            _snooze_silence_prompts(8.0, reason="awaiting_order_number_clarify_next_step")
+
+            async def _clarify_order_or_phone_next_step() -> None:
+                live_agent = _current_session.get("agent")
+                if not live_agent:
+                    _current_session["forced_response_manual_say_active"] = False
+                    return
+                try:
+                    msg = (
+                        "I understand. If you have the order number, please share it digit by digit. "
+                        "If you don't have it, I can check by phone number instead."
+                    )
+                    prompt_key = f"{current_turn_id}:awaiting_order_number_clarify:{msg}"
+                    if (
+                        int(_current_session.get("last_manual_prompt_turn_id") or 0) == current_turn_id
+                        and str(_current_session.get("last_manual_prompt_key") or "") == prompt_key
+                    ):
+                        return
+                    _current_session["last_manual_prompt_turn_id"] = current_turn_id
+                    _current_session["last_manual_prompt_key"] = prompt_key
+                    await send_agent_transcript(msg)
+                    agent.chat_ctx.append(role="assistant", text=msg)
+                    await live_agent.say(msg, allow_interruptions=True)
+                finally:
+                    _current_session["forced_response_manual_say_active"] = False
+
+            asyncio.create_task(_clarify_order_or_phone_next_step())
             return
         elif normalized_order_candidate and flow_state == FLOW_AWAITING_ORDER_NUMBER:
             # Caller provided a valid order id, so clear phone-capture context.
@@ -5787,7 +5363,6 @@ async def entrypoint(ctx: JobContext):
         if is_negative and not details_pending and not ticket_pending:
             _snooze_silence_prompts(120.0, reason="user_negative_closing")
 
-        # English-only mode: language switching is intentionally disabled.
         set_runtime_language("en")
 
         try:
@@ -5948,7 +5523,7 @@ async def entrypoint(ctx: JobContext):
             # Check for abusive language
             abuse_detected, abuse_response = check_and_respond_to_abuse(
                 user_text,
-                language=get_agent_language(),
+                language='en',
                 tracker=_abuse_tracker,
                 use_ssml=True
             )
@@ -5985,7 +5560,7 @@ async def entrypoint(ctx: JobContext):
                 return
             text = message.content if hasattr(message, 'content') else None
             if text:
-                normalized_text = _enforce_locked_output_language(text)
+                normalized_text = text  # English-only: no language enforcement needed
                 display_text = _strip_markup_for_output(normalized_text)
                 suppress_commit, suppress_reason = _should_suppress_tts_text(display_text or text)
                 if suppress_commit:
@@ -6002,7 +5577,21 @@ async def entrypoint(ctx: JobContext):
                             or expected_norm in candidate_norm
                         )
                     )
-                    if not same_as_forced_response:
+                    # Also allow core lookup outcomes and number-collection prompts through transcript,
+                    # even during forced-response windows, to avoid "spoken but missing in transcript".
+                    lookup_state_in_text = _classify_lookup_result(display_text or text)
+                    keep_core_message = (
+                        lookup_state_in_text in {"found", "not_found"}
+                        or _is_phone_number_collection_prompt(display_text or text)
+                        or bool(
+                            re.search(
+                                r"(provide|repeat|share).*(order number)",
+                                _normalize_switch_text(display_text or text),
+                                flags=re.IGNORECASE,
+                            )
+                        )
+                    )
+                    if not same_as_forced_response and not keep_core_message:
                         room_log(
                             "AGENT_TEXT_SUPPRESSED",
                             reason=suppress_reason,
@@ -6044,7 +5633,7 @@ async def entrypoint(ctx: JobContext):
                 normalized_display = _normalize_switch_text(transcript_text)
                 details_prompted = bool(
                     re.search(
-                        r"(would you like .*details.*order|complete order details|more details about this order|θέλετε .*λεπτομέρειες.*παραγγελία)",
+                        r"(would you like .*details.*order|complete order details|more details about this order)",
                         normalized_display,
                     )
                 )
@@ -6136,7 +5725,7 @@ async def entrypoint(ctx: JobContext):
                 if snapshot:
                     last_lookup_status["status"] = snapshot.get("status")
                     last_lookup_status["order_number"] = snapshot.get("order_number")
-                    last_lookup_status["language"] = get_agent_language()
+                    last_lookup_status["language"] = "en"
                     last_lookup_status["updated_at"] = time.time()
     
     # Store references for session management
@@ -6242,7 +5831,7 @@ async def entrypoint(ctx: JobContext):
             _current_session["ticket_reference"] = None
             _current_session["support_flow_state"] = FLOW_IDLE
             _current_session["support_issue"] = None
-            set_runtime_language(None)
+            set_runtime_language("en")
     # Handle participant disconnection
     @ctx.room.on("participant_disconnected")
     def on_participant_disconnected(participant_info):
@@ -6302,7 +5891,7 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.debug(f"Background audio not available: {e}")
     
-    # English-only greeting
+    # Get greeting based on configured language
     agent_lang = "en"
     greeting_enabled = _require_bool_setting("agent_greeting_enabled")
     if greeting_enabled:
@@ -6315,7 +5904,7 @@ async def entrypoint(ctx: JobContext):
         logger.info("Greeting disabled by settings")
     
     total_startup = time.time() - startup_time
-    logger.info(f"✅ Elena ready! Total startup: {total_startup:.1f}s, language: {agent_lang}")
+    logger.info(f"✅ Elena ready! Total startup: {total_startup:.1f}s, language: en")
     
     # Reset silence timer after greeting (or initial ready state if greeting disabled)
     mark_agent_speaking()
@@ -6332,21 +5921,12 @@ async def entrypoint(ctx: JobContext):
     # =========================================================================
     async def monitor_silence():
         """Monitor for user silence and prompt them."""
-        agent_lang = get_agent_language()
-        
-        # Silence prompts based on language
-        if agent_lang == "el":
-            prompts = [
-                "Είμαι εδώ όταν είστε έτοιμοι.",
-                "Πάρτε τον χρόνο σας. Είμαι ακόμη εδώ.",
-                "Θα τερματίσω την κλήση προς το παρόν. Μπορείτε να μας καλέσετε ξανά οποιαδήποτε στιγμή.",
-            ]
-        else:
-            prompts = [
-                "I’m here when you’re ready.",
-                "Take your time. I’m still here.",
-                "I’ll end the call for now. You can call us again anytime.",
-            ]
+        # English-only prompts for elena_en.py
+        prompts = [
+            "I’m here when you’re ready.",
+            "Take your time. I’m still here.",
+            "I’ll end the call for now. You can call us again anytime.",
+        ]
         try:
             while not _current_session["should_end"] and silence_tracker["enabled"]:
                 await asyncio.sleep(1.0)  # Check every second
@@ -6362,6 +5942,17 @@ async def entrypoint(ctx: JobContext):
                     or bool(_current_session.get("phone_lookup_inflight"))
                     or bool(_current_session.get("details_lookup_inflight"))
                 )
+                # Extra guard: after any lookup tool call, suppress idle prompts briefly
+                # even if state flags clear early due timing races.
+                last_lookup_called_at = float(_current_session.get("last_lookup_tool_called_at") or 0.0)
+                lookup_recent_window = _as_float(
+                    get_agent_setting("lookup_silence_recent_window_seconds", 20.0),
+                    20.0,
+                    min_value=5.0,
+                    max_value=120.0,
+                )
+                if last_lookup_called_at and (now - last_lookup_called_at) < lookup_recent_window:
+                    continue
                 if lookup_active:
                     pending_started = float(_current_session.get("lookup_pending_started_at") or 0.0)
                     max_lookup_block_s = _as_float(
@@ -6379,9 +5970,7 @@ async def entrypoint(ctx: JobContext):
                         # Guard: don't interrupt if user is speaking or a manual prompt is active
                         if not silence_tracker.get("user_is_speaking") and not _current_session.get("forced_response_manual_say_active"):
                             _current_session["last_lookup_progress_at"] = now
-                            # Fallback to agent language if session language is not available
-                            current_lang = session_language["value"] if "session_language" in locals() else agent_lang
-                            progress_msg = "I'm still searching for your order, thank you for your patience." if current_lang == "en" else "Ακόμη ψάχνω για την παραγγελία σας, ευχαριστώ για την υπομονή σας."
+                            progress_msg = "I'm still searching for your order, thank you for your patience."
                             logger.info(f"⏳ Sending periodic search update: {progress_msg}")
                             await send_agent_transcript(progress_msg)
                             agent.chat_ctx.append(role="assistant", text=progress_msg)
@@ -6411,7 +6000,7 @@ async def entrypoint(ctx: JobContext):
                     continue
 
                 # Skip checks while agent audio is still being rendered.
-                if silence_tracker.get("agent_is_speaking"):
+                if silence_tracker.get("agent_is_speaking") or silence_tracker.get("prompt_in_progress"):
                     continue
 
                 # Strong global guard: never say silence prompts during deterministic work.
@@ -6442,9 +6031,13 @@ async def entrypoint(ctx: JobContext):
                         silence_tracker["is_waiting_for_response"] = False  # Will be set again after agent speaks
                         
                         # Say the prompt
-                        await send_agent_transcript(prompt_text)
-                        agent.chat_ctx.append(role="assistant", text=prompt_text)
-                        await agent.say(prompt_text, allow_interruptions=True)
+                        try:
+                            silence_tracker["prompt_in_progress"] = True
+                            await send_agent_transcript(prompt_text)
+                            agent.chat_ctx.append(role="assistant", text=prompt_text)
+                            await agent.say(prompt_text, allow_interruptions=True)
+                        finally:
+                            silence_tracker["prompt_in_progress"] = False
                         
                     else:
                         # Max prompts reached - disconnect

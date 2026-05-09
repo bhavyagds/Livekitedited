@@ -1,4 +1,4 @@
-﻿"""
+"""
 Meallion Voice AI - Elena English Agent (clean rewrite)
 English-only voice agent with deterministic order/phone support flow.
 """
@@ -390,17 +390,17 @@ def create_stt(is_sip_call: bool = False):
         # keywords: boost confidence for individual digit words that STT often mishears
         # (e.g. "nine" → "bye", "five" → "fine", "four" → "for").
         _digit_keywords = [
-            ("zero", 5.0), ("one", 5.0), ("two", 5.0), ("three", 5.0),
-            ("four", 5.0), ("five", 5.0), ("six", 5.0), ("seven", 5.0),
-            ("eight", 5.0), ("nine", 5.0),
+            ("zero", 1.5), ("one", 1.5), ("two", 1.5), ("three", 1.5),
+            ("four", 1.5), ("five", 1.5), ("six", 1.5), ("seven", 1.5),
+            ("eight", 1.5), ("nine", 1.5),
         ]
         return deepgram.STT(
             model=model,
             language="en-US",
             api_key=deepgram_api_key,
             interim_results=True,
-            numerals=True,
-            smart_format=True,
+            numerals=False,
+            smart_format=False,
             punctuate=True,
             keywords=_digit_keywords,
         )
@@ -787,7 +787,7 @@ async def entrypoint(ctx: JobContext):
         max_value=3.0,
     )
     # Product requirement: wait at least ~1.2s after user stops speaking before replying.
-    effective_endpointing_delay = max(1.2, configured_endpointing_delay)
+    effective_endpointing_delay = max(1.5, configured_endpointing_delay)
 
     def _before_llm_cb(agent_instance, chat_ctx):
         """Gate the LLM when the deterministic handler has already replied via agent.say()."""

@@ -95,7 +95,7 @@ def format_order_number_for_voice(order_number: str, lang: str = "en") -> str:
         from src.utils.greek_numbers import format_order_number_greek
         return format_order_number_greek(clean_number)
     else:
-        # For English, we usually speak order numbers digit by digit or as a whole number.
+        # For English, we usually speak order numbers one digit at a time or as a whole number.
         # However, for 5-digit numbers, "one two eight seven five" is often better than "twelve thousand..."
         # If it's a long number, space it out.
         if len(clean_number) >= 4:

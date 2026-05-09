@@ -31,7 +31,7 @@ Expected:
 
 ### Scenario B: Invalid/missing order id
 Expected:
-- asks to repeat order id digit-by-digit
+- asks to repeat order id one digit at a time
 - remains in `awaiting_order_number`
 - does **not** switch to phone flow unless user explicitly says no order number
 
@@ -50,7 +50,7 @@ Expected:
 ### Scenario E: Phone confirmation = no
 Expected:
 - clears pending phone
-- asks for phone again digit-by-digit
+- asks for phone again one digit at a time
 
 ### Scenario F: No duplicate speech
 Expected:

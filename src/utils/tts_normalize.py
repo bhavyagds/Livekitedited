@@ -44,7 +44,7 @@ _EL_ID_CONTEXT_RE = re.compile(
 _EL_HASH_NUMBER_RE = re.compile(r"#\s*(\d{4,16})\b")
 _EL_LONG_DIGITS_RE = re.compile(r"(?<![\d.,])(\d{5,16})(?![\d.,])")
 
-# Read common English-call identifiers digit by digit.
+# Read common English-call identifiers one digit at a time.
 _EN_ID_CONTEXT_RE = re.compile(
     r"(?i)\b("
     r"order(?:\s*(?:number|id|no\.?))?|"
@@ -168,12 +168,12 @@ def normalize_numeric_ids_for_tts(text: str, language: str | None = None) -> str
     Normalize numeric IDs for clearer TTS pronunciation.
 
     Greek behavior:
-    - Reads ZIP/order/phone-like numbers digit-by-digit.
-    - Reads standalone long digit runs (5-16) digit-by-digit.
+    - Reads ZIP/order/phone-like numbers one digit at a time.
+    - Reads standalone long digit runs (5-16) one digit at a time.
 
     English behavior:
-    - Reads order/phone/zip/reference-like IDs digit-by-digit.
-    - Reads hash-prefixed IDs (#12345) digit-by-digit.
+    - Reads order/phone/zip/reference-like IDs one digit at a time.
+    - Reads hash-prefixed IDs (#12345) one digit at a time.
     - Converts numeric dates (DD/MM) to spoken month + ordinal day.
     """
     if not text:

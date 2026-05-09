@@ -377,17 +377,17 @@ def create_stt(is_sip_call: bool = False):
         # smart_format=True (SDK default): handles phone/date formatting automatically.
         # keywords: boost confidence for individual digit words that STT often mishears
         _digit_keywords = [
-            ("μηδέν", 5.0), ("ένα", 5.0), ("δύο", 5.0), ("τρία", 5.0),
-            ("τέσσερα", 5.0), ("πέντε", 5.0), ("έξι", 5.0), ("επτά", 5.0),
-            ("οκτώ", 5.0), ("εννέα", 5.0),
+            ("μηδέν", 1.5), ("ένα", 1.5), ("δύο", 1.5), ("τρία", 1.5),
+            ("τέσσερα", 1.5), ("πέντε", 1.5), ("έξι", 1.5), ("επτά", 1.5),
+            ("οκτώ", 1.5), ("εννέα", 1.5),
         ]
         return deepgram.STT(
             model=model,
             language="el",
             api_key=deepgram_api_key,
             interim_results=True,
-            numerals=True,
-            smart_format=True,
+            numerals=False,
+            smart_format=False,
             punctuate=True,
             keywords=_digit_keywords,
         )
@@ -773,8 +773,8 @@ async def entrypoint(ctx: JobContext):
         min_value=0.2,
         max_value=3.0,
     )
-    # Product requirement: wait at least ~1.2s after user stops speaking before replying.
-    effective_endpointing_delay = max(1.2, configured_endpointing_delay)
+    # Patience: wait at least ~1.5s after user stops speaking before replying.
+    effective_endpointing_delay = max(1.5, configured_endpointing_delay)
 
     def _before_llm_cb(agent_instance, chat_ctx):
         """Gate the LLM when the deterministic handler has already replied via agent.say()."""

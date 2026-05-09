@@ -281,6 +281,20 @@ def _normalize_phone_for_lookup(raw_text: str) -> Optional[str]:
     if not normalized:
         return None
 
+    # Reject obvious counting/noise input like "10, 11, 12..." which is not a phone number.
+    short_numbers = [int(n) for n in re.findall(r"\b\d{1,2}\b", normalized)]
+    consecutive_run = 1
+    max_run = 1
+    for idx in range(1, len(short_numbers)):
+        if short_numbers[idx] == short_numbers[idx - 1] + 1:
+            consecutive_run += 1
+            max_run = max(max_run, consecutive_run)
+        else:
+            consecutive_run = 1
+    if max_run >= 4:
+        room_log("PHONE_INPUT_REJECTED", reason="counting_sequence_noise", run=max_run, sample=_truncate(raw_text, 120))
+        return None
+
     digits = _digits_from_phrase(normalized)
     compact = re.sub(r"\D", "", digits or "")
     if not compact:
@@ -322,7 +336,7 @@ def _normalize_phone_for_lookup(raw_text: str) -> Optional[str]:
 
 
 def _speak_digits(raw: str, language: str) -> str:
-    """Convert digits into digit-by-digit spoken words for reliable confirmations."""
+    """Convert digits into one digit at a time spoken words for reliable confirmations."""
     digits = re.sub(r"\D", "", raw or "")
     if not digits:
         return ""
@@ -354,7 +368,8 @@ def _speak_digits(raw: str, language: str) -> str:
             "9": "nine",
         }
 
-    return " ".join(words[digit] for digit in digits)
+    # Comma pauses prevent TTS engines from merging pairs into "thirty-nine", etc.
+    return ", ".join(words[digit] for digit in digits)
 
 
 def _require_setting(key: str, *, allow_empty: bool = False):
@@ -1368,7 +1383,7 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
             )
         return (
             "I couldn't verify this order from the details I received. "
-            "Please check the order number and repeat it digit by digit."
+            "Please check the order number and repeat it one digit at a time."
         )
 
     def _digits_spaced(raw: str) -> str:
@@ -1376,7 +1391,7 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
         if not digits:
             return ""
         
-        # For long numbers (phone numbers, order IDs), always speak digit-by-digit
+        # For long numbers (phone numbers, order IDs), always speak one digit at a time
         if len(digits) > 4:
             return _speak_digits(digits, lang)
             
@@ -1387,7 +1402,7 @@ def _build_order_voice_summary(result_text: str, language: str) -> str:
             except Exception:
                 return _speak_digits(digits, lang)
         
-        # For English, if not digit-by-digit, at least space them out for TTS
+        # For English, if not one digit at a time, at least space them out for TTS
         return " ".join(digits)
 
     def _month_name(month: int) -> str:
@@ -1515,7 +1530,7 @@ def _build_phone_lookup_voice_summary(result_text: str, language: str) -> str:
             )
         return (
             "I couldn't find any order with this phone number. "
-            "Please check the number and repeat it digit by digit."
+            "Please check the number and repeat it one digit at a time."
         )
 
     if lookup_state == "unknown":
@@ -1526,7 +1541,7 @@ def _build_phone_lookup_voice_summary(result_text: str, language: str) -> str:
             )
         return (
             "I couldn't verify any order with this phone number. "
-            "Please check the phone number and repeat it digit by digit."
+            "Please check the phone number and repeat it one digit at a time."
         )
 
     if (
@@ -1847,8 +1862,8 @@ def _repeat_number_prompt_for_mode(mode: str, lang: str) -> str:
             return "Μπορείτε να πείτε ξανά τον αριθμό τηλεφώνου σας ψηφίο προς ψηφίο, παρακαλώ;"
         return "Μπορείτε να πείτε ξανά τον αριθμό παραγγελίας ψηφίο προς ψηφίο, παρακαλώ;"
     if is_phone:
-        return "Could you please repeat your mobile number digit by digit?"
-    return "Could you please repeat your order number digit by digit?"
+        return "Could you please repeat your mobile number one digit at a time?"
+    return "Could you please repeat your order number one digit at a time?"
 
 
 def _lookup_progress_prompt() -> str:
@@ -2859,7 +2874,7 @@ class ElenaFunctionContext(llm.FunctionContext):
                 room_log("TOOL_RESULT_BLOCKED", name="lookup_order_by_phone", reason="number_mode_mismatch")
                 if lang == "el":
                     return "Αυτό δεν μοιάζει με αριθμό τηλεφώνου. Δώστε μου το τηλέφωνό σας ψηφίο προς ψηφίο."
-                return "That doesn't look like a phone number. Please share your phone number digit by digit."
+                return "That doesn't look like a phone number. Please share your phone number one digit at a time."
 
         normalized_phone = _normalize_phone_for_lookup(phone)
         if not normalized_phone:
@@ -3613,7 +3628,7 @@ async def entrypoint(ctx: JobContext):
         parts = _extract_digit_parts(lowered)
         if len(parts) >= 3:
             return True
-        return bool(re.search(r"(digit by digit|ψηφίο προς ψηφίο|ένα, δύο|one two)", lowered))
+        return bool(re.search(r"(one digit at a time|ψηφίο προς ψηφίο|ένα, δύο|one two)", lowered))
 
     def _is_short_utterance(text: str) -> bool:
         lowered = _normalize_switch_text(text)
@@ -3662,7 +3677,7 @@ async def entrypoint(ctx: JobContext):
             return False
         return bool(
             re.search(
-                r"(repeat|say it again|digit by digit|not clear|couldn t hear|didn t hear|did not hear|could not hear|δεν .*άκουσα|δεν .*κατάλαβ|επαναλάβ|ξανά|ψηφίο προς ψηφίο)",
+                r"(repeat|say it again|one digit at a time|not clear|couldn t hear|didn t hear|did not hear|could not hear|δεν .*άκουσα|δεν .*κατάλαβ|επαναλάβ|ξανά|ψηφίο προς ψηφίο)",
                 lowered,
                 flags=re.IGNORECASE,
             )
@@ -5222,7 +5237,7 @@ async def entrypoint(ctx: JobContext):
                         if get_agent_language() == "el":
                             msg = "Παρακαλώ πείτε τον αριθμό τηλεφώνου που χρησιμοποιήσατε για την παραγγελία, ψηφίο προς ψηφίο."
                         else:
-                            msg = "Please provide the phone number used for the order, digit by digit."
+                            msg = "Please provide the phone number used for the order, one digit at a time."
                         _schedule_manual_prompt(msg, reason="awaiting_phone_digits")
                         return True
                     return False
@@ -5279,7 +5294,7 @@ async def entrypoint(ctx: JobContext):
                 else:
                     msg = (
                         "That does not look like a complete phone number. "
-                        f"Please repeat the full number, at least {min_digits} digits, digit by digit."
+                        f"Please repeat the full number, at least {min_digits} digits, one digit at a time."
                     )
                 _schedule_manual_prompt(msg, reason="invalid_complete_phone")
                 room_log("INVALID_OR_PARTIAL_PHONE_REJECTED", digits=combined_digits, turn_id=current_turn_id)
@@ -5318,7 +5333,7 @@ async def entrypoint(ctx: JobContext):
                 if get_agent_language() == "el":
                     msg = "Εντάξει. Πείτε ξανά τον αριθμό τηλεφώνου σας ψηφίο προς ψηφίο."
                 else:
-                    msg = "Okay. Please repeat your phone number again, digit by digit."
+                    msg = "Okay. Please repeat your phone number again, one digit at a time."
                 _schedule_manual_prompt(msg, reason="phone_confirmation_rejected")
                 return True
 
@@ -5351,7 +5366,7 @@ async def entrypoint(ctx: JobContext):
                     else:
                         msg = (
                             "That does not look like a complete phone number. "
-                            f"Please repeat the full number, at least {min_digits} digits, digit by digit."
+                            f"Please repeat the full number, at least {min_digits} digits, one digit at a time."
                         )
                     _schedule_manual_prompt(msg, reason="invalid_complete_phone")
                 return True
@@ -5383,7 +5398,7 @@ async def entrypoint(ctx: JobContext):
             if get_agent_language() == "el":
                 msg = "Παρακαλώ πείτε ξανά τον αριθμό τηλεφώνου σας ψηφίο προς ψηφίο."
             else:
-                msg = "Please say your phone number again, digit by digit."
+                msg = "Please say your phone number again, one digit at a time."
             _schedule_manual_prompt(msg, reason="awaiting_phone_recovery")
             return True
 
@@ -5588,7 +5603,7 @@ async def entrypoint(ctx: JobContext):
                         else:
                             msg = (
                                 f"The order number should be between {min_d} and {max_d} digits. "
-                                f"Could you repeat it digit by digit?"
+                                f"Could you repeat it one digit at a time?"
                             )
                         await send_agent_transcript(msg)
                         agent.chat_ctx.append(role="assistant", text=msg)
@@ -5611,7 +5626,7 @@ async def entrypoint(ctx: JobContext):
                     text=(
                         "SUPPORT FLOW - ORDER NUMBER STILL MISSING:\n"
                         f"- The caller has not provided a valid {min_d}-{max_d} digit order number yet.\n"
-                        "- Ask them to repeat the order number digit by digit.\n"
+                        "- Ask them to repeat the order number one digit at a time.\n"
                         "- Do not switch to phone lookup unless they explicitly say they don't have an order number."
                     ),
                 )
@@ -5653,7 +5668,7 @@ async def entrypoint(ctx: JobContext):
                     else:
                         msg = (
                             "No problem. Please give me the phone number used for the order, "
-                            "digit by digit?"
+                            "one digit at a time?"
                         )
                     prompt_key = f"{current_turn_id}:ask_phone_after_no_order_number:{msg}"
                     if (
