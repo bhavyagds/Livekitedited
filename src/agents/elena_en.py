@@ -601,28 +601,10 @@ def _build_memory_prompt_block(memory_items: list[dict]) -> str:
 
 
 def create_vad(is_sip_call: bool = False):
-    """Create Voice Activity Detection tuned for better transcript completeness."""
-    min_speech_duration = _as_float(
-        get_agent_setting("vad_min_speech_duration", 0.15),
-        0.15,
-        min_value=0.1,
-        max_value=0.8,
-    )
-    # Language-aware silence delay: match elena_original.py behavior.
-    initial_lang = get_agent_language()
-    if initial_lang == "el":
-        default_silence = 2.0 if is_sip_call else 1.8
-    else:
-        default_silence = 1.4 if is_sip_call else 1.2
-
-    min_silence_duration = _as_float(
-        get_agent_setting("vad_min_silence_duration", default_silence),
-        default_silence,
-        min_value=0.2,
-        max_value=3.0,
-    )
+    min_speech = _as_float(get_agent_setting("vad_min_speech_duration", 0.15), 0.15, min_value=0.05, max_value=1.0)
+    min_silence = _as_float(get_agent_setting("vad_min_silence_duration", 1.2 if is_sip_call else 1.0), 1.0, min_value=0.1, max_value=3.0)
     # threshold=0.6: more aggressive to filter out background noise hallucinations
-    return silero.VAD.load(min_speech_duration=min_speech_duration, min_silence_duration=min_silence_duration, activation_threshold=0.6)
+    return silero.VAD.load(min_speech_duration=min_speech, min_silence_duration=min_silence, activation_threshold=0.6)
 
 
 # -----------------------------------------------------------------------------
@@ -843,19 +825,14 @@ async def entrypoint(ctx: JobContext):
     chat_ctx = llm.ChatContext()
     chat_ctx.append(role="system", text=system_prompt)
 
-    # Language-aware endpointing delay: match elena_original.py behavior.
-    initial_lang = get_agent_language()
-    if initial_lang == "el":
-        default_endpointing = 2.2 if is_sip_call else 1.8
-    else:
-        default_endpointing = 1.4 if is_sip_call else 1.2
-
     configured_endpointing_delay = _as_float(
-        get_agent_setting("min_endpointing_delay", default_endpointing),
-        default_endpointing,
+        get_agent_setting("min_endpointing_delay", 1.2),
+        1.2,
         min_value=0.2,
         max_value=3.0,
     )
+    # Patience: wait at least ~4s after user stops speaking before replying.
+    effective_endpointing_delay = max(4.0, configured_endpointing_delay)
 
     def _before_llm_cb(agent_instance, chat_ctx):
         """Gate the LLM when the deterministic handler has already replied via agent.say()."""
@@ -874,7 +851,7 @@ async def entrypoint(ctx: JobContext):
         fnc_ctx=ElenaFunctionContext(),
         allow_interruptions=True,
         interrupt_min_words=_as_int(get_agent_setting("interrupt_min_words", 2), 2, min_value=1, max_value=10),
-        min_endpointing_delay=configured_endpointing_delay,
+        min_endpointing_delay=effective_endpointing_delay,
         # Keep disabled here to avoid race where LLM starts replying before deterministic
         # memory/order flow handlers finish, which can produce double answers.
         preemptive_synthesis=_as_bool(get_agent_setting("preemptive_synthesis", False), default=False),
@@ -883,8 +860,8 @@ async def entrypoint(ctx: JobContext):
 
     room_log(
         "TURN_CONFIG",
-        default_endpointing=default_endpointing,
         configured_endpointing_delay=configured_endpointing_delay,
+        effective_endpointing_delay=effective_endpointing_delay,
     )
 
 
