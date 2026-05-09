@@ -419,25 +419,6 @@ export function VoiceAgent({ onDisconnect }: VoiceAgentProps) {
                 </motion.div>
               )}
 
-              {/* User speaking indicator — shows animated dots on the user side while Elena is listening */}
-              {agentState === 'listening' && (
-                <motion.div
-                  className="chat-message user typing"
-                  initial={{ opacity: 0, x: 20 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0 }}
-                >
-                  <div className="message-avatar">{USER_AVATAR}</div>
-                  <div className="message-content">
-                    <span className="message-speaker">You</span>
-                    <div className="typing-dots">
-                      <span></span>
-                      <span></span>
-                      <span></span>
-                    </div>
-                  </div>
-                </motion.div>
-              )}
             </AnimatePresence>
           </div>
         </motion.div>

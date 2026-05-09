@@ -91,6 +91,12 @@ class Settings(BaseSettings):
         description="OpenAI model for conversation"
     )
 
+    # Deepgram Configuration
+    deepgram_api_key: str = Field(
+        default="",
+        description="Deepgram API key for STT"
+    )
+
     # Shopify Configuration
     shopify_store_url: str = Field(
         default="",

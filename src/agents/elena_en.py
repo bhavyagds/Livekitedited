@@ -376,6 +376,9 @@ class ElenaFunctionContext(llm.FunctionContext):
         logger.info("Session end requested - scheduling disconnect after goodbye")
         room_log("SESSION_END_REQUESTED")
 
+        # Disable silence monitor immediately!
+        _current["state"].silence_enabled = False
+
         # Schedule the disconnect with a delay to allow goodbye to be spoken
         async def delayed_end():
             # Wait for LLM to process response + TTS to generate + speak
@@ -975,9 +978,6 @@ async def entrypoint(ctx: JobContext):
     @agent.on("user_stopped_speaking")
     def _on_user_stopped_speaking():
         schedule_thinking_state()
-        # Fast-track the latest interim as a final transcript for immediate UI feedback.
-        if _last_user_interim:
-            asyncio.create_task(send_user_transcript(_last_user_interim, interim=False))
 
     @agent.on("user_speech_committed")
     def _on_user_speech_committed(msg):
@@ -1173,6 +1173,8 @@ async def entrypoint(ctx: JobContext):
  
         if farewell_intent:
             room_log("FAREWELL_DETECTED", text=user_text)
+            # Disable silence monitor immediately on farewell
+            state.silence_enabled = False
             # Let the LLM respond naturally, then end the session after it finishes speaking.
             async def _delayed_end():
                 await asyncio.sleep(6.0)  # give LLM time to speak its goodbye
