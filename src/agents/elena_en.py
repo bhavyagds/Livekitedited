@@ -1,4 +1,4 @@
-"""
+﻿"""
 Meallion Voice AI - Elena English Agent (clean rewrite)
 English-only voice agent with deterministic order/phone support flow.
 """
@@ -801,19 +801,6 @@ async def entrypoint(ctx: JobContext):
         before_llm_cb=_before_llm_cb,
     )
 
-    # Stream interim user transcripts to the UI for realtime feel.
-    # Access the underlying human input handler to catch words before they are finalized.
-    human_input = getattr(agent, "_human_input", None)
-    if human_input:
-        @human_input.on("interim_transcript")
-        def _on_interim_transcript(ev):
-            try:
-                text = ev.alternatives[0].text
-            except Exception:
-                text = None
-            if text:
-                asyncio.create_task(send_user_transcript(text, interim=True))
-
     room_log(
         "TURN_CONFIG",
         configured_endpointing_delay=configured_endpointing_delay,
@@ -845,9 +832,10 @@ async def entrypoint(ctx: JobContext):
 
     _last_user_interim = ""
     _last_user_interim_sent_at = 0.0
+    _last_user_final = ""
 
     async def send_user_transcript(text: str, *, interim: bool = False):
-        nonlocal _last_user_interim, _last_user_interim_sent_at
+        nonlocal _last_user_interim, _last_user_interim_sent_at, _last_user_final
         cleaned = (text or "").strip()
         if not cleaned:
             return
@@ -863,18 +851,20 @@ async def entrypoint(ctx: JobContext):
                 ensure_ascii=False,
             )
             try:
-                # Use unreliable delivery for interims to minimize latency.
-                await ctx.room.local_participant.publish_data(payload.encode("utf-8"), reliable=False)
+                # FIX: use reliable=True so interim packets are never silently dropped.
+                await ctx.room.local_participant.publish_data(payload.encode("utf-8"), reliable=True)
             except Exception:
                 pass
             return
 
-        if cleaned == state.last_user_transcript_text and (now_ts - state.last_user_transcript_at) < 5.0:
+        # FIX: deduplicate finals using _last_user_final so that STT-corrected finals
+        # still go through even when they match the fast-tracked interim text, but only
+        # skip if this exact text was already sent AND no new interim has arrived since.
+        if cleaned == _last_user_final and cleaned != _last_user_interim:
             room_log("USER_TEXT_DEDUPED", text=cleaned)
             return
 
-        state.last_user_transcript_text = cleaned
-        state.last_user_transcript_at = now_ts
+        _last_user_final = cleaned
         _last_user_interim = ""
         conversation_transcript.append(f"User: {cleaned}")
         payload = json.dumps(
