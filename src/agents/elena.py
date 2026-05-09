@@ -6,6 +6,30 @@ based on the configured language setting.
 
 import logging
 import asyncio
+import os
+import sys
+
+# Windows + Python 3.14 compatibility fix
+if os.name == 'nt':
+    # Monkeypatch asyncio.get_event_loop to prevent RuntimeError
+    _original_get_event_loop = asyncio.get_event_loop
+    
+    def _patched_get_event_loop():
+        try:
+            return _original_get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            return loop
+            
+    asyncio.get_event_loop = _patched_get_event_loop
+    
+    # Set Windows-specific event loop policy
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except Exception:
+        pass
+
 from livekit.agents import JobContext, JobProcess, WorkerOptions, cli
 from src.agents.prompts import get_agent_language
 from src.config import settings
@@ -17,9 +41,6 @@ async def entrypoint(ctx: JobContext):
     """
     Router entrypoint: determine language and hand off to the specific agent.
     """
-    # DO NOT wait for participant here; the sub-agents handle room connection and participants.
-    # Hand off as quickly as possible to the correct language module.
-    
     # Ensure settings are loaded before routing
     from src.agents.prompts import _fetch_from_db
     await _fetch_from_db()
@@ -39,9 +60,6 @@ def prewarm(proc: JobProcess):
     """
     Prewarm the specific agent process based on language.
     """
-    # NOTE: We avoid full database fetch here to prevent connection pool issues
-    # during process initialization. Each job will fetch its own settings.
-    
     lang = get_agent_language()
     logger.info(f"Elena Router: prewarming {lang.upper()} agent process")
     
@@ -56,10 +74,6 @@ def run_agent():
     """
     Run the Elena voice agent as a LiveKit worker.
     """
-    # The worker itself doesn't need to be language-specific at boot time,
-    # because the language can change in the database.
-    # The entrypoint will handle the dynamic routing per job.
-    
     import os
     
     # Configure logging

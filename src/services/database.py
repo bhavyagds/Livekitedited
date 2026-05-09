@@ -44,13 +44,19 @@ _async_session = None
 def get_engine():
     global _engine
     if _engine is None:
-        _engine = create_async_engine(
-            settings.postgres_url,
-            echo=settings.debug,
-            pool_pre_ping=True,
-            pool_size=5,
-            max_overflow=10,
-        )
+        if settings.postgres_url.startswith("sqlite"):
+            _engine = create_async_engine(
+                settings.postgres_url,
+                echo=settings.debug,
+            )
+        else:
+            _engine = create_async_engine(
+                settings.postgres_url,
+                echo=settings.debug,
+                pool_pre_ping=True,
+                pool_size=5,
+                max_overflow=10,
+            )
     return _engine
 
 def get_session_factory():
@@ -67,14 +73,23 @@ async def init_db():
         
         # Self-healing: Check if agent_memories has is_active column
         try:
-            # We use a raw SQL check to see if the column exists
-            check_sql = text("""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name='agent_memories' AND column_name='is_active'
-            """)
-            result = await conn.execute(check_sql)
-            if not result.fetchone():
+            # Check if using SQLite
+            if settings.postgres_url.startswith("sqlite"):
+                check_sql = text("PRAGMA table_info('agent_memories')")
+                result = await conn.execute(check_sql)
+                columns = [row[1] for row in result.fetchall()]
+                column_exists = 'is_active' in columns
+            else:
+                # PostgreSQL
+                check_sql = text("""
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name='agent_memories' AND column_name='is_active'
+                """)
+                result = await conn.execute(check_sql)
+                column_exists = bool(result.fetchone())
+
+            if not column_exists:
                 logger.info("Adding missing 'is_active' column to 'agent_memories' table...")
                 await conn.execute(text("ALTER TABLE agent_memories ADD COLUMN is_active BOOLEAN DEFAULT TRUE"))
                 await conn.execute(text("UPDATE agent_memories SET is_active = TRUE WHERE is_active IS NULL"))
@@ -2308,15 +2323,21 @@ class DatabaseService:
                 
                 # Get hourly distribution (for today)
                 today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+                
+                if settings.postgres_url.startswith("sqlite"):
+                    hour_func = func.strftime('%H', SIPEvent.created_at)
+                else:
+                    hour_func = func.extract('hour', SIPEvent.created_at)
+
                 query = select(
-                    func.extract('hour', SIPEvent.created_at).label("hour"),
+                    hour_func.label("hour"),
                     func.count(SIPEvent.id).label("count"),
                 ).where(
                     SIPEvent.created_at >= today_start
                 ).group_by(
-                    func.extract('hour', SIPEvent.created_at)
+                    hour_func
                 ).order_by(
-                    func.extract('hour', SIPEvent.created_at)
+                    hour_func
                 )
                 
                 result = await session.execute(query)

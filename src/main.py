@@ -7,7 +7,7 @@ import logging
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import FastAPI, Request, HTTPException
@@ -145,8 +145,8 @@ def generate_livekit_token(
     Returns:
         JWT access token string
     """
-    now = datetime.utcnow()
-    exp = now + timedelta(hours=2)
+    now = datetime.now(timezone.utc)
+    exp = now + timedelta(hours=6)
     
     claims = {
         "iss": settings.livekit_api_key,

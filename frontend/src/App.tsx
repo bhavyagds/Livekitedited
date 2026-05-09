@@ -60,6 +60,7 @@ function App() {
 
   const handleError = useCallback((err: Error) => {
     console.error('Room error:', err);
+    setError(err.message || 'Failed to connect to voice server. Please check microphone permissions.');
     // On error, also disconnect and return to landing
     setConnection(null);
   }, []);

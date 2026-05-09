@@ -3,6 +3,15 @@ Meallion Voice AI - Elena Voice Agent
 Main voice agent implementation using LiveKit Agents SDK (2026 version).
 """
 
+
+def _is_phone_number_prompt(text: str) -> bool:
+    if not text: return False
+    normalized = text.lower()
+    return any(k in normalized for k in ["phone", "number", "τηλέφωνο", "αριθμό", "mobile", "κινητό"])
+
+def _is_phone_number_collection_prompt(text: str) -> bool:
+    return _is_phone_number_prompt(text)
+
 import logging
 import asyncio
 import time
@@ -892,7 +901,7 @@ def _extract_ticket_reference(text: str) -> Optional[str]:
     """Extract support ticket reference from tool output."""
     if not text:
         return None
-    match = re.search(r"(?i)reference number is\s+([a-z0-9-]+)", text)
+    match = re.search(r"(?i)reference number is\s+([#a-zA-Z0-9-]+)", text)
     if match:
         return match.group(1).strip()
     return None
@@ -1958,8 +1967,9 @@ def create_tts():
         min_value=0.5,
         max_value=1.2,
     )
-    voice_stability = _require_float_setting(
-        "agent_voice_stability",
+    voice_stability = _as_float(
+        get_agent_setting("agent_voice_stability", 0.75),
+        0.75,
         min_value=0.0,
         max_value=1.0,
     )
@@ -3937,9 +3947,9 @@ async def entrypoint(ctx: JobContext):
     # Language-aware endpointing delay: Greek requires more patience for complete transcripts.
     initial_lang = 'en'
     if initial_lang == "el":
-        default_endpointing = 2.2 if is_sip_call else 1.8
+        default_endpointing = 2.8 if is_sip_call else 2.5
     else:
-        default_endpointing = 1.4 if is_sip_call else 1.2
+        default_endpointing = 2.5 if is_sip_call else 2.2
     
     # Create the voice pipeline agent - tuned to avoid clipping user speech.
     min_endpointing_delay = _as_float(
@@ -4526,6 +4536,7 @@ async def entrypoint(ctx: JobContext):
     @agent.on("user_speech_committed")
     def on_user_speech_committed(message):
         """Send user transcript to frontend and check for abuse."""
+        silence_tracker["llm_is_generating"] = True
         # Extract text first so we can log it even if the call is ending
         user_text = message.content
         user_text_for_transcript = _format_user_text_for_transcript(user_text)
@@ -5132,10 +5143,7 @@ async def entrypoint(ctx: JobContext):
                                 f"Μπορείτε να τον πείτε ξανά;"
                             )
                         else:
-                            msg = (
-                                f"The order number should be between {min_d} and {max_d} digits. "
-                                f"Could you repeat it again?"
-                            )
+                            msg = "I didn't quite catch the order number. Could you please repeat it?"
                         await send_agent_transcript(msg)
                         agent.chat_ctx.append(role="assistant", text=msg)
                         await live_agent.say(msg, allow_interruptions=True)
@@ -5552,6 +5560,7 @@ async def entrypoint(ctx: JobContext):
     @agent.on("agent_started_speaking")
     def on_agent_started_speaking():
         _latency_tracker.agent_started_speaking()
+        silence_tracker["llm_is_generating"] = False
         cancel_thinking_task()
         logger.info("audio_publish_start: agent_started_speaking")
         silence_tracker["agent_is_speaking"] = True
@@ -6030,8 +6039,10 @@ async def entrypoint(ctx: JobContext):
                 if silence_tracker.get("paused_by_tool"):
                     continue
 
-                # Skip checks while agent audio is still being rendered.
-                if silence_tracker.get("agent_is_speaking") or silence_tracker.get("prompt_in_progress"):
+                # Skip checks while agent is speaking or LLM is thinking.
+                if silence_tracker.get("agent_is_speaking") or \
+                   silence_tracker.get("llm_is_generating") or \
+                   silence_tracker.get("prompt_in_progress"):
                     continue
 
                 # Strong global guard: never say silence prompts during deterministic work.

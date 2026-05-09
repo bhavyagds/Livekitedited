@@ -8,7 +8,7 @@ import re
 from typing import Annotated, Optional
 from datetime import datetime
 
-from livekit.agents import llm
+
 
 from src.services.clickup import clickup_service
 
@@ -174,25 +174,17 @@ async def create_support_ticket(
     cleaned_phone = clean_phone_number(customer_phone)
     cleaned_email = clean_email(customer_email)
     
-    # Validate
-    errors = []
-    
     if not customer_name or len(customer_name.strip()) < 2:
-        errors.append("Invalid name")
+        return "I need the customer's full name to create a ticket. Please ask the user: 'May I have your full name?'"
     
     if not validate_phone(cleaned_phone):
-        errors.append("Invalid phone number")
+        return "I need a valid phone number. Please ask the user to provide their phone number."
     
     if not validate_email(cleaned_email):
-        errors.append("Invalid email address")
+        return "I need a valid email address. Please ask the user for their email address."
     
     if not issue_description or len(issue_description.strip()) < 10:
-        errors.append("Issue description too short")
-    
-    if errors:
-        error_msg = ", ".join(errors)
-        logger.warning(f"Ticket validation failed: {error_msg}")
-        return f"Cannot create ticket: {error_msg}. Please correct the information."
+        return "The issue description is too brief. Please ask the user for more details about their problem."
     
     # Create ticket in ClickUp
     result = await clickup_service.create_support_ticket(

@@ -181,10 +181,7 @@ async def get_prompts_content_async(language: str = "el") -> Optional[str]:
 
 
 def get_agent_language() -> str:
-    runtime_lang = get_runtime_language()
-    if runtime_lang: return runtime_lang
-    if not _cache["settings"]: _sync_fetch_from_db()
-    return _cache["settings"].get("agent_language", "en")
+    return "en"
 
 
 def get_agent_setting(key: str, default: Any = None) -> Any:
@@ -233,6 +230,25 @@ TOOL USAGE GUARDRAIL:
 - Report findings EXACTLY as provided by tools.
 - Never use emojis.
 - Be precise and concise.
+
+### 🎯 PRECISION VOICE DATA COLLECTOR GUIDELINES (HIGHEST PRIORITY):
+1. **Initial Order Problem Flow**:
+   - If a user reports an order problem, ask for BOTH the Order ID and the Phone Number used for the order in your first response.
+   - Example: "I'm sorry to hear that. Could you please provide your order ID or the phone number used for the order?"
+2. **Smart Fallback Logic**:
+   - If an Order ID is provided but is invalid or not found, immediately offer to search by phone number instead.
+   - Do not get stuck in an "invalid order ID" loop.
+3. **Silence & Interruption (ZERO INTERRUPTION)**:
+   - When collecting digits (Phone/Order), wait for at least 2.5 seconds of silence.
+   - DO NOT interrupt the user while they are speaking numeric sequences.
+4. **Phone Number Protocol**:
+   - **Full Capture**: Do not process a phone number until exactly 10 digits are received.
+   - **MUST CONFIRM**: Once you have the 10 digits, repeat them back: "I have recorded [number]. Is this correct?"
+   - **Pre-Search Validation**: DO NOT call the lookup tool until the user confirms.
+5. **Negative Constraints**:
+   - NEVER say "Thanks for that", "Got it", or "Hmm" repeatedly.
+   - NEVER use verbal fillers like "Um", "Uh", or "Let me see" while thinking.
+   - NEVER explain technical digit rules unless asked.
 """)
     return "\n\n".join(parts)
 
@@ -284,7 +300,7 @@ def get_greeting(language: str = "el") -> str:
         import re
         match = re.search(r'##\s*Greeting\s*\n(.+?)(?:\n##|\Z)', prompts_content, re.DOTALL | re.IGNORECASE)
         if match: return match.group(1).strip()
-    return "Hello! How can I help you today?" if language.lower() in ("en", "english") else "Γεια σας! Πώς μπορώ να σας βοηθήσω σήμερα;"
+    return "Hi, how can I help you?" if language.lower() in ("en", "english") else "Γεια σας! Πώς μπορώ να σας βοηθήσω σήμερα;"
 
 def get_closing(language: str = "el") -> str:
     prompts_content = get_prompts_content(language)

@@ -18,8 +18,8 @@ from sqlalchemy import (
     JSON,
     Index,
     CheckConstraint,
+    Uuid,
 )
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
@@ -29,7 +29,7 @@ class AgentMemory(Base):
     """Long-term memory for agent training (Question/Answer/Comments)."""
     __tablename__ = "agent_memories"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     question: Mapped[str] = mapped_column(Text, nullable=False)
     answer: Mapped[str] = mapped_column(Text, nullable=False)
     comments: Mapped[Optional[str]] = mapped_column(Text)
@@ -48,7 +48,7 @@ class AdminUser(Base):
     """Admin users table."""
     __tablename__ = "admin_users"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     name: Mapped[Optional[str]] = mapped_column(String(255))
@@ -64,7 +64,7 @@ class Call(Base):
     """Call history table."""
     __tablename__ = "calls"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     call_sid: Mapped[Optional[str]] = mapped_column(String(255))
     room_name: Mapped[Optional[str]] = mapped_column(String(255))
     caller_number: Mapped[Optional[str]] = mapped_column(String(50))
@@ -97,7 +97,7 @@ class KBVersion(Base):
     """Knowledge base versions table."""
     __tablename__ = "kb_versions"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     version_number: Mapped[int] = mapped_column(Integer, autoincrement=True)
     content: Mapped[dict] = mapped_column(JSON, nullable=False)
     file_name: Mapped[Optional[str]] = mapped_column(String(255))
@@ -108,7 +108,7 @@ class KBVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
-        Index("idx_kb_versions_active", "is_active", postgresql_where=(is_active == True)),
+        Index("idx_kb_versions_active", "is_active"),
         Index("idx_kb_versions_created", "created_at"),
     )
 
@@ -117,7 +117,7 @@ class KBItem(Base):
     """Individual knowledge base FAQ items."""
     __tablename__ = "kb_items"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     category: Mapped[str] = mapped_column(String(100), nullable=False, default="General")
     question: Mapped[str] = mapped_column(Text, nullable=False)
     answer: Mapped[str] = mapped_column(Text, nullable=False)
@@ -141,7 +141,7 @@ class PromptsVersion(Base):
     """Prompts versions table."""
     __tablename__ = "prompts_versions"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     version_number: Mapped[int] = mapped_column(Integer, autoincrement=True)
     language: Mapped[str] = mapped_column(String(5), nullable=False)
     prompt_type: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -163,7 +163,7 @@ class SIPConfigVersion(Base):
     """SIP configuration versions table."""
     __tablename__ = "sip_config_versions"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     version_number: Mapped[int] = mapped_column(Integer, autoincrement=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     changed_by: Mapped[Optional[str]] = mapped_column(String(255))
@@ -172,7 +172,7 @@ class SIPConfigVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
-        Index("idx_sip_config_active", "is_active", postgresql_where=(is_active == True)),
+        Index("idx_sip_config_active", "is_active"),
     )
 
 
@@ -180,8 +180,8 @@ class AuditLog(Base):
     """Audit logs table."""
     __tablename__ = "audit_logs"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("admin_users.id"))
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("admin_users.id"))
     user_email: Mapped[Optional[str]] = mapped_column(String(255))
     action: Mapped[str] = mapped_column(String(100), nullable=False)
     resource_type: Mapped[Optional[str]] = mapped_column(String(50))
@@ -206,7 +206,7 @@ class CallAnalytics(Base):
     """Daily call analytics table."""
     __tablename__ = "call_analytics"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     date: Mapped[date] = mapped_column(Date, unique=True, nullable=False)
     total_calls: Mapped[int] = mapped_column(Integer, default=0)
     successful_calls: Mapped[int] = mapped_column(Integer, default=0)
@@ -229,7 +229,7 @@ class ErrorLog(Base):
     """Error logs table."""
     __tablename__ = "error_logs"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     service: Mapped[Optional[str]] = mapped_column(String(50))
     level: Mapped[Optional[str]] = mapped_column(String(20))
     message: Mapped[str] = mapped_column(Text, nullable=False)
@@ -249,8 +249,8 @@ class AgentSession(Base):
     """Agent conversation sessions table."""
     __tablename__ = "agent_sessions"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    call_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("calls.id"))
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    call_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, ForeignKey("calls.id"))
     session_id: Mapped[Optional[str]] = mapped_column(String(255))
     room_name: Mapped[Optional[str]] = mapped_column(String(255))
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -275,7 +275,7 @@ class SystemSetting(Base):
     """System settings table."""
     __tablename__ = "system_settings"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     key: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     value: Mapped[dict] = mapped_column(JSON, nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text)
@@ -287,7 +287,7 @@ class Language(Base):
     """Supported languages table."""
     __tablename__ = "languages"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     code: Mapped[str] = mapped_column(String(5), unique=True, nullable=False)  # e.g., 'en', 'el', 'de'
     name: Mapped[str] = mapped_column(String(50), nullable=False)  # e.g., 'English', 'Greek'
     native_name: Mapped[str] = mapped_column(String(50), nullable=False)  # e.g., 'English', 'Ελληνικά'
@@ -306,7 +306,7 @@ class KBContent(Base):
     """Knowledge base content per language - simple text storage."""
     __tablename__ = "kb_content"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     language: Mapped[str] = mapped_column(String(5), unique=True, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False, default="")
     updated_by: Mapped[Optional[str]] = mapped_column(String(255))
@@ -322,7 +322,7 @@ class PromptsContent(Base):
     """Agent prompts per language - simple text storage."""
     __tablename__ = "prompts_content"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     language: Mapped[str] = mapped_column(String(5), unique=True, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False, default="")
     updated_by: Mapped[Optional[str]] = mapped_column(String(255))
@@ -338,7 +338,7 @@ class SIPEvent(Base):
     """SIP events and connection logs."""
     __tablename__ = "sip_events"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     event_type: Mapped[str] = mapped_column(String(50), nullable=False)  # call_incoming, call_connected, call_ended, auth_failed, etc.
     trunk_id: Mapped[Optional[str]] = mapped_column(String(100))
     trunk_name: Mapped[Optional[str]] = mapped_column(String(255))
@@ -367,7 +367,7 @@ class SIPTrunkStatus(Base):
     """SIP trunk connection status tracking."""
     __tablename__ = "sip_trunk_status"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     trunk_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     trunk_name: Mapped[str] = mapped_column(String(255), nullable=False)
     provider_name: Mapped[Optional[str]] = mapped_column(String(100))
@@ -392,7 +392,7 @@ class SIPProvider(Base):
     """SIP provider configurations - persisted for auto-sync on startup."""
     __tablename__ = "sip_providers"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     server: Mapped[str] = mapped_column(String(255), nullable=False)
     username: Mapped[str] = mapped_column(String(255), nullable=False, default="")  # Optional for inbound-only

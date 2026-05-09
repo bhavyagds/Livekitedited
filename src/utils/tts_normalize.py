@@ -126,14 +126,15 @@ def normalize_punctuation_for_tts(text: str) -> str:
     text = _SSML_TAG_RE.sub(" ", text)
     text = _MD_BULLET_RE.sub(" ", text)
     text = _MD_MARKER_RE.sub(" ", text)
-    text = _PUNCT_NO_NUM_RE.sub("", text)
-    text = _DOT_NO_NUM_RE.sub("", text)
+    # Keep commas and periods as they are essential for TTS prosody (pauses).
+    # text = _PUNCT_NO_NUM_RE.sub("", text)
+    # text = _DOT_NO_NUM_RE.sub("", text)
     text = _BRACKETS_RE.sub(" ", text)
     # Don't strip dashes if they look like "to" (already handled in time) or are between words
     # but for TTS, replacing most with space is safe.
     text = _DASHES_RE.sub(" ", text)
     text = _EMOJI_RE.sub("", text)
-    # Strip any other non-essential symbols
+    # Strip any other non-essential symbols, but KEEP . , ! ? ; :
     text = re.sub(r"[^\w\s.,!?;:'\"-]", " ", text)
     text = _MULTI_SPACE_RE.sub(" ", text).strip()
     return text

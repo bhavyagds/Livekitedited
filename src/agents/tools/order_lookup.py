@@ -7,7 +7,7 @@ import logging
 from contextvars import ContextVar
 from typing import Annotated
 
-from livekit.agents import llm
+
 
 from src.services.shopify import get_shopify_service, ShopifyService
 from src.agents.prompts import get_agent_language, get_agent_setting
@@ -123,6 +123,11 @@ async def lookup_order(
     cleaned = shopify.clean_order_number(order_number)
     min_digits, max_digits = _order_digit_range()
 
+    # Redirection Guard: If user gives a 10-digit number, it's likely a phone number
+    if cleaned and len(cleaned) >= 10:
+        logger.info(f"Input {cleaned} looks like a phone number, redirecting to phone lookup")
+        return await lookup_order_by_phone(cleaned)
+
     if not cleaned or not cleaned.isdigit() or not (min_digits <= len(cleaned) <= max_digits):
         logger.warning(f"Invalid order number: {order_number} -> {cleaned} (expected {min_digits}-{max_digits} digits)")
         if agent_lang == "el":
@@ -217,17 +222,26 @@ async def lookup_order_by_phone(
     cleaned = shopify.clean_phone_number(phone)
     min_digits, max_digits = _phone_digit_bounds()
 
+    # Smart detection: If it's short, it's probably an Order ID (like 12752)
+    # Most Greek phones are 10 digits. Order IDs are usually 3-6 digits.
+    if cleaned and cleaned.isdigit() and len(cleaned) < min_digits:
+        logger.info(f"Short number detected ({cleaned}), attempting Order ID lookup instead")
+        return await lookup_order(cleaned)
+
     if not cleaned or not cleaned.isdigit() or not (min_digits <= len(cleaned) <= max_digits):
         logger.warning(f"Invalid phone number: {phone} -> {cleaned}")
+        
+        # Rule 4: If we caught some digits but not enough
+        captured_part = cleaned if cleaned else ""
+        
         if agent_lang == "el":
-            return (
-                "Αυτό δεν φαίνεται να είναι πλήρης αριθμός τηλεφώνου. "
-                f"Παρακαλώ επαναλάβετε ολόκληρο τον αριθμό, τουλάχιστον {min_digits} ψηφία, ψηφίο προς ψηφίο."
-            )
-        return (
-            "That does not look like a complete phone number. "
-            f"Please repeat the full number, at least {min_digits} digits, digit by digit."
-        )
+            if captured_part:
+                return f"Κατέγραψα το μέρος {captured_part}. Μπορείτε να μου πείτε τα υπόλοιπα ψηφία;"
+            return "Αυτό δεν φαίνεται να είναι πλήρης αριθμός τηλεφώνου. Παρακαλώ επαναλάβετε ολόκληρο τον αριθμό ψηφίο προς ψηφίο."
+            
+        if captured_part:
+            return f"I caught {captured_part}. Could you please tell me the remaining digits?"
+        return "That does not look like a complete phone number. Please repeat the full number digit by digit, or give me your order number if you have it."
 
     logger.info(f"Looking up orders for phone: {cleaned}")
     orders = await shopify.lookup_order_by_phone(cleaned)
@@ -249,7 +263,7 @@ async def lookup_order_by_phone(
     _set_last_order_cache(orders[0])
 
     if len(orders) == 1:
-        summary = shopify.format_order_brief(orders[0], language=agent_lang)
+        summary = shopify.format_order_for_voice(orders[0], include_details=True, language=agent_lang)
         if agent_lang == "el":
             return f"Βρήκα μία παραγγελία για εσάς. {summary}"
         return f"I found one order for you. {summary}"

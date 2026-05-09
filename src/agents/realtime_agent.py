@@ -7,7 +7,6 @@ from dotenv import load_dotenv
 from livekit.agents import (
     AutoSubscribe,
     JobContext,
-    JobRequest,
     WorkerOptions,
     cli,
     multimodal,
@@ -15,7 +14,6 @@ from livekit.agents import (
 )
 from livekit.plugins import openai
 from src.agents.prompts import get_system_prompt_async, get_greeting, get_agent_language
-from src.agents.tools import OrderLookupTool, SupportTicketTool, KnowledgeBaseTool
 
 load_dotenv()
 
@@ -26,14 +24,12 @@ class ElenaFunctionContext(llm.FunctionContext):
     """Function context for the Elena voice agent."""
     def __init__(self):
         super().__init__()
-        self.order_tool = OrderLookupTool()
-        self.ticket_tool = SupportTicketTool()
-        self.kb_tool = KnowledgeBaseTool()
 
     @llm.ai_callable(description="Look up order details for a customer.")
     async def lookup_order(self, order_number: Annotated[str, "The order number to look up"]):
         logger.info(f"Looking up order: {order_number}")
-        return await self.order_tool.lookup_order(order_number)
+        from src.agents.tools.order_lookup import lookup_order as func
+        return await func(order_number)
 
     @llm.ai_callable(description="Create a support ticket for a customer issue.")
     async def create_support_ticket(
@@ -44,12 +40,20 @@ class ElenaFunctionContext(llm.FunctionContext):
         issue: Annotated[str, "Description of the issue"]
     ):
         logger.info(f"Creating support ticket for {name}")
-        return await self.ticket_tool.create_support_ticket(name, phone, email, issue)
+        from src.agents.tools.support_ticket import create_support_ticket as func
+        return await func(name, phone, email, issue)
+
+    @llm.ai_callable(description="Look up orders using a customer's phone number.")
+    async def lookup_order_by_phone(self, phone: Annotated[str, "The customer's phone number"]):
+        logger.info(f"Looking up order by phone: {phone}")
+        from src.agents.tools.order_lookup import lookup_order_by_phone as func
+        return await func(phone)
 
     @llm.ai_callable(description="Search the Meallion knowledge base for information.")
     async def search_knowledge_base(self, query: Annotated[str, "Topic or question to search for"]):
         logger.info(f"Searching KB for: {query}")
-        return await self.kb_tool.search_knowledge_base(query)
+        from src.agents.tools.knowledge_base import search_knowledge_base as func
+        return await func(query)
 
 async def entrypoint(ctx: JobContext):
     try:
@@ -63,7 +67,9 @@ async def entrypoint(ctx: JobContext):
         # Load Elena's persona and greeting dynamically
         language = get_agent_language()
         system_prompt = await get_system_prompt_async(language)
-        system_prompt = system_prompt[:1000] # TRUNCATE FOR WEBSOCKET LIMIT
+        # OpenAI Realtime can handle large prompts, but we truncate slightly if needed.
+        # 1000 is too small for Elena's complex persona. Using 15,000 as a safer limit.
+        system_prompt = system_prompt[:15000] 
         greeting = get_greeting(language)
 
         logger.info(f"Loaded persona for {language} ({len(system_prompt)} chars)")
@@ -83,16 +89,22 @@ async def entrypoint(ctx: JobContext):
         agent.start(ctx.room, participant)
 
         # Send an initial message to prompt the agent to start speaking
-        session = agent.model.sessions[0]
-        session.conversation.item.create(
-            llm.ChatMessage(
-                role="user",
-                content=f"Please say your greeting now: '{greeting}'"
+        # Wait a brief moment for the session to initialize
+        await asyncio.sleep(0.5)
+        
+        if model.sessions:
+            session = model.sessions[0]
+            session.conversation.item.create(
+                llm.ChatMessage(
+                    role="user",
+                    content=f"Please say your greeting now: '{greeting}'"
+                )
             )
-        )
-        session.response.create()
+            session.response.create()
+            logger.info("Elena Realtime agent fully started and prompted to greet")
+        else:
+            logger.warning("Session not available immediately; greeting may be delayed")
 
-        logger.info("Elena Realtime agent fully started and prompted to greet")
     except Exception as e:
         logger.error(f"FATAL ERROR in entrypoint: {e}", exc_info=True)
         raise e

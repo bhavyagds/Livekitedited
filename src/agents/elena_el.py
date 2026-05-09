@@ -3,6 +3,15 @@ Meallion Voice AI - Elena Voice Agent
 Main voice agent implementation using LiveKit Agents SDK (2026 version).
 """
 
+
+def _is_phone_number_prompt(text: str) -> bool:
+    if not text: return False
+    normalized = text.lower()
+    return any(k in normalized for k in ["phone", "number", "τηλέφωνο", "αριθμό", "mobile", "κινητό"])
+
+def _is_phone_number_collection_prompt(text: str) -> bool:
+    return _is_phone_number_prompt(text)
+
 import logging
 import asyncio
 import time
@@ -990,7 +999,7 @@ def _extract_ticket_reference(text: str) -> Optional[str]:
     """Extract support ticket reference from tool output."""
     if not text:
         return None
-    match = re.search(r"(?i)reference number is\s+([a-z0-9-]+)", text)
+    match = re.search(r"(?i)reference number is\s+([#a-zA-Z0-9-]+)", text)
     if match:
         return match.group(1).strip()
     return None
@@ -4098,9 +4107,9 @@ async def entrypoint(ctx: JobContext):
     # Language-aware endpointing delay: Greek requires more patience for complete transcripts.
     initial_lang = 'el'
     if initial_lang == "el":
-        default_endpointing = 2.2 if is_sip_call else 1.8
+        default_endpointing = 2.5 if is_sip_call else 2.2
     else:
-        default_endpointing = 1.4 if is_sip_call else 1.2
+        default_endpointing = 1.8 if is_sip_call else 1.5
     
     # Create the voice pipeline agent - tuned to avoid clipping user speech.
     min_endpointing_delay = _as_float(
@@ -4689,6 +4698,7 @@ async def entrypoint(ctx: JobContext):
     @agent.on("user_speech_committed")
     def on_user_speech_committed(message):
         """Send user transcript to frontend and check for abuse."""
+        silence_tracker["llm_is_generating"] = True
         # Extract text first so we can log it even if the call is ending
         user_text = message.content
         user_text_for_transcript = _format_user_text_for_transcript(user_text)
@@ -5673,6 +5683,7 @@ async def entrypoint(ctx: JobContext):
     @agent.on("agent_started_speaking")
     def on_agent_started_speaking():
         _latency_tracker.agent_started_speaking()
+        silence_tracker["llm_is_generating"] = False
         cancel_thinking_task()
         logger.info("audio_publish_start: agent_started_speaking")
         silence_tracker["agent_is_speaking"] = True
@@ -6072,18 +6083,18 @@ async def entrypoint(ctx: JobContext):
             
             # Goodbye prompt (last one)
             if count >= silence_tracker["max_prompts"] - 1:
-                return "Θα τερματίσω την κλήση για τώρα. Μπορείτε να μας καλέσετε ξανά οποιαδήποτε στιγμή."
+                return "Δεν λαμβάνω κάποια απάντηση, οπότε θα τερματίσω την κλήση προς το παρόν. Σας ευχαριστούμε που επικοινωνήσατε με τη Meallion. Καλή συνέχεια!"
 
             # State-specific prompts
             if state == FLOW_AWAITING_ORDER_NUMBER:
                 if count == 0:
-                    return "Όποτε είστε έτοιμοι, παρακαλώ πείτε μου τον αριθμό παραγγελίας σας."
-                return "Είμαι ακόμα εδώ. Παρακαλώ δώστε μου τον αριθμό παραγγελίας για να δω τις λεπτομέρειες."
+                    return "Παραμένω στη γραμμή. Μπορείτε να μου πείτε τον αριθμό της παραγγελίας σας όποτε είστε έτοιμοι."
+                return "Βρίσκομαι ακόμα εδώ. Παρακαλώ, δώστε μου τον αριθμό της παραγγελίας σας για να μπορέσω να σας εξυπηρετήσω."
             
             if state in PHONE_FLOW_STATES:
                 if count == 0:
-                    return "Παρακαλώ πείτε μου τον αριθμό τηλεφώνου που χρησιμοποιήσατε για την παραγγελία."
-                return "Είμαι έτοιμη όποτε θέλετε. Παρακαλώ πείτε μου τον αριθμό τηλεφώνου."
+                    return "Παρακαλώ, πείτε μου τον αριθμό τηλεφώνου που καταχωρήσατε κατά την παραγγελία σας."
+                return "Μην βιάζεστε, πάρτε τον χρόνο σας. Θα χρειαστώ τον αριθμό του τηλεφώνου σας για να προχωρήσουμε."
 
             # Default / Idle contextual nudge
             last_msg = ""
@@ -6094,10 +6105,10 @@ async def entrypoint(ctx: JobContext):
             
             if last_msg:
                 if count == 0:
-                    return "Είμαι ακόμα εδώ για να βοηθήσω. Θέλετε να συνεχίσουμε?"
-                return "Πάρτε τον χρόνο σας. Είμαι ακόμα εδώ αν χρειάζεστε βοήθεια με κάτι άλλο."
+                    return "Παραμένω στη διάθεσή σας. Υπάρχει κάτι άλλο με το οποίο μπορώ να σας βοηθήσω;"
+                return "Πάρτε τον χρόνο σας. Είμαι εδώ για να σας εξυπηρετήσω όποτε είστε έτοιμοι."
             
-            return "Είμαι εδώ όταν είστε έτοιμοι."
+            return "Παραμένω στη γραμμή και περιμένω τις οδηγίες σας."
 
         try:
             while not _current_session["should_end"] and silence_tracker["enabled"]:
@@ -6171,8 +6182,10 @@ async def entrypoint(ctx: JobContext):
                 if silence_tracker.get("paused_by_tool"):
                     continue
 
-                # Skip checks while agent audio is still being rendered.
-                if silence_tracker.get("agent_is_speaking") or silence_tracker.get("prompt_in_progress"):
+                # Skip checks while agent is speaking or LLM is thinking.
+                if silence_tracker.get("agent_is_speaking") or \
+                   silence_tracker.get("llm_is_generating") or \
+                   silence_tracker.get("prompt_in_progress"):
                     continue
 
                 # Strong global guard: never say silence prompts during deterministic work.
@@ -6194,7 +6207,7 @@ async def entrypoint(ctx: JobContext):
                     
                     if prompt_count < silence_tracker["max_prompts"]:
                         # Prompt the user
-                        prompt_text = prompts[min(prompt_count, len(prompts) - 1)]
+                        prompt_text = _get_contextual_silence_prompt(prompt_count)
                         # Race-condition guard right before speaking.
                         if _should_block_silence_prompt("before_silence_prompt_say"):
                             continue
@@ -6214,7 +6227,7 @@ async def entrypoint(ctx: JobContext):
                         
                     else:
                         # Max prompts reached - disconnect
-                        goodbye_text = prompts[-1]  # Last prompt is goodbye
+                        goodbye_text = "Θα τερματίσω την κλήση για τώρα. Μπορείτε να μας καλέσετε ξανά οποιαδήποτε στιγμή."
                         logger.info(f"🔇 Max silence prompts reached, disconnecting: {goodbye_text}")
                         
                         silence_tracker["enabled"] = False
