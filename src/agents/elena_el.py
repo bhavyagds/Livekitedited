@@ -395,25 +395,38 @@ def create_stt(is_sip_call: bool = False):
     provider = str(get_agent_setting("stt_provider", "deepgram") or "deepgram").lower()
     deepgram_api_key = getattr(settings, "deepgram_api_key", None)
     if provider == "deepgram" and USE_DEEPGRAM and deepgram_api_key:
-        model = "nova-2"
-        # numerals=True: forces Deepgram to output spoken digits as numerals
-        # (e.g. "seven seven three" → "773") which makes phone number parsing reliable.
-        # smart_format=True (SDK default): handles phone/date formatting automatically.
-        # keywords: boost confidence for individual digit words that STT often mishears
-        _digit_keywords = [
-            ("μηδέν", 1.5), ("ένα", 1.5), ("δύο", 1.5), ("τρία", 1.5),
-            ("τέσσερα", 1.5), ("πέντε", 1.5), ("έξι", 1.5), ("επτά", 1.5),
-            ("οκτώ", 1.5), ("εννέα", 1.5),
-        ]
-        return deepgram.STT(
-            model=model,
-            language="el",
-            api_key=deepgram_api_key,
-            interim_results=True,
-            numerals=False,
-            smart_format=False,
-            punctuate=True,
-        )
+        # Use the model configured in the DB, defaulting to nova-3 (same as original).
+        model = str(get_agent_setting("deepgram_stt_model", "nova-3") or "nova-3").strip()
+
+        # Base config matching elena_original.py — smart_format=True is critical
+        # for reliable digit transcription (e.g. "επτά επτά τρία" → "773").
+        base = {
+            "model": model,
+            "language": "el",
+            "interim_results": True,
+            "punctuate": True,
+            "smart_format": True,
+        }
+
+        # Try with explicit api_key first; fall back without it (some SDK versions
+        # reject api_key as an unknown kwarg — the original does NOT pass it).
+        for kwargs in [
+            {**base, "api_key": deepgram_api_key},
+            base,
+        ]:
+            try:
+                logger.info(
+                    "Creating Deepgram STT: model=%s language=el smart_format=True api_key_passed=%s",
+                    model,
+                    "api_key" in kwargs,
+                )
+                return deepgram.STT(**kwargs)
+            except TypeError as e:
+                logger.warning("Deepgram STT args not supported, retrying with fallback args: %s", e)
+                continue
+
+        # Hard fallback: minimal args only (mirrors original's final safety net)
+        return deepgram.STT(model=model)
     model = str(get_agent_setting("openai_stt_model", "whisper-1") or "whisper-1")
     return openai.STT(model=model, api_key=settings.openai_api_key, language="el")
 
@@ -576,10 +589,28 @@ def _build_memory_prompt_block(memory_items: list[dict]) -> str:
 
 
 def create_vad(is_sip_call: bool = False):
-    min_speech = _as_float(get_agent_setting("vad_min_speech_duration", 0.15), 0.15, min_value=0.05, max_value=1.0)
-    min_silence = _as_float(get_agent_setting("vad_min_silence_duration", 1.2 if is_sip_call else 1.0), 1.0, min_value=0.1, max_value=3.0)
+    """Create Voice Activity Detection tuned for better transcript completeness."""
+    min_speech_duration = _as_float(
+        get_agent_setting("vad_min_speech_duration", 0.15),
+        0.15,
+        min_value=0.1,
+        max_value=0.8,
+    )
+    # Language-aware silence delay: match elena_original.py behavior.
+    initial_lang = get_agent_language()
+    if initial_lang == "el":
+        default_silence = 2.0 if is_sip_call else 1.8
+    else:
+        default_silence = 1.4 if is_sip_call else 1.2
+
+    min_silence_duration = _as_float(
+        get_agent_setting("vad_min_silence_duration", default_silence),
+        default_silence,
+        min_value=0.2,
+        max_value=3.0,
+    )
     # threshold=0.6: slightly more aggressive to filter out background noise
-    return silero.VAD.load(min_speech_duration=min_speech, min_silence_duration=min_silence, activation_threshold=0.6)
+    return silero.VAD.load(min_speech_duration=min_speech_duration, min_silence_duration=min_silence_duration, activation_threshold=0.6)
 
 
 # -----------------------------------------------------------------------------
@@ -801,14 +832,19 @@ async def entrypoint(ctx: JobContext):
     chat_ctx = llm.ChatContext()
     chat_ctx.append(role="system", text=system_prompt)
 
+    # Language-aware endpointing delay: match elena_original.py behavior.
+    initial_lang = get_agent_language()
+    if initial_lang == "el":
+        default_endpointing = 2.2 if is_sip_call else 1.8
+    else:
+        default_endpointing = 1.4 if is_sip_call else 1.2
+
     configured_endpointing_delay = _as_float(
-        get_agent_setting("min_endpointing_delay", 1.2),
-        1.2,
+        get_agent_setting("min_endpointing_delay", default_endpointing),
+        default_endpointing,
         min_value=0.2,
         max_value=3.0,
     )
-    # Patience: wait at least ~4s after user stops speaking before replying.
-    effective_endpointing_delay = max(4.0, configured_endpointing_delay)
 
     def _before_llm_cb(agent_instance, chat_ctx):
         """Gate the LLM when the deterministic handler has already replied via agent.say()."""
@@ -827,7 +863,7 @@ async def entrypoint(ctx: JobContext):
         fnc_ctx=ElenaFunctionContext(),
         allow_interruptions=True,
         interrupt_min_words=_as_int(get_agent_setting("interrupt_min_words", 2), 2, min_value=1, max_value=10),
-        min_endpointing_delay=effective_endpointing_delay,
+        min_endpointing_delay=configured_endpointing_delay,
         # Keep disabled here to avoid race where LLM starts replying before deterministic
         # memory/order flow handlers finish, which can produce double answers.
         preemptive_synthesis=_as_bool(get_agent_setting("preemptive_synthesis", False), default=False),
@@ -849,8 +885,8 @@ async def entrypoint(ctx: JobContext):
 
     room_log(
         "TURN_CONFIG",
+        default_endpointing=default_endpointing,
         configured_endpointing_delay=configured_endpointing_delay,
-        effective_endpointing_delay=effective_endpointing_delay,
     )
 
     conversation_transcript: list[str] = []
