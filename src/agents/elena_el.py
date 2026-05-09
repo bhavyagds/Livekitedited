@@ -597,7 +597,12 @@ async def _run_order_lookup(agent: VoicePipelineAgent, order_number: str):
     try:
         result = await order_lookup.lookup_order(order_number)
         room_log("ORDER_LOOKUP_RESULT", result=_truncate(result))
-        await agent.say(result, allow_interruptions=True)
+        
+        # Clean up text to prevent awkward TTS pauses on punctuation/colons/brackets
+        from src.utils.voice_formatting import clean_text_for_tts
+        cleaned_result = clean_text_for_tts(result, lang="el")
+        await agent.say(cleaned_result, allow_interruptions=True)
+        
         state.last_order_number = order_number
         if _is_order_not_found_text(result):
             state.support_state = "awaiting_order"
@@ -617,7 +622,12 @@ async def _run_phone_lookup(agent: VoicePipelineAgent, phone_number: str):
     try:
         result = await order_lookup.lookup_order_by_phone(phone_number)
         room_log("PHONE_LOOKUP_RESULT", result=_truncate(result))
-        await agent.say(result, allow_interruptions=True)
+        
+        # Clean up text to prevent awkward TTS pauses on punctuation/colons/brackets
+        from src.utils.voice_formatting import clean_text_for_tts
+        cleaned_result = clean_text_for_tts(result, lang="el")
+        await agent.say(cleaned_result, allow_interruptions=True)
+        
         state.last_phone_number = phone_number
         if "no order" in (result or "").lower() or "could not" in (result or "").lower():
             state.support_state = "awaiting_phone"

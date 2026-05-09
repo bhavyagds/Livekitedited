@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   useRoomContext,
@@ -116,19 +116,27 @@ export function VoiceAgent({ onDisconnect }: VoiceAgentProps) {
           const now = new Date();
           setTimeline(prev => {
             const next = [...prev];
-            const lastIndex = next.length - 1;
-            const last = next[lastIndex];
 
-            if (message.speaker === 'user' && last && last.kind === 'user' && last.isInterim) {
-              next[lastIndex] = {
-                ...last,
-                text: message.text,
-                timestamp: now,
-                isInterim,
-              };
-              return next;
+            // For user messages: find the most recent interim user entry and replace it.
+            // We can't rely on it being the last item because state messages may have
+            // arrived between the interim and final packets, pushing it off the end.
+            if (message.speaker === 'user') {
+              const interimIdx = [...next].reverse().findIndex(
+                e => e.kind === 'user' && e.isInterim
+              );
+              if (interimIdx !== -1) {
+                const realIdx = next.length - 1 - interimIdx;
+                next[realIdx] = {
+                  ...next[realIdx],
+                  text: message.text,
+                  timestamp: now,
+                  isInterim,
+                };
+                return next;
+              }
             }
 
+            // No existing interim: add as a new entry.
             const entry: TimelineEntry = {
               id: `${message.speaker}-${Date.now()}-${Math.random()}`,
               kind: message.speaker,
@@ -391,7 +399,7 @@ export function VoiceAgent({ onDisconnect }: VoiceAgentProps) {
                 )
               )}
               
-              {/* Thinking indicator */}
+              {/* Elena thinking indicator */}
               {agentState === 'thinking' && (
                 <motion.div
                   className="chat-message elena typing"
@@ -402,6 +410,26 @@ export function VoiceAgent({ onDisconnect }: VoiceAgentProps) {
                   <div className="message-avatar">{AGENT_AVATAR}</div>
                   <div className="message-content">
                     <span className="message-speaker">Elena</span>
+                    <div className="typing-dots">
+                      <span></span>
+                      <span></span>
+                      <span></span>
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+
+              {/* User speaking indicator — shows animated dots on the user side while Elena is listening */}
+              {agentState === 'listening' && (
+                <motion.div
+                  className="chat-message user typing"
+                  initial={{ opacity: 0, x: 20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0 }}
+                >
+                  <div className="message-avatar">{USER_AVATAR}</div>
+                  <div className="message-content">
+                    <span className="message-speaker">You</span>
                     <div className="typing-dots">
                       <span></span>
                       <span></span>

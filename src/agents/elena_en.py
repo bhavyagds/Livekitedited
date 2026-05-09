@@ -1,4 +1,4 @@
-﻿"""
+"""
 Meallion Voice AI - Elena English Agent (clean rewrite)
 English-only voice agent with deterministic order/phone support flow.
 """
@@ -299,6 +299,12 @@ class ElenaFunctionContext(llm.FunctionContext):
     @llm.ai_callable()
     async def lookup_order(self, order_number: Annotated[str, llm.TypeInfo(description="Order number")]) -> str:
         """Look up an order by order number and return a customer-facing summary."""
+        # Strict Guard: If it looks like a phone number (7+ digits), reject it.
+        # This prevents the LLM from talking over the phone lookup handler.
+        clean_num = re.sub(r"\D", "", str(order_number))
+        if len(clean_num) >= 7:
+            return "ERROR: This tool is only for 3-6 digit order numbers. For phone numbers, please wait for the automated lookup."
+
         room_log("TOOL_CALL", name="lookup_order", order_number=order_number)
         result = await order_lookup.lookup_order(order_number)
         room_log("TOOL_RESULT", name="lookup_order", result=_truncate(result))
@@ -313,8 +319,13 @@ class ElenaFunctionContext(llm.FunctionContext):
         return result
 
     @llm.ai_callable()
-    async def lookup_order_by_phone(self, phone: Annotated[str, llm.TypeInfo(description="Phone number")]) -> str:
-        """Look up the most relevant order using the customer's phone number."""
+    async def lookup_order_by_phone(self, phone: Annotated[str, llm.TypeInfo(description="10-digit phone number")]) -> str:
+        """Look up an order by phone number and return a customer-facing summary."""
+        # Strict Guard: Only process 10 digits.
+        clean_phone = re.sub(r"\D", "", str(phone))
+        if len(clean_phone) < 10:
+            return "ERROR: This tool requires a full 10-digit phone number."
+
         room_log("TOOL_CALL", name="lookup_order_by_phone", phone=phone)
         result = await order_lookup.lookup_order_by_phone(phone)
         room_log("TOOL_RESULT", name="lookup_order_by_phone", result=_truncate(result))
@@ -371,10 +382,41 @@ def create_stt(is_sip_call: bool = False):
     provider = str(get_agent_setting("stt_provider", "deepgram") or "deepgram").lower()
     deepgram_api_key = getattr(settings, "deepgram_api_key", None)
     if provider == "deepgram" and USE_DEEPGRAM and deepgram_api_key:
-        model = str(get_agent_setting("deepgram_stt_model", "nova-2") or "nova-2")
-        return deepgram.STT(model=model, language="en-US", api_key=deepgram_api_key, interim_results=True)
-    model = str(get_agent_setting("openai_stt_model", "whisper-1") or "whisper-1")
-    return openai.STT(model=model, api_key=settings.openai_api_key, language="en")
+        # Use the model configured in the DB, defaulting to nova-3 (same as original).
+        model = str(get_agent_setting("deepgram_stt_model", "nova-3") or "nova-3").strip()
+
+        # Base config matching elena_original.py — smart_format=True is critical
+        # for reliable digit transcription (e.g. "seven seven three" → "773").
+        base = {
+            "model": model,
+            "language": "en-US",
+            "interim_results": True,
+            "punctuate": True,
+            "smart_format": True,
+        }
+
+        # Try with explicit api_key first; fall back without it (some SDK versions
+        # reject api_key as an unknown kwarg — the original does NOT pass it).
+        for kwargs in [
+            {**base, "api_key": deepgram_api_key},
+            base,
+        ]:
+            try:
+                logger.info(
+                    "Creating Deepgram STT: model=%s language=en-US smart_format=True api_key_passed=%s",
+                    model,
+                    "api_key" in kwargs,
+                )
+                return deepgram.STT(**kwargs)
+            except TypeError as e:
+                logger.warning("Deepgram STT args not supported, retrying with fallback args: %s", e)
+                continue
+
+        # Hard fallback: minimal args only (mirrors original's final safety net)
+        return deepgram.STT(model=model)
+
+    openai_model = str(get_agent_setting("openai_stt_model", "whisper-1") or "whisper-1")
+    return openai.STT(model=openai_model, api_key=settings.openai_api_key, language="en")
 
 
 def create_tts():
@@ -537,7 +579,8 @@ def _build_memory_prompt_block(memory_items: list[dict]) -> str:
 def create_vad(is_sip_call: bool = False):
     min_speech = _as_float(get_agent_setting("vad_min_speech_duration", 0.15), 0.15, min_value=0.05, max_value=1.0)
     min_silence = _as_float(get_agent_setting("vad_min_silence_duration", 1.2 if is_sip_call else 1.0), 1.0, min_value=0.1, max_value=3.0)
-    return silero.VAD.load(min_speech_duration=min_speech, min_silence_duration=min_silence)
+    # threshold=0.6: more aggressive to filter out background noise hallucinations
+    return silero.VAD.load(min_speech_duration=min_speech, min_silence_duration=min_silence, activation_threshold=0.6)
 
 
 # -----------------------------------------------------------------------------
@@ -579,7 +622,12 @@ async def _run_order_lookup(agent: VoicePipelineAgent, order_number: str):
     try:
         result = await order_lookup.lookup_order(order_number)
         room_log("ORDER_LOOKUP_RESULT", result=_truncate(result))
-        await agent.say(result, allow_interruptions=True)
+        
+        # Clean up text to prevent awkward TTS pauses on punctuation/colons/brackets
+        from src.utils.voice_formatting import clean_text_for_tts
+        cleaned_result = clean_text_for_tts(result, lang="en")
+        await agent.say(cleaned_result, allow_interruptions=True)
+        
         state.last_order_number = order_number
         if _is_order_not_found_text(result):
             state.support_state = "awaiting_order"
@@ -599,7 +647,12 @@ async def _run_phone_lookup(agent: VoicePipelineAgent, phone_number: str):
     try:
         result = await order_lookup.lookup_order_by_phone(phone_number)
         room_log("PHONE_LOOKUP_RESULT", result=_truncate(result))
-        await agent.say(result, allow_interruptions=True)
+        
+        # Clean up text to prevent awkward TTS pauses on punctuation/colons/brackets
+        from src.utils.voice_formatting import clean_text_for_tts
+        cleaned_result = clean_text_for_tts(result, lang="en")
+        await agent.say(cleaned_result, allow_interruptions=True)
+        
         state.last_phone_number = phone_number
         if "no order" in (result or "").lower() or "could not" in (result or "").lower():
             state.support_state = "awaiting_phone"
@@ -754,8 +807,8 @@ async def entrypoint(ctx: JobContext):
         min_value=0.2,
         max_value=3.0,
     )
-    # Product requirement: wait at least ~1.2s after user stops speaking before replying.
-    effective_endpointing_delay = max(1.2, configured_endpointing_delay)
+    # Patience: wait at least ~1.5s after user stops speaking before replying.
+    effective_endpointing_delay = max(1.5, configured_endpointing_delay)
 
     def _before_llm_cb(agent_instance, chat_ctx):
         """Gate the LLM when the deterministic handler has already replied via agent.say()."""
@@ -780,11 +833,13 @@ async def entrypoint(ctx: JobContext):
         preemptive_synthesis=_as_bool(get_agent_setting("preemptive_synthesis", False), default=False),
         before_llm_cb=_before_llm_cb,
     )
+
     room_log(
         "TURN_CONFIG",
         configured_endpointing_delay=configured_endpointing_delay,
         effective_endpointing_delay=effective_endpointing_delay,
     )
+
 
     conversation_transcript: list[str] = []
 
@@ -829,8 +884,9 @@ async def entrypoint(ctx: JobContext):
                 ensure_ascii=False,
             )
             try:
-                # Use unreliable delivery for interims to minimize latency.
-                await ctx.room.local_participant.publish_data(payload.encode("utf-8"), reliable=False)
+                # Use reliable=True to match the original — unreliable drops packets,
+                # causing the user's text to not appear until the agent starts speaking.
+                await ctx.room.local_participant.publish_data(payload.encode("utf-8"), reliable=True)
             except Exception:
                 pass
             return
@@ -924,15 +980,15 @@ async def entrypoint(ctx: JobContext):
             if _mentions_no_order_number(user_text) or _mentions_phone_lookup_intent(user_text):
                 state.support_state = "awaiting_phone"
                 room_log("FLOW_TRANSITION", from_state="awaiting_order", to_state="awaiting_phone", reason="no_order_or_phone_intent")
-                suppress_llm()
-                asyncio.create_task(agent.say("No problem! Could you please provide me with your phone number instead?", allow_interruptions=True))
+                # Let the LLM handle the transition sentence.
                 return
 
             # If user already gave a full phone-like number, use phone lookup directly.
             phone_candidate = _normalize_phone_for_lookup(user_text)
             if phone_candidate:
                 state.support_state = "awaiting_phone"
-                suppress_llm()
+                agent.interrupt()  # Cancel any in-progress LLM speech immediately
+                suppress_llm(15.0)
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(10.0)
                 asyncio.create_task(_run_phone_lookup(agent, phone_candidate))
@@ -940,16 +996,16 @@ async def entrypoint(ctx: JobContext):
 
             order_id = _normalize_order_id_strict(user_text)
             if order_id:
-                suppress_llm()
+                agent.interrupt()  # Cancel any in-progress LLM speech immediately
+                suppress_llm(15.0)
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(10.0)
                 asyncio.create_task(_run_order_lookup(agent, order_id))
                 return
 
-            prompt = "Please share your order number. If you do not have it, say that and I will check by phone number."
-            if not _should_suppress_clarification(prompt):
-                suppress_llm()
-                asyncio.create_task(agent.say(prompt, allow_interruptions=True))
+            # Let the LLM ask for the order number naturally to avoid double-talking.
+            # We only provide deterministic fallback prompts if we fall through 
+            # to phone number collection.
             return
 
         # 3) Active phone-support flow
@@ -962,7 +1018,8 @@ async def entrypoint(ctx: JobContext):
                 return
             phone = _normalize_phone_for_lookup(user_text)
             if phone:
-                suppress_llm()
+                agent.interrupt()  # Cancel any in-progress LLM speech immediately
+                suppress_llm(15.0)
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(10.0)
                 asyncio.create_task(_run_phone_lookup(agent, phone))
@@ -1041,28 +1098,60 @@ async def entrypoint(ctx: JobContext):
             return
 
         # 3c) Memory is handled through system prompt context (single-response path).
-
+ 
         # 4) Detect support intent from any general turn.
         support_intent = bool(re.search(r"(problem|issue|complaint|order problem|wrong order|late order|my order)", user_text.lower()))
         if support_intent:
-            # Do NOT suppress LLM here — let the LLM ask for the order number naturally.
             state.support_state = "awaiting_order"
-            state.last_issue = user_text
             room_log("FLOW_TRANSITION", from_state="idle", to_state="awaiting_order", reason="support_intent")
+            
+            # Check if an Order ID or Phone was already provided in this same sentence.
+            order_id = _normalize_order_id_strict(user_text)
+            if order_id:
+                agent.interrupt()  # Cancel any in-progress LLM speech immediately
+                suppress_llm(15.0)
+                asyncio.create_task(set_ui_state("thinking"))
+                snooze_silence(10.0)
+                asyncio.create_task(_run_order_lookup(agent, order_id))
+                return
+            
+            phone = _normalize_phone_for_lookup(user_text)
+            if phone:
+                state.support_state = "awaiting_phone"
+                agent.interrupt()  # Cancel any in-progress LLM speech immediately
+                suppress_llm(15.0)
+                asyncio.create_task(set_ui_state("thinking"))
+                snooze_silence(10.0)
+                asyncio.create_task(_run_phone_lookup(agent, phone))
+                return
             return
-
+ 
         ticket_intent = bool(re.search(r"(human|representative|call me|callback|support ticket|open ticket|create ticket)", user_text.lower()))
         if ticket_intent:
             state.support_state = "ticket_name"
-            suppress_llm()
-            asyncio.create_task(agent.say("Sure, I can create a support ticket. Please tell me your full name.", allow_interruptions=True))
+            suppress_llm(15.0)
+            asyncio.create_task(agent.say("I can help you with that. First, could you please tell me your full name?", allow_interruptions=True))
             return
-
-    # Optional: capture agent text word-by-word if needed, but committed is safer for translations.
-    # We already have _on_agent_speech_committed.
-    
-
-        # 5) Otherwise let LLM handle general query naturally.
+ 
+        # 5) Detect farewell intent — set should_end so silence monitor stops after LLM says goodbye.
+        farewell_intent = bool(re.search(
+            r"\b(bye|goodbye|good bye|good night|see you|take care|thanks? bye|that.?s all|no thank|nothing else)\b",
+            user_text.lower()
+        ))
+        # Ignore farewell if user is providing data (digits)
+        if farewell_intent and len(re.findall(r"\d", user_text)) >= 3:
+            farewell_intent = False
+            room_log("FAREWELL_SHIELDED", text=user_text)
+ 
+        if farewell_intent:
+            room_log("FAREWELL_DETECTED", text=user_text)
+            # Let the LLM respond naturally, then end the session after it finishes speaking.
+            async def _delayed_end():
+                await asyncio.sleep(6.0)  # give LLM time to speak its goodbye
+                state.should_end = True
+                state.disconnect_reason = "farewell"
+            asyncio.create_task(_delayed_end())
+            return
 
     # Participant disconnect
     @ctx.room.on("participant_disconnected")

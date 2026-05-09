@@ -22,21 +22,52 @@ MONTHS_EL = [
 
 def format_date_for_voice(date_str: str, lang: str = "en") -> str:
     """
-    Format a date string (YYYY/MM/DD or YYYY-MM-DD) for natural speech.
+    Format a date string (YYYY/MM/DD, DD/MM/YYYY, or similar) for natural speech.
+    Handles multiple date formats cleanly to avoid value errors and raw digit reading.
     
     Examples:
     - 2026/03/12, en -> "March 12th"
+    - 12-03-2026, en -> "March 12th"
     - 2026/03/12, el -> "12 Μαρτίου"
     """
     if not date_str:
         return ""
         
-    try:
-        # Normalize separators
-        clean_date = date_str.replace("/", "-").strip()
-        # Parse YYYY-MM-DD
-        dt = datetime.strptime(clean_date[:10], "%Y-%m-%d")
-        
+    date_str = date_str.strip()
+    
+    # Strip time if ISO format like "2026-05-15T12:00:00Z"
+    if "T" in date_str:
+        try:
+            date_str = date_str.split("T")[0]
+        except Exception:
+            pass
+
+    # Normalize separators
+    clean_date = date_str.replace("/", "-").strip()
+    
+    dt = None
+    formats = [
+        "%Y-%m-%d",          # YYYY-MM-DD
+        "%d-%m-%Y",          # DD-MM-YYYY
+        "%Y-%m-%d %H:%M:%S",
+        "%d-%m-%Y %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%d-%m-%Y %H:%M",
+    ]
+    
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(clean_date, fmt)
+            break
+        except ValueError:
+            # Try parsing just the prefix
+            try:
+                dt = datetime.strptime(clean_date[:10], fmt)
+                break
+            except ValueError:
+                continue
+
+    if dt:
         day = dt.day
         month = dt.month
         
@@ -50,9 +81,88 @@ def format_date_for_voice(date_str: str, lang: str = "en") -> str:
                 suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
             return f"{MONTHS_EN[month]} {day}{suffix}"
             
-    except Exception as e:
-        logger.warning(f"Failed to format date for voice: {date_str} ({e})")
-        return date_str
+    # Heuristic regex match if standard parsing fails
+    # e.g., "15-5-2026" or "5-15-2026"
+    match = re.search(r'(\d{1,2})[-/](\d{1,2})[-/](\d{4})', date_str)
+    if match:
+        p1, p2, year = match.groups()
+        p1_val, p2_val = int(p1), int(p2)
+        # Check if p1 is day and p2 is month (European/Greek standard)
+        if 1 <= p1_val <= 31 and 1 <= p2_val <= 12:
+            day, month = p1_val, p2_val
+        elif 1 <= p2_val <= 31 and 1 <= p1_val <= 12: # US format
+            day, month = p2_val, p1_val
+        else:
+            day, month = None, None
+            
+        if day and month:
+            if lang == "el":
+                return f"{day} {MONTHS_EL[month]}"
+            else:
+                if 11 <= day <= 13:
+                    suffix = "th"
+                else:
+                    suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+                return f"{MONTHS_EN[month]} {day}{suffix}"
+
+    # Regex heuristic for YYYY-MM-DD or YYYY/MM/DD
+    match_y = re.search(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', date_str)
+    if match_y:
+        year, month, day = match_y.groups()
+        day_val, month_val = int(day), int(month)
+        if 1 <= day_val <= 31 and 1 <= month_val <= 12:
+            if lang == "el":
+                return f"{day_val} {MONTHS_EL[month_val]}"
+            else:
+                if 11 <= day_val <= 13:
+                    suffix = "th"
+                else:
+                    suffix = {1: "st", 2: "nd", 3: "rd"}.get(day_val % 10, "th")
+                return f"{MONTHS_EN[month_val]} {day_val}{suffix}"
+
+    logger.warning(f"Failed to format date for voice: {date_str}")
+    return date_str
+
+
+def clean_text_for_tts(text: str, lang: str = "en") -> str:
+    """
+    Clean text of symbols and punctuation that cause ElevenLabs / TTS providers 
+    to make unnatural, awkward pauses.
+    """
+    if not text:
+        return ""
+        
+    # Remove parentheses/brackets but keep their content, surrounded by natural pauses (commas)
+    text = re.sub(r'\((.*?)\)', r', \1,', text)
+    text = re.sub(r'\[(.*?)\]', r', \1,', text)
+    
+    # Replace colons with commas (colons create long hard pauses, commas are smooth and natural)
+    text = text.replace(":", ",")
+    
+    # Replace semicolons with commas
+    text = text.replace(";", ",")
+    
+    # Replace hyphens/dashes with a space or comma to prevent spelling out "dash" or hard pausing
+    # e.g., list markers or stand-alone hyphens should be cleaned
+    text = re.sub(r'\s+-\s+', ', ', text)
+    
+    # Replace generic hash symbols with "number" or remove them
+    if lang == "el":
+        text = text.replace("#", "νούμερο ")
+    else:
+        text = text.replace("#", "number ")
+        
+    # Normalize multiple commas/spaces/periods
+    text = re.sub(r',+', ',', text)
+    text = re.sub(r'\.+', '.', text)
+    text = re.sub(r'\s+', ' ', text)
+    
+    # Clean up double commas, comma-periods, and trailing spacing
+    text = text.replace(",.", ".").replace(".,", ".").replace(", ,", ",")
+    
+    # Remove any extra leading/trailing commas left from replacement
+    text = text.strip().strip(",")
+    return text.strip()
 
 def format_currency_for_voice(amount: float, currency: str = "EUR", lang: str = "en") -> str:
     """
