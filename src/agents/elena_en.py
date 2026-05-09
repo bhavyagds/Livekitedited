@@ -279,13 +279,14 @@ async def end_call_in_db(call_id: str = None, room_name: str = None, status: str
         return False
 
 
-async def save_transcript_to_db(call_id: str, text: str, speaker: str = "agent") -> bool:
+async def save_transcript_to_db(call_id: str, text: str, speaker: str = "agent", append: bool = True) -> bool:
     if not call_id or not text:
         return False
     try:
         from src.services.database import get_database_service
         db = get_database_service()
-        return await db.update_call_transcript(call_id=call_id, transcript=f"{speaker.capitalize()}: {text}", append=True)
+        transcript = f"{speaker.capitalize()}: {text}" if append else text
+        return await db.update_call_transcript(call_id=call_id, transcript=transcript, append=append)
     except Exception:
         return False
 
@@ -360,12 +361,35 @@ class ElenaFunctionContext(llm.FunctionContext):
 
     @llm.ai_callable()
     async def end_session(self) -> str:
-        """End the current voice session gracefully with a closing message."""
-        _current["state"].should_end = True
-        _current["state"].disconnect_reason = "agent_tool_end"
-        msg = get_closing("en")
-        room_log("SESSION_END_REQUESTED", message=msg)
-        return msg
+        """
+        End the voice call session gracefully.
+        Use this when the customer says goodbye, thanks, or indicates they're done.
+
+        Examples of when to use:
+        - "Goodbye", "Bye", "Thanks, bye"
+        - "That's all I needed", "I'm done"
+        - "Have a nice day", "Thank you, that's it"
+
+        Returns:
+            Goodbye message - you MUST speak this message, the call will end after
+        """
+        logger.info("Session end requested - scheduling disconnect after goodbye")
+        room_log("SESSION_END_REQUESTED")
+
+        # Schedule the disconnect with a delay to allow goodbye to be spoken
+        async def delayed_end():
+            # Wait for LLM to process response + TTS to generate + speak
+            # This needs to be long enough for the full goodbye to be heard
+            await asyncio.sleep(6.0)  # 6 seconds should be plenty
+            _current["state"].should_end = True
+            logger.info("Delayed session end triggered")
+
+        asyncio.create_task(delayed_end())
+
+        # Return closing message
+        goodbye = get_closing("en")
+        room_log("SESSION_END_MESSAGE", text=_truncate(goodbye))
+        return goodbye
 
 
 # -----------------------------------------------------------------------------
@@ -807,8 +831,8 @@ async def entrypoint(ctx: JobContext):
         min_value=0.2,
         max_value=3.0,
     )
-    # Patience: wait at least ~1.5s after user stops speaking before replying.
-    effective_endpointing_delay = max(1.5, configured_endpointing_delay)
+    # Patience: wait at least ~4s after user stops speaking before replying.
+    effective_endpointing_delay = max(4.0, configured_endpointing_delay)
 
     def _before_llm_cb(agent_instance, chat_ctx):
         """Gate the LLM when the deterministic handler has already replied via agent.say()."""
@@ -862,6 +886,8 @@ async def entrypoint(ctx: JobContext):
         await _publish_transcript(ctx, "agent", cleaned)
         if call_id:
             await save_transcript_to_db(call_id, cleaned, speaker="agent")
+            transcript_text = "\n".join(conversation_transcript)
+            await save_transcript_to_db(call_id, transcript_text, speaker="full", append=False)
         room_log("AGENT_TEXT", text=cleaned)
 
     _last_user_interim = ""
@@ -909,6 +935,8 @@ async def entrypoint(ctx: JobContext):
             pass
         if call_id:
             await save_transcript_to_db(call_id, cleaned, speaker="user")
+            transcript_text = "\n".join(conversation_transcript)
+            await save_transcript_to_db(call_id, transcript_text, speaker="full", append=False)
         room_log("USER_TEXT", text=cleaned)
 
     @agent.on("agent_started_speaking")
@@ -1349,3 +1377,4 @@ def run_agent():
 
 if __name__ == "__main__":
     run_agent()
+
