@@ -159,6 +159,21 @@ def _mentions_phone_lookup_intent(text: str) -> bool:
     )
 
 
+def _is_order_relevant(text: str) -> bool:
+    """Check if the text is likely an attempt to provide order info or ask about it."""
+    t = (text or "").lower()
+    # If it has any digits, it's likely an attempt at a number
+    if re.search(r"\d", t):
+        return True
+    # Keywords that suggest they are still in the flow
+    keywords = {
+        "order", "number", "phone", "check", "find", "look", "track", "where",
+        "problem", "issue", "id", "help", "yes", "ok", "sure", "here", "ready"
+    }
+    tokens = set(re.findall(r"\w+", t))
+    return bool(tokens & keywords)
+
+
 # -----------------------------------------------------------------------------
 # Room logs and state
 # -----------------------------------------------------------------------------
@@ -989,6 +1004,45 @@ async def entrypoint(ctx: JobContext):
         state.silence_prompt_count = 0
         asyncio.create_task(send_user_transcript(user_text))
 
+        # 0) Farewell detection — must run BEFORE any support-state branches so that
+        #    "No. Thank you. Goodbye." while in awaiting_order/awaiting_phone still
+        #    triggers call teardown instead of falling into the order/phone handlers.
+        _t = user_text.lower().strip()
+        _farewell_intent = bool(re.search(
+            r"\b(bye|by\b|goodbye|good bye|good night|see you|take care|"
+            r"thanks? bye|that.?s all|no thank|nothing else|"
+            r"i.?m done|all good|that will be all|have a good|have a great|"
+            r"no more|no further|no other)\b",
+            _t
+        ))
+        # Composite: short sentences that combine "thank you" with a clear close signal
+        # e.g. "No. Thank you." / "Okay, thank you." / "Thank you. Bye."
+        if not _farewell_intent:
+            _has_thanks = bool(re.search(r"\bthank", _t))
+            _has_close = bool(re.search(r"\b(no|okay|ok|alright|all right|done|that.?s it|enough)\b", _t))
+            _is_short = len(_t.split()) <= 10
+            if _has_thanks and _has_close and _is_short:
+                _farewell_intent = True
+        # Shield: do not treat digit-heavy strings (order/phone numbers) as farewells.
+        if _farewell_intent and len(re.findall(r"\d", user_text)) >= 3:
+            _farewell_intent = False
+            room_log("FAREWELL_SHIELDED", text=user_text)
+
+        if _farewell_intent:
+            room_log("FAREWELL_DETECTED", text=user_text)
+            state.silence_enabled = False
+            # Suppress LLM and speak a deterministic goodbye so the silence-monitor
+            # order-number prompt can never sneak in between now and teardown.
+            suppress_llm(15.0)
+            goodbye_msg = get_closing("en")
+            asyncio.create_task(agent.say(goodbye_msg, allow_interruptions=True))
+            async def _delayed_end_farewell():
+                await asyncio.sleep(6.0)
+                state.should_end = True
+                state.disconnect_reason = "farewell"
+            asyncio.create_task(_delayed_end_farewell())
+            return
+
         # 1) If lookup is in progress, keep caller informed and do not branch.
         if state.lookup_inflight:
             asyncio.create_task(set_ui_state("thinking"))
@@ -1002,7 +1056,26 @@ async def entrypoint(ctx: JobContext):
             asyncio.create_task(agent.say("I am creating your support ticket now. One moment please.", allow_interruptions=True))
             return
 
-        # 2) Active order-support flow
+        # 1.5) Ticket-creation escape — checked before any order/phone state branches so
+        #      the user can always pivot to ticket creation even if stuck in awaiting_phone.
+        _ticket_escape = bool(re.search(
+            r"\b(human|representative|call me|callback|support ticket|open ticket|create ticket)\b",
+            user_text.lower()
+        ))
+        _in_ticket_flow = state.support_state in {
+            "ticket_name", "ticket_phone", "ticket_email",
+            "ticket_issue", "ticket_confirm", "creating_ticket"
+        }
+        if _ticket_escape and not _in_ticket_flow:
+            room_log("FLOW_TRANSITION", from_state=state.support_state, to_state="ticket_name", reason="ticket_escape")
+            state.support_state = "ticket_name"
+            suppress_llm(15.0)
+            asyncio.create_task(agent.say(
+                "I can help you with that. First, could you please tell me your full name?",
+                allow_interruptions=True
+            ))
+            return
+
         if state.support_state in {"awaiting_order", "checking_order"}:
             # If user indicates phone lookup path, move flow to phone collection.
             if _mentions_no_order_number(user_text) or _mentions_phone_lookup_intent(user_text):
@@ -1015,25 +1088,30 @@ async def entrypoint(ctx: JobContext):
             phone_candidate = _normalize_phone_for_lookup(user_text)
             if phone_candidate:
                 state.support_state = "awaiting_phone"
-                agent.interrupt()  # Cancel any in-progress LLM speech immediately
                 suppress_llm(15.0)
                 asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(10.0)
+                snooze_silence(15.0)
                 asyncio.create_task(_run_phone_lookup(agent, phone_candidate))
                 return
 
             order_id = _normalize_order_id_strict(user_text)
             if order_id:
-                agent.interrupt()  # Cancel any in-progress LLM speech immediately
                 suppress_llm(15.0)
                 asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(10.0)
+                snooze_silence(15.0)
                 asyncio.create_task(_run_order_lookup(agent, order_id))
                 return
 
-            # Let the LLM ask for the order number naturally to avoid double-talking.
-            # We only provide deterministic fallback prompts if we fall through 
-            # to phone number collection.
+            # If the user is actually talking about the order but didn't give a valid ID, 
+            # give a deterministic hint. Otherwise, let the LLM handle the turn.
+            if _is_order_relevant(user_text):
+                prompt = "Whenever you are ready, please share your order number. If you do not have it, say that and I will check by phone number."
+                if not _should_suppress_clarification(prompt):
+                    suppress_llm()
+                    asyncio.create_task(agent.say(prompt, allow_interruptions=True))
+                return
+
+            # Let the LLM handle potential diversions (time, recipes, etc.)
             return
 
         # 3) Active phone-support flow
@@ -1046,16 +1124,31 @@ async def entrypoint(ctx: JobContext):
                 return
             phone = _normalize_phone_for_lookup(user_text)
             if phone:
-                agent.interrupt()  # Cancel any in-progress LLM speech immediately
                 suppress_llm(15.0)
                 asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(10.0)
+                snooze_silence(15.0)
                 asyncio.create_task(_run_phone_lookup(agent, phone))
                 return
-            prompt = "I need the full phone number to check the order. Please share it once."
-            if not _should_suppress_clarification(prompt):
-                suppress_llm()
-                asyncio.create_task(agent.say(prompt, allow_interruptions=True))
+            # Escape: user may give an order ID instead of a phone number.
+            order_id_escape = _normalize_order_id_strict(user_text)
+            if order_id_escape:
+                room_log("FLOW_TRANSITION", from_state="awaiting_phone", to_state="awaiting_order", reason="order_id_given_in_phone_flow")
+                state.support_state = "awaiting_order"
+                suppress_llm(15.0)
+                asyncio.create_task(set_ui_state("thinking"))
+                snooze_silence(15.0)
+                asyncio.create_task(_run_order_lookup(agent, order_id_escape))
+                return
+
+            # Only clarify if the user is actually trying to give a phone or talking about the order.
+            if _is_order_relevant(user_text):
+                prompt = "I need the full phone number to check the order. Please share it once."
+                if not _should_suppress_clarification(prompt):
+                    suppress_llm()
+                    asyncio.create_task(agent.say(prompt, allow_interruptions=True))
+                return
+
+            # Fall through to LLM for diversions.
             return
 
         # 3b) Support ticket flow
@@ -1136,20 +1229,18 @@ async def entrypoint(ctx: JobContext):
             # Check if an Order ID or Phone was already provided in this same sentence.
             order_id = _normalize_order_id_strict(user_text)
             if order_id:
-                agent.interrupt()  # Cancel any in-progress LLM speech immediately
                 suppress_llm(15.0)
                 asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(10.0)
+                snooze_silence(15.0)
                 asyncio.create_task(_run_order_lookup(agent, order_id))
                 return
             
             phone = _normalize_phone_for_lookup(user_text)
             if phone:
                 state.support_state = "awaiting_phone"
-                agent.interrupt()  # Cancel any in-progress LLM speech immediately
                 suppress_llm(15.0)
                 asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(10.0)
+                snooze_silence(15.0)
                 asyncio.create_task(_run_phone_lookup(agent, phone))
                 return
             return
@@ -1161,27 +1252,9 @@ async def entrypoint(ctx: JobContext):
             asyncio.create_task(agent.say("I can help you with that. First, could you please tell me your full name?", allow_interruptions=True))
             return
  
-        # 5) Detect farewell intent — set should_end so silence monitor stops after LLM says goodbye.
-        farewell_intent = bool(re.search(
-            r"\b(bye|goodbye|good bye|good night|see you|take care|thanks? bye|that.?s all|no thank|nothing else)\b",
-            user_text.lower()
-        ))
-        # Ignore farewell if user is providing data (digits)
-        if farewell_intent and len(re.findall(r"\d", user_text)) >= 3:
-            farewell_intent = False
-            room_log("FAREWELL_SHIELDED", text=user_text)
- 
-        if farewell_intent:
-            room_log("FAREWELL_DETECTED", text=user_text)
-            # Disable silence monitor immediately on farewell
-            state.silence_enabled = False
-            # Let the LLM respond naturally, then end the session after it finishes speaking.
-            async def _delayed_end():
-                await asyncio.sleep(6.0)  # give LLM time to speak its goodbye
-                state.should_end = True
-                state.disconnect_reason = "farewell"
-            asyncio.create_task(_delayed_end())
-            return
+        # 5) Farewell intent is now handled at the top of this handler (step 0).
+        #    This block is intentionally left as a no-op to preserve the original
+        #    step numbering for readability.
 
     # Participant disconnect
     @ctx.room.on("participant_disconnected")
