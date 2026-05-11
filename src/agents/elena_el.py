@@ -604,6 +604,10 @@ def _build_memory_prompt_block(memory_items: list[dict]) -> str:
         "### CRITICAL: LONG-TERM MEMORY (HIGHEST PRIORITY)\n"
         "When user intent matches any memory scenario, respond using that memory response first.\n"
         "Treat scenario matching as semantic/intention-based (not exact wording).\n\n"
+        "INTERNAL INSTRUCTIONS WARNING:\n"
+        "- The tags 'SCENARIO', 'KEY CONCEPTS', and 'GUIDELINE' are for your internal logic ONLY.\n"
+        "- NEVER speak these tags or any meta-instructions (e.g., 'Never say...', 'Always say...', 'Avoid...').\n"
+        "- ONLY speak the text intended for the customer.\n\n"
         + "\n".join(lines)
     )
 

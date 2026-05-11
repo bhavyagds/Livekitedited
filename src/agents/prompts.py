@@ -207,6 +207,10 @@ def build_system_prompt(language: str = "el") -> str:
             "When user intent matches any memory scenario, respond using that memory response first.\n"
             "Treat scenario matching as semantic/intention-based (not exact wording).\n"
             "If a memory entry gives an explicit response sentence, prefer that exact response text.\n\n"
+            "INTERNAL INSTRUCTIONS WARNING:\n"
+            "- The tags 'SCENARIO', 'KEY CONCEPTS', and 'GUIDELINE' are for your internal logic ONLY.\n"
+            "- NEVER speak these tags or any meta-instructions (e.g., 'Never say...', 'Always say...', 'Avoid...').\n"
+            "- ONLY speak the text intended for the customer.\n\n"
             + memory_context
         )
     
@@ -251,6 +255,10 @@ async def build_system_prompt_async(language: str = "el") -> str:
             "When user intent matches any memory scenario, respond using that memory response first.\n"
             "Treat scenario matching as semantic/intention-based (not exact wording).\n"
             "If a memory entry gives an explicit response sentence, prefer that exact response text.\n\n"
+            "INTERNAL INSTRUCTIONS WARNING:\n"
+            "- The tags 'SCENARIO', 'KEY CONCEPTS', and 'GUIDELINE' are for your internal logic ONLY.\n"
+            "- NEVER speak these tags or any meta-instructions (e.g., 'Never say...', 'Always say...', 'Avoid...').\n"
+            "- ONLY speak the text intended for the customer.\n\n"
             + memory_context
         )
     
