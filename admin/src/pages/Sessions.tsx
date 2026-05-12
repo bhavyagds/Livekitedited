@@ -143,6 +143,8 @@ export default function Sessions() {
   } | null>(null)
   const [memoryDraft, setMemoryDraft] = useState<{ question: string; answer: string; comment: string } | null>(null)
   const [memorySavedMsg, setMemorySavedMsg] = useState(false)
+  const [page, setPage] = useState(1)
+  const pageSize = 20
 
   // Fetch active sessions
   const { data: sessionsData, isLoading: sessionsLoading, refetch: refetchSessions } = useQuery({
@@ -153,10 +155,12 @@ export default function Sessions() {
 
   // Fetch recent calls with transcripts
   const { data: recentCallsData, isLoading: callsLoading } = useQuery({
-    queryKey: ['recent-calls-with-transcripts'],
-    queryFn: () => getCalls(1, 20),
+    queryKey: ['recent-calls-with-transcripts', page],
+    queryFn: () => getCalls(page, pageSize),
     refetchInterval: 30000,
   })
+
+  const totalPages = recentCallsData ? Math.ceil(recentCallsData.total / pageSize) : 0
 
   // Terminate session mutation
   const terminateMutation = useMutation({
@@ -408,6 +412,11 @@ export default function Sessions() {
           <CardTitle className="flex items-center gap-2">
             <MessageSquare className="w-5 h-5" />
             Recent Calls & Transcripts
+            {recentCallsData?.total && (
+              <span className="ml-2 px-2 py-0.5 bg-slate-100 text-slate-600 text-sm rounded-full font-normal">
+                {recentCallsData.total} total
+              </span>
+            )}
           </CardTitle>
           <CardDescription>
             View conversation transcripts from completed calls.
@@ -461,6 +470,33 @@ export default function Sessions() {
                   </Button>
                 </div>
               ))}
+
+              {/* Pagination */}
+              {totalPages > 1 && (
+                <div className="flex items-center justify-between mt-6 pt-4 border-t">
+                  <p className="text-sm text-slate-500">
+                    Page {page} of {totalPages}
+                  </p>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setPage((p) => Math.max(1, p - 1))}
+                      disabled={page === 1}
+                    >
+                      Previous
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                      disabled={page === totalPages}
+                    >
+                      Next
+                    </Button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </CardContent>

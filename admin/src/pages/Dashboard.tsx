@@ -12,7 +12,10 @@ import {
   Clock,
   TrendingUp,
   Activity,
+  ArrowRight
 } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { Button } from '@/components/ui/button'
 
 export default function Dashboard() {
   const { data: analytics, isLoading: analyticsLoading } = useQuery({
@@ -178,11 +181,17 @@ export default function Dashboard() {
 
         {/* Recent Calls */}
         <Card>
-          <CardHeader>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0">
             <CardTitle className="flex items-center gap-2">
               <Phone className="w-5 h-5" />
               Recent Calls
             </CardTitle>
+            <Link to="/calls">
+              <Button variant="ghost" size="sm" className="text-blue-600 hover:text-blue-700 hover:bg-blue-50">
+                View All
+                <ArrowRight className="w-4 h-4 ml-1" />
+              </Button>
+            </Link>
           </CardHeader>
           <CardContent>
             {callsLoading ? (
@@ -241,21 +250,27 @@ export default function Dashboard() {
 
       {/* 30-Day Summary */}
       <Card>
-        <CardHeader>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0">
           <CardTitle className="flex items-center gap-2">
             <TrendingUp className="w-5 h-5" />
             30-Day Summary
           </CardTitle>
+          <Link to="/calls">
+            <Button variant="outline" size="sm" className="text-slate-600">
+              Detailed History
+              <ArrowRight className="w-4 h-4 ml-1" />
+            </Button>
+          </Link>
         </CardHeader>
         <CardContent>
           {analyticsLoading ? (
             <p className="text-slate-500">Loading...</p>
           ) : (
             <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
-              <div>
-                <p className="text-3xl font-bold">{summary.total_calls || 0}</p>
+              <Link to="/calls" className="group">
+                <p className="text-3xl font-bold group-hover:text-blue-600 transition-colors">{summary.total_calls || 0}</p>
                 <p className="text-sm text-slate-500">Total Calls</p>
-              </div>
+              </Link>
               <div>
                 <p className="text-3xl font-bold text-green-600">{summary.successful_calls || 0}</p>
                 <p className="text-sm text-slate-500">Successful</p>
