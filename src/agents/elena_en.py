@@ -372,6 +372,15 @@ class ElenaFunctionContext(llm.FunctionContext):
             issue_description,
         )
         room_log("TOOL_RESULT", name="create_support_ticket", result=_truncate(result))
+        
+        # Sync deterministic state: if LLM created a ticket, we are no longer in a support flow.
+        state = _current["state"]
+        state.support_state = "idle"
+        state.ticket_name = ""
+        state.ticket_phone = ""
+        state.ticket_email = ""
+        state.ticket_issue = ""
+        
         return result
 
     @llm.ai_callable()
@@ -529,12 +538,16 @@ def _looks_like_email(text: str) -> bool:
 
 def _is_yes(text: str) -> bool:
     t = (text or "").strip().lower()
-    return t in {"yes", "y", "confirm", "confirmed", "correct", "go ahead", "please do"}
+    # Flexible match for common affirmative phrases
+    keywords = {"yes", "yeah", "yep", "sure", "correct", "confirm", "proceed", "okay", "ok", "do it", "create"}
+    return any(w in t for w in keywords)
 
 
 def _is_no(text: str) -> bool:
     t = (text or "").strip().lower()
-    return t in {"no", "n", "cancel", "stop", "not now"}
+    # Flexible match for common negative phrases
+    keywords = {"no", "nope", "cancel", "stop", "don't", "dont", "never"}
+    return any(w in t for w in keywords)
 
 
 def _normalize_intent_text(text: str) -> str:
@@ -1158,6 +1171,9 @@ async def entrypoint(ctx: JobContext):
             return
 
         # 3b) Support ticket flow
+        if state.support_state.startswith("ticket_"):
+            # Stronger LLM suppression while we are in a deterministic sub-flow
+            suppress_llm(15.0)
         if state.support_state == "ticket_name":
             state.ticket_name = user_text
             state.support_state = "ticket_phone"
