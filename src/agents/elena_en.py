@@ -232,6 +232,8 @@ class SessionState:
     last_clarification_prompt_text: str = ""
     last_clarification_prompt_at: float = 0.0
     suppress_llm_until: float = 0.0
+    last_user_text_norm: str = ""
+    user_repetition_count: int = 0
 
 
 _current = {
@@ -759,8 +761,8 @@ async def entrypoint(ctx: JobContext):
     cache_task = asyncio.create_task(_fetch_from_db())
 
     state = SessionState(
-        silence_timeout_s=_as_float(get_agent_setting("silence_timeout_seconds", 12.0), 12.0, min_value=6.0, max_value=60.0),
-        silence_max_prompts=_as_int(get_agent_setting("silence_max_prompts", 2), 2, min_value=1, max_value=5),
+        silence_timeout_s=_as_float(get_agent_setting("silence_timeout_seconds", 5.0), 5.0, min_value=1.0, max_value=60.0),
+        silence_max_prompts=_as_int(get_agent_setting("silence_max_prompts", 0), 0, min_value=0, max_value=5),
         last_user_activity=time.time(),
         last_agent_activity=time.time(),
     )
@@ -1023,7 +1025,25 @@ async def entrypoint(ctx: JobContext):
         state.silence_prompt_count = 0
         asyncio.create_task(send_user_transcript(user_text))
 
-        # 0) Farewell detection — must run BEFORE any support-state branches so that
+        # 0a) Repetition check: if user repeats the same sentence 2 times, disconnect.
+        norm_text = re.sub(r"[^a-z0-9]", "", user_text.lower())
+        if norm_text and norm_text == state.last_user_text_norm:
+            state.user_repetition_count += 1
+            if state.user_repetition_count >= 1: # 1 repetition = 2 times total
+                room_log("REPETITION_TERMINATION", text=user_text)
+                state.silence_enabled = False # Stop silence monitor immediately
+                asyncio.create_task(agent.say("I've heard that already. I will end the call now. Goodbye!", allow_interruptions=True))
+                async def _end_rep():
+                    await asyncio.sleep(5.0) # Wait for agent to start/finish speaking
+                    state.should_end = True
+                    state.disconnect_reason = "repetition_termination"
+                asyncio.create_task(_end_rep())
+                return
+        else:
+            state.last_user_text_norm = norm_text
+            state.user_repetition_count = 0
+
+        # 0b) Farewell detection — must run BEFORE any support-state branches so that
         #    "No. Thank you. Goodbye." while in awaiting_order/awaiting_phone still
         #    triggers call teardown instead of falling into the order/phone handlers.
         _t = user_text.lower().strip()
@@ -1384,19 +1404,19 @@ async def entrypoint(ctx: JobContext):
             now = time.time()
             if now < state.silence_snooze_until:
                 continue
-            if (now - state.last_user_activity) < state.silence_timeout_s:
-                continue
-            if (now - state.last_agent_activity) < state.silence_timeout_s:
-                continue
+            # Disconnect if timeout reached
+            if (now - state.last_user_activity) > state.silence_timeout_s and (now - state.last_agent_activity) > state.silence_timeout_s:
+                # If max_prompts is 0 or we've reached the limit, disconnect.
+                if state.silence_max_prompts <= 0 or state.silence_prompt_count >= state.silence_max_prompts:
+                    room_log("SILENCE_TERMINATION", count=state.silence_prompt_count)
+                    state.silence_enabled = False # Stop further monitor checks
+                    await agent.say("I haven't heard from you. I will end the call now. Goodbye!", allow_interruptions=True)
+                    await asyncio.sleep(5.0) # Wait for audio to reach user
+                    state.should_end = True
+                    state.disconnect_reason = "silence_termination"
+                    break
 
-            if state.silence_prompt_count >= state.silence_max_prompts:
-                # Disconnect after too much silence to free up resources.
-                room_log("SILENCE_TERMINATION", count=state.silence_prompt_count)
-                state.should_end = True
-                state.disconnect_reason = "silence_termination"
-                break
-
-            text = _contextual_silence_prompt()
+                text = _contextual_silence_prompt()
             state.silence_prompt_count += 1
             # Snooze for 15s to allow the agent to finish speaking and the user to react.
             state.silence_snooze_until = time.time() + 15.0
@@ -1410,7 +1430,7 @@ async def entrypoint(ctx: JobContext):
         await asyncio.sleep(0.5)
 
     # Short delay to allow the last spoken sentence (e.g., closing message) to reach the user.
-    await asyncio.sleep(3.0)
+    await asyncio.sleep(6.0)
 
     # Cleanup and call end
     silence_task.cancel()
