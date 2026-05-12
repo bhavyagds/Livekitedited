@@ -24,6 +24,7 @@ except ImportError:
     USE_DEEPGRAM = False
 
 from src.config import settings
+from src.agents.flows import base, termination, farewell, ticket_flow, order_flow, phone_flow, greeting_flow, silence_flow, memory_flow
 from src.agents.prompts import (
     _fetch_from_db,
     get_agent_setting,
@@ -159,20 +160,7 @@ def _mentions_phone_lookup_intent(text: str) -> bool:
     )
 
 
-def _is_order_relevant(text: str) -> bool:
-    """Check if the text is likely an attempt to provide order info or ask about it."""
-    t = (text or "").lower()
-    # If it has any digits, it's likely an attempt at a number
-    if re.search(r"\d", t):
-        return True
-    # Keywords that suggest they are still in the flow
-    keywords = {
-        "παραγγελία", "αριθμό", "τηλέφωνο", "έλεγχος", "βρες", "βρείτε", "πού", "που",
-        "πρόβλημα", "θέμα", "id", "βοήθεια", "ναι", "εντάξει", "έτοιμος", "έτοιμη",
-        "order", "number", "phone", "help", "yes", "ok", "ready"
-    }
-    tokens = set(re.findall(r"\w+", t))
-    return bool(tokens & keywords)
+# Migrated to flows/order_flow.py
 
 
 # -----------------------------------------------------------------------------
@@ -235,6 +223,7 @@ class SessionState:
     suppress_llm_until: float = 0.0
     last_user_text_norm: str = ""
     user_repetition_count: int = 0
+    deterministic_replied: bool = False
 
 
 _current = {
@@ -531,66 +520,8 @@ def _looks_like_email(text: str) -> bool:
 def _is_yes(text: str) -> bool:
     t = (text or "").strip().lower()
     # Flexible match for common Greek affirmative phrases
-    keywords = {"ναι", "σωστά", "επιβεβαιώνω", "προχώρα", "μάλιστα", "εντάξει", "οκ", "ναι σωστά", "κάνε", "δημιούργησε"}
-    return any(w in t for w in keywords)
-
-
-def _is_no(text: str) -> bool:
-    t = (text or "").strip().lower()
-    # Flexible match for common Greek negative phrases
-    keywords = {"όχι", "μη", "ακύρωση", "σταμάτα", "ποτέ", "όχι τώρα"}
-    return any(w in t for w in keywords)
-
-
-def _normalize_intent_text(text: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^a0-9\s]", " ", (text or "").lower())).strip()
-
-
-def _intent_tokens(text: str) -> set[str]:
-    toks = _normalize_intent_text(text).split()
-    normalized: set[str] = set()
-    for tok in toks:
-        if len(tok) < 3 or tok in _MEMORY_STOPWORDS:
-            continue
-        t = tok
-        # Generic light stemming (language-agnostic enough for EN, no domain hardcoding).
-        if t.endswith("ies") and len(t) > 4:
-            t = t[:-3] + "y"
-        elif t.endswith("es") and len(t) > 4:
-            t = t[:-2]
-        elif t.endswith("s") and len(t) > 4:
-            t = t[:-1]
-        elif t.endswith("ing") and len(t) > 5:
-            t = t[:-3]
-        elif t.endswith("ed") and len(t) > 4:
-            t = t[:-2]
-        normalized.add(t)
-    return normalized
-
-
-def _find_memory_match(user_text: str, memory_items: list[dict]) -> Optional[str]:
-    user_norm = _normalize_intent_text(user_text)
-    user_tokens = _intent_tokens(user_text)
-    if not user_norm or not user_tokens:
-        return None
-
-    best_answer: Optional[str] = None
-    best_score = 0.0
-
-    for item in memory_items:
-        q = str(item.get("question") or "").strip()
-        a = str(item.get("answer") or "").strip()
-        if not q or not a:
-            continue
-        q_norm = _normalize_intent_text(q)
-        q_tokens = _intent_tokens(q)
-        if not q_tokens:
-            continue
-
-        overlap = len(user_tokens & q_tokens)
-        coverage = overlap / max(1, len(q_tokens))
-        recall = overlap / max(1, len(user_tokens))
-        phrase_hit = 1.0 if (q_norm in user_norm or user_norm in q_norm) else 0.0
+    keywords = {"ναι", "σωστά", "επιβεβαιώνω", "προχώρα", "μάλιστα", "εντάξει", "οκ", "ναι σωστά", "κάνε", "δ�# Migrated to flows/memory_flow.py
+   phrase_hit = 1.0 if (q_norm in user_norm or user_norm in q_norm) else 0.0
         score = (coverage * 0.55) + (recall * 0.35) + (phrase_hit * 0.25)
 
         if score > best_score and (overlap >= 2 or phrase_hit > 0):
@@ -632,113 +563,11 @@ def _build_memory_prompt_block(memory_items: list[dict]) -> str:
 def create_vad(is_sip_call: bool = False):
     min_speech = _as_float(get_agent_setting("vad_min_speech_duration", 0.15), 0.15, min_value=0.05, max_value=1.0)
     min_silence = _as_float(get_agent_setting("vad_min_silence_duration", 1.2 if is_sip_call else 1.0), 1.0, min_value=0.1, max_value=3.0)
-    # threshold=0.6: slightly more aggressive to filter out background noise
+    # threshold=0.6: more aggressive to filter out background noise hallucinations
     return silero.VAD.load(min_speech_duration=min_speech, min_silence_duration=min_silence, activation_threshold=0.6)
 
 
-# -----------------------------------------------------------------------------
-# Core flow helpers
-# -----------------------------------------------------------------------------
-
-
-async def _is_order_not_found_text(text: str) -> bool:
-    t = (text or "").lower()
-    return "δεν βρέθηκε" in t or "δεν υπάρχει" in t or "no order" in t or "could not find" in t
-
-
-async def _publish_transcript(ctx: JobContext, speaker: str, text: str):
-    cleaned = (text or "").strip()
-    if not cleaned:
-        return
-    payload = json.dumps({"type": "transcript", "speaker": speaker, "text": cleaned}, ensure_ascii=False)
-    try:
-        await ctx.room.local_participant.publish_data(payload.encode("utf-8"), reliable=True)
-    except Exception:
-        pass
-
-
-async def _publish_state(ctx: JobContext, state_name: str):
-    payload = json.dumps({"type": "state", "state": state_name}, ensure_ascii=False)
-    try:
-        await ctx.room.local_participant.publish_data(payload.encode("utf-8"), reliable=True)
-    except Exception:
-        pass
-
-
-async def _run_order_lookup(agent: VoicePipelineAgent, order_number: str):
-    state: SessionState = _current["state"]
-    if state.lookup_inflight:
-        return
-    state.lookup_inflight = True
-    state.support_state = "checking_order"
-    room_log("ORDER_LOOKUP_STARTED", order_number=order_number)
-    try:
-        result = await order_lookup.lookup_order(order_number)
-        room_log("ORDER_LOOKUP_RESULT", result=_truncate(result))
-        
-        # Clean up text to prevent awkward TTS pauses on punctuation/colons/brackets
-        from src.utils.voice_formatting import clean_text_for_tts
-        cleaned_result = clean_text_for_tts(result, lang="el")
-        await agent.say(cleaned_result, allow_interruptions=True)
-        
-        state.last_order_number = order_number
-        if _is_order_not_found_text(result):
-            state.support_state = "awaiting_order"
-        else:
-            state.support_state = "idle"
-    finally:
-        state.lookup_inflight = False
-
-
-async def _run_phone_lookup(agent: VoicePipelineAgent, phone_number: str):
-    state: SessionState = _current["state"]
-    if state.lookup_inflight:
-        return
-    state.lookup_inflight = True
-    state.support_state = "checking_phone"
-    room_log("PHONE_LOOKUP_STARTED", phone=phone_number)
-    try:
-        result = await order_lookup.lookup_order_by_phone(phone_number)
-        room_log("PHONE_LOOKUP_RESULT", result=_truncate(result))
-        
-        # Clean up text to prevent awkward TTS pauses on punctuation/colons/brackets
-        from src.utils.voice_formatting import clean_text_for_tts
-        cleaned_result = clean_text_for_tts(result, lang="el")
-        await agent.say(cleaned_result, allow_interruptions=True)
-        
-        state.last_phone_number = phone_number
-        if "no order" in (result or "").lower() or "could not" in (result or "").lower():
-            state.support_state = "awaiting_phone"
-        else:
-            state.support_state = "idle"
-    finally:
-        state.lookup_inflight = False
-
-
-async def _run_create_ticket(agent: VoicePipelineAgent):
-    state: SessionState = _current["state"]
-    if state.ticket_inflight:
-        return
-    state.ticket_inflight = True
-    state.support_state = "creating_ticket"
-    room_log("TICKET_CREATE_STARTED")
-    try:
-        result = await support_ticket.create_support_ticket(
-            state.ticket_name or "Πελάτης",
-            state.ticket_phone,
-            state.ticket_email,
-            state.ticket_issue,
-        )
-        room_log("TICKET_CREATE_RESULT", result=_truncate(result))
-        await say(result, allow_interruptions=True)
-        state.support_state = "idle"
-        state.last_issue = ""  # clear so silence monitor uses generic prompt, not "still here to help"
-        state.ticket_name = ""
-        state.ticket_phone = ""
-        state.ticket_email = ""
-        state.ticket_issue = ""
-    finally:
-        state.ticket_inflight = False
+# Migrated to flows/order_flow.py and flows/ticket_flow.py
 
 
 # -----------------------------------------------------------------------------
@@ -847,7 +676,7 @@ async def entrypoint(ctx: JobContext):
             "Για θέματα παραγγελιών, ζητήστε πρώτα τον αριθμό παραγγελίας και μετά το τηλέφωνο αν χρειαστεί."
         )
     # Ensure memory guidance is always present even if prompts cache misses memory context.
-    memory_block = _build_memory_prompt_block(memory_items)
+    memory_block = memory_flow.build_memory_prompt_block(memory_items)
     if memory_block and "CRITICAL: LONG-TERM MEMORY" not in (system_prompt or ""):
         system_prompt = f"{memory_block}\n\n{system_prompt}"
     has_memory_block = "LONG-TERM MEMORY" in (system_prompt or "")
@@ -866,9 +695,10 @@ async def entrypoint(ctx: JobContext):
 
     def _before_llm_cb(agent_instance, chat_ctx):
         """Gate the LLM when the deterministic handler has already replied via agent.say()."""
-        if time.time() < state.suppress_llm_until:
-            room_log("LLM_SUPPRESSED", until=state.suppress_llm_until)
+        if state.deterministic_replied or time.time() < state.suppress_llm_until:
+            room_log("LLM_SUPPRESSED", deterministic=state.deterministic_replied, until=state.suppress_llm_until)
             return False
+
         from livekit.agents.pipeline.pipeline_agent import _default_before_llm_cb
         return _default_before_llm_cb(agent_instance, chat_ctx)
 
@@ -1012,235 +842,8 @@ async def entrypoint(ctx: JobContext):
 
         state.last_user_activity = time.time()
         state.silence_prompt_count = 0
+        state.deterministic_replied = False # Reset for this turn
         asyncio.create_task(send_user_transcript(user_text))
-
-        # 0a) Repetition check: if user repeats the same sentence 2 times, disconnect.
-        # Normalize: remove non-alphanumeric and convert to lowercase
-        norm_text = re.sub(r"[^a-z0-9α-ωά-ώ]", "", user_text.lower())
-        if norm_text and norm_text == state.last_user_text_norm:
-            state.user_repetition_count += 1
-            if state.user_repetition_count >= 1: # 1 repetition = 2 times total
-                room_log("REPETITION_TERMINATION", text=user_text)
-                state.silence_enabled = False # Stop silence monitor immediately
-                asyncio.create_task(agent.say("Το έχω ακούσει ήδη αυτό. Θα κλείσω την κλήση τώρα. Γεια σας!", allow_interruptions=True))
-                async def _end_rep():
-                    await asyncio.sleep(5.0) # Wait for agent to start/finish speaking
-                    state.should_end = True
-                    state.disconnect_reason = "repetition_termination"
-                asyncio.create_task(_end_rep())
-                return
-        else:
-            state.last_user_text_norm = norm_text
-            state.user_repetition_count = 0
-
-        # 0b) Farewell intent (Broadened and Hoisted to Step 0)
-        # Check for goodbye keywords or common close phrases.
-        farewell_intent = bool(re.search(
-            r"\b(αντίο|καληνύχτα|γεια|ευχαριστώ|ευχαριστούμε|αυτά μόνο|τίποτα άλλο|όχι ευχαριστώ|κλείσε|τελειώσαμε|όλα καλά|αυτό ήταν)\b",
-            user_text.lower()
-        ))
-        # Composite intent: short sentence with both 'thanks' and 'no' or 'close'
-        if not farewell_intent and len(user_text.split()) <= 10:
-            has_thanks = bool(re.search(r"(ευχαριστώ|ευχαριστούμε|thx|thanks)", user_text.lower()))
-            has_close = bool(re.search(r"(όχι|όχι άλλο|τίποτα|αυτά|γεια|bye|no)", user_text.lower()))
-            if has_thanks and has_close:
-                farewell_intent = True
-
-        # Ignore farewell if user is providing a valid-looking number
-        if farewell_intent and len(re.findall(r"\d", user_text)) >= 3:
-            farewell_intent = False
-
-        if farewell_intent:
-            room_log("FAREWELL_DETECTED", text=user_text)
-            state.silence_enabled = False
-            suppress_llm(15.0)
-            
-            async def _delayed_end_farewell():
-                # Say a deterministic goodbye to ensure closure even if LLM is slow
-                await agent.say("Παρακαλώ! Χαίρομαι που βοήθησα. Καλή σας ημέρα!", allow_interruptions=True)
-                await asyncio.sleep(2.0)
-                state.should_end = True
-                state.disconnect_reason = "farewell"
-            asyncio.create_task(_delayed_end_farewell())
-            return
-
-        # 1) If lookup is in progress, keep caller informed and do not branch.
-        if state.lookup_inflight:
-            asyncio.create_task(set_ui_state("thinking"))
-            snooze_silence(8.0)
-            asyncio.create_task(agent.say("Το ελέγχω αυτή τη στιγμή. Μισό λεπτό παρακαλώ.", allow_interruptions=True))
-            return
-
-        if state.ticket_inflight:
-            asyncio.create_task(set_ui_state("thinking"))
-            snooze_silence(8.0)
-            asyncio.create_task(agent.say("Δημιουργώ το αίτημα υποστήριξης τώρα. Μισό λεπτό παρακαλώ.", allow_interruptions=True))
-            return
-
-        # 1.5) Ticket-creation escape — checked before any order/phone state branches.
-        _ticket_escape = bool(re.search(
-            r"\b(άνθρωπο|εκπρόσωπο|υπάλληλο|καλέστε με|επικοινωνία|αίτημα υποστήριξης|ticket|άνοιγμα ticket|δημιουργία ticket|παράπονο)\b",
-            user_text.lower()
-        ))
-        _in_ticket_flow = state.support_state in {
-            "ticket_name", "ticket_phone", "ticket_email",
-            "ticket_issue", "ticket_confirm", "creating_ticket"
-        }
-        if _ticket_escape and not _in_ticket_flow:
-            room_log("FLOW_TRANSITION", from_state=state.support_state, to_state="ticket_name", reason="ticket_escape")
-            state.support_state = "ticket_name"
-            suppress_llm(15.0)
-            asyncio.create_task(agent.say(
-                "Βεβαίως, μπορώ να δημιουργήσω ένα αίτημα υποστήριξης. Παρακαλώ πείτε μου το πλήρες όνομά σας.",
-                allow_interruptions=True
-            ))
-            return
-
-        # 2) Active order-support flow
-        if state.support_state in {"awaiting_order", "checking_order"}:
-            # If user indicates phone lookup path, move flow to phone collection.
-            if _mentions_no_order_number(user_text) or _mentions_phone_lookup_intent(user_text):
-                state.support_state = "awaiting_phone"
-                room_log("FLOW_TRANSITION", from_state="awaiting_order", to_state="awaiting_phone", reason="no_order_or_phone_intent")
-                # Let the LLM handle the transition sentence naturally.
-                return
-
-            # If user already gave a full phone-like number, use phone lookup directly.
-            phone_candidate = _normalize_phone_for_lookup(user_text)
-            if phone_candidate:
-                state.support_state = "awaiting_phone"
-                suppress_llm(15.0)
-                asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(15.0)
-                asyncio.create_task(_run_phone_lookup(agent, phone_candidate))
-                return
-
-            order_id = _normalize_order_id_strict(user_text)
-            if order_id:
-                suppress_llm(15.0)
-                asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(15.0)
-                asyncio.create_task(_run_order_lookup(agent, order_id))
-                return
-
-            # If user is talking about order but didn't give valid ID, give deterministic hint.
-            if _is_order_relevant(user_text):
-                prompt = "Όποτε είστε έτοιμοι, παρακαλώ πείτε μου τον αριθμό παραγγελίας σας. Αν δεν τον έχετε, πείτε το και θα τον βρω με το τηλέφωνό σας."
-                if not _should_suppress_clarification(prompt):
-                    suppress_llm()
-                    asyncio.create_task(agent.say(prompt, allow_interruptions=True))
-                return
-
-            # Let LLM handle potential diversions
-            return
-
-        # 3) Active phone-support flow
-        if state.support_state in {"awaiting_phone", "checking_phone"}:
-            if _mentions_phone_lookup_intent(user_text):
-                prompt = "Βεβαίως. Παρακαλώ δώστε μου το πλήρες τηλέφωνο που χρησιμοποιήσατε για την παραγγελία."
-                if not _should_suppress_clarification(prompt):
-                    suppress_llm()
-                    asyncio.create_task(agent.say(prompt, allow_interruptions=True))
-                return
-            phone = _normalize_phone_for_lookup(user_text)
-            if phone:
-                suppress_llm(15.0)
-                asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(15.0)
-                asyncio.create_task(_run_phone_lookup(agent, phone))
-                return
-            
-            # Escape: user may give an order ID instead of a phone number.
-            order_id_escape = _normalize_order_id_strict(user_text)
-            if order_id_escape:
-                room_log("FLOW_TRANSITION", from_state="awaiting_phone", to_state="awaiting_order", reason="order_id_given_in_phone_flow")
-                state.support_state = "awaiting_order"
-                suppress_llm(15.0)
-                asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(15.0)
-                asyncio.create_task(_run_order_lookup(agent, order_id_escape))
-                return
-
-            # Only clarify if relevant to order flow
-            if _is_order_relevant(user_text):
-                prompt = "Χρειάζομαι το πλήρες τηλέφωνο για να βρω την παραγγελία. Παρακαλώ πείτε το."
-                if not _should_suppress_clarification(prompt):
-                    suppress_llm()
-                    asyncio.create_task(agent.say(prompt, allow_interruptions=True))
-                return
-
-            # Fall through for diversions
-            return
-
-        # 3b) Support ticket flow
-        if state.support_state.startswith("ticket_"):
-            # Stronger LLM suppression while we are in a deterministic sub-flow
-            suppress_llm(15.0)
-        if state.support_state == "ticket_name":
-            state.ticket_name = user_text
-            state.support_state = "ticket_phone"
-            suppress_llm()
-            asyncio.create_task(agent.say("Ευχαριστώ. Παρακαλώ πείτε μου το τηλέφωνό σας.", allow_interruptions=True))
-            return
-
-        if state.support_state == "ticket_phone":
-            ticket_phone = _normalize_phone_for_lookup(user_text)
-            if not ticket_phone:
-                prompt = "Παρακαλώ δώστε έναν έγκυρο αριθμό τηλεφώνου."
-                if not _should_suppress_clarification(prompt):
-                    suppress_llm()
-                    asyncio.create_task(agent.say(prompt, allow_interruptions=True))
-                return
-            state.ticket_phone = ticket_phone
-            state.support_state = "ticket_email"
-            suppress_llm()
-            asyncio.create_task(agent.say("Τέλεια. Τώρα παρακαλώ πείτε μου το email σας.", allow_interruptions=True))
-            return
-
-        if state.support_state == "ticket_email":
-            if not _looks_like_email(user_text):
-                suppress_llm()
-                asyncio.create_task(agent.say("Παρακαλώ δώστε μια έγκυρη διεύθυνση email.", allow_interruptions=True))
-                return
-            state.ticket_email = user_text.strip()
-            state.support_state = "ticket_issue"
-            suppress_llm()
-            asyncio.create_task(agent.say("Παρακαλώ περιγράψτε το πρόβλημα με μία ή δύο προτάσεις.", allow_interruptions=True))
-            return
-
-        if state.support_state == "ticket_issue":
-            state.ticket_issue = user_text
-            state.support_state = "ticket_confirm"
-            confirm_text = (
-                f"Έχω τα στοιχεία σας ως: όνομα {state.ticket_name}, τηλέφωνο {state.ticket_phone}, και email {state.ticket_email}. "
-                "Να δημιουργήσω το αίτημα υποστήριξης τώρα;"
-            )
-            suppress_llm()
-            asyncio.create_task(agent.say(confirm_text, allow_interruptions=True))
-            return
-
-        if state.support_state == "ticket_confirm":
-            if _is_yes(user_text):
-                suppress_llm()
-                asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(10.0)
-                asyncio.create_task(agent.say("Ευχαριστώ. Δημιουργώ το αίτημα τώρα.", allow_interruptions=True))
-                asyncio.create_task(_run_create_ticket(agent))
-                return
-            if _is_no(user_text):
-                state.support_state = "idle"
-                state.ticket_name = ""
-                state.ticket_phone = ""
-                state.ticket_email = ""
-                state.ticket_issue = ""
-                suppress_llm()
-                asyncio.create_task(agent.say("Κανένα πρόβλημα. Ακύρωσα το αίτημα.", allow_interruptions=True))
-                return
-            suppress_llm()
-            asyncio.create_task(agent.say("Παρακαλώ πείτε ναι για δημιουργία ή όχι για ακύρωση.", allow_interruptions=True))
-            return
-
-        # General turno logic is handled by LLM fallthrough above.
         return
 
     # Optional: capture agent text word-by-word if needed, but committed is safer for translations.
