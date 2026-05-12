@@ -49,7 +49,7 @@ async def handle(ctx: FlowContext, user_text: str) -> bool:
         
         async def _delayed_end_farewell():
             # Allow time for the goodbye message to play
-            await asyncio.sleep(5.0 if ctx.lang == "el" else 3.0)
+            await asyncio.sleep(7.0 if ctx.lang == "el" else 5.0)
             state.should_end = True
             state.disconnect_reason = "farewell"
             
