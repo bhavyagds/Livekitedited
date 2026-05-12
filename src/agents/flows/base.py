@@ -15,6 +15,7 @@ class FlowContext:
     room_log: Callable[[str, Any], None]
     should_suppress_clarification: Callable[[str, float], bool]
     cancel_thinking_task: Callable[[], None]
+    send_transcript: Callable[[str], Awaitable[None]] # New helper
     lang: str = "en"
 
     def handled(self) -> bool:
@@ -22,3 +23,10 @@ class FlowContext:
         if hasattr(self.state, "deterministic_replied"):
             self.state.deterministic_replied = True
         return True
+
+    async def say(self, text: str, allow_interruptions: bool = True):
+        """Helper to speak and send transcript simultaneously."""
+        # 1) Speak
+        await self.agent.say(text, allow_interruptions=allow_interruptions)
+        # 2) Send Transcript (so it appears on frontend)
+        await self.send_transcript(text)

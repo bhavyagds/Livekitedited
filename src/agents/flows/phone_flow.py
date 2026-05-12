@@ -41,7 +41,7 @@ async def _run_order_lookup(ctx: FlowContext, order_number: str):
     try:
         result = await order_lookup.lookup_order(order_number)
         ctx.room_log("ORDER_LOOKUP_RESULT", result=result)
-        await ctx.agent.say(result, allow_interruptions=True)
+        await ctx.say(result, allow_interruptions=True)
         state.support_state = "idle"
         state.last_order_number = order_number
     finally:
@@ -58,7 +58,7 @@ async def _run_phone_lookup(ctx: FlowContext, phone_number: str):
     try:
         result = await order_lookup.lookup_order_by_phone(phone_number)
         ctx.room_log("PHONE_LOOKUP_RESULT", result=result)
-        await ctx.agent.say(result, allow_interruptions=True)
+        await ctx.say(result, allow_interruptions=True)
         state.support_state = "idle"
         state.last_phone_number = phone_number
     finally:
@@ -75,7 +75,7 @@ async def handle(ctx: FlowContext, user_text: str) -> bool:
     if state.lookup_inflight:
         await ctx.set_ui_state("thinking")
         ctx.snooze_silence(8.0)
-        asyncio.create_task(ctx.agent.say("I am still checking that now. One moment please.", allow_interruptions=True))
+        asyncio.create_task(ctx.say("I am still checking that now. One moment please.", allow_interruptions=True))
         return ctx.handled()
 
     # 2) Process input
@@ -83,7 +83,7 @@ async def handle(ctx: FlowContext, user_text: str) -> bool:
         prompt = "Sure. Please provide the full phone number used for the order."
         if not ctx.should_suppress_clarification(prompt, 5.0):
             ctx.suppress_llm(10.0)
-            asyncio.create_task(ctx.agent.say(prompt, allow_interruptions=True))
+            asyncio.create_task(ctx.say(prompt, allow_interruptions=True))
         return ctx.handled()
 
     phone = _normalize_phone_for_lookup(user_text)
@@ -109,7 +109,7 @@ async def handle(ctx: FlowContext, user_text: str) -> bool:
         prompt = "I need the full phone number to check the order. Please share it once."
         if not ctx.should_suppress_clarification(prompt, 5.0):
             ctx.suppress_llm(10.0)
-            asyncio.create_task(ctx.agent.say(prompt, allow_interruptions=True))
+            asyncio.create_task(ctx.say(prompt, allow_interruptions=True))
         return ctx.handled()
 
     return False

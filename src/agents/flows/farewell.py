@@ -45,7 +45,7 @@ async def handle(ctx: FlowContext, user_text: str) -> bool:
         ctx.suppress_llm(15.0)
         
         goodbye_msg = get_closing(ctx.lang)
-        asyncio.create_task(ctx.agent.say(goodbye_msg, allow_interruptions=True))
+        asyncio.create_task(ctx.say(goodbye_msg, allow_interruptions=True))
         
         async def _delayed_end_farewell():
             # Allow time for the goodbye message to play

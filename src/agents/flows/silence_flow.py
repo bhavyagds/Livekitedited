@@ -47,7 +47,7 @@ async def monitor_iteration(ctx: FlowContext) -> bool:
             if ctx.lang == "el":
                 message = "Δεν σας ακούω. Θα κλείσω την κλήση τώρα. Γεια σας!"
                 
-            await ctx.agent.say(message, allow_interruptions=True)
+            await ctx.say(message, allow_interruptions=True)
             await asyncio.sleep(5.0) # Wait for audio to reach user
             state.should_end = True
             state.disconnect_reason = "silence_termination"
@@ -58,6 +58,6 @@ async def monitor_iteration(ctx: FlowContext) -> bool:
         # Snooze for 15s to allow the agent to finish speaking and the user to react.
         state.silence_snooze_until = time.time() + 15.0
         ctx.room_log("SILENCE_PROMPT", count=state.silence_prompt_count, text=text)
-        await ctx.agent.say(text, allow_interruptions=True)
+        await ctx.say(text, allow_interruptions=True)
         
     return False

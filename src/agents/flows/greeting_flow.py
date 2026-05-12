@@ -6,5 +6,5 @@ from src.agents.prompts import get_greeting
 async def handle(ctx: FlowContext) -> bool:
     """Send the initial greeting message."""
     greeting = get_greeting(ctx.lang)
-    await ctx.agent.say(greeting, allow_interruptions=True)
+    await ctx.say(greeting, allow_interruptions=True)
     return True

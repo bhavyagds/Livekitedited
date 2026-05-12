@@ -23,7 +23,7 @@ async def handle(ctx: FlowContext, user_text: str) -> bool:
             if ctx.lang == "el":
                 message = "Το έχω ακούσει ήδη αυτό. Θα κλείσω την κλήση τώρα. Γεια σας!"
                 
-            asyncio.create_task(ctx.agent.say(message, allow_interruptions=True))
+            asyncio.create_task(ctx.say(message, allow_interruptions=True))
             
             async def _end_rep():
                 await asyncio.sleep(5.0) # Wait for agent to start/finish speaking

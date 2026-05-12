@@ -799,6 +799,7 @@ async def entrypoint(ctx: JobContext):
                 room_log=room_log,
                 should_suppress_clarification=_should_suppress_clarification,
                 cancel_thinking_task=cancel_thinking_task,
+                send_transcript=send_agent_transcript,
                 lang="en"
             )
             
@@ -836,7 +837,9 @@ async def entrypoint(ctx: JobContext):
     greeting_ctx = base.FlowContext(
         state=state, agent=agent, suppress_llm=suppress_llm, snooze_silence=snooze_silence,
         set_ui_state=set_ui_state, room_log=room_log, should_suppress_clarification=_should_suppress_clarification,
-        cancel_thinking_task=cancel_thinking_task, lang="en"
+        cancel_thinking_task=cancel_thinking_task,
+        send_transcript=send_agent_transcript,
+        lang="en"
     )
     asyncio.create_task(greeting_flow.handle(greeting_ctx))
 
@@ -887,7 +890,9 @@ async def entrypoint(ctx: JobContext):
         monitor_ctx = base.FlowContext(
             state=state, agent=agent, suppress_llm=suppress_llm, snooze_silence=snooze_silence,
             set_ui_state=set_ui_state, room_log=room_log, should_suppress_clarification=_should_suppress_clarification,
-            cancel_thinking_task=cancel_thinking_task, lang="en"
+            cancel_thinking_task=cancel_thinking_task,
+            send_transcript=send_agent_transcript,
+            lang="en"
         )
         while not state.should_end:
             await asyncio.sleep(1.0)

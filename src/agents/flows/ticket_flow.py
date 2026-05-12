@@ -43,7 +43,7 @@ async def _run_create_ticket(ctx: FlowContext):
             state.ticket_issue,
         )
         ctx.room_log("TICKET_CREATE_RESULT", result=result)
-        await ctx.agent.say(result, allow_interruptions=True)
+        await ctx.say(result, allow_interruptions=True)
         state.support_state = "idle"
         state.ticket_name = ""
         state.ticket_phone = ""
@@ -67,7 +67,7 @@ async def handle(ctx: FlowContext, user_text: str) -> bool:
         state.support_state = "ticket_name"
         ctx.suppress_llm(15.0)
         ctx.cancel_thinking_task()
-        asyncio.create_task(ctx.agent.say(
+        asyncio.create_task(ctx.say(
             "I can help you with that. First, could you please tell me your full name?",
             allow_interruptions=True
         ))
@@ -85,7 +85,7 @@ async def handle(ctx: FlowContext, user_text: str) -> bool:
         state.ticket_name = user_text
         state.support_state = "ticket_phone"
         ctx.suppress_llm(10.0)
-        asyncio.create_task(ctx.agent.say("Thanks. Please share your phone number.", allow_interruptions=True))
+        asyncio.create_task(ctx.say("Thanks. Please share your phone number.", allow_interruptions=True))
         return ctx.handled()
 
     if state.support_state == "ticket_phone":
@@ -94,12 +94,12 @@ async def handle(ctx: FlowContext, user_text: str) -> bool:
             prompt = "Please share a valid phone number."
             if not ctx.should_suppress_clarification(prompt, 5.0):
                 ctx.suppress_llm(10.0)
-                asyncio.create_task(ctx.agent.say(prompt, allow_interruptions=True))
+                asyncio.create_task(ctx.say(prompt, allow_interruptions=True))
             return ctx.handled()
         state.ticket_phone = ticket_phone
         state.support_state = "ticket_email"
         ctx.suppress_llm(10.0)
-        asyncio.create_task(ctx.agent.say("Got it. Now please share your email address.", allow_interruptions=True))
+        asyncio.create_task(ctx.say("Got it. Now please share your email address.", allow_interruptions=True))
         return ctx.handled()
 
     if state.support_state == "ticket_email":
@@ -113,12 +113,12 @@ async def handle(ctx: FlowContext, user_text: str) -> bool:
             prompt = "Please share a valid email address."
             if not ctx.should_suppress_clarification(prompt, 5.0):
                 ctx.suppress_llm(10.0)
-                asyncio.create_task(ctx.agent.say(prompt, allow_interruptions=True))
+                asyncio.create_task(ctx.say(prompt, allow_interruptions=True))
             return ctx.handled()
         state.ticket_email = cleaned_email
         state.support_state = "ticket_issue"
         ctx.suppress_llm(10.0)
-        asyncio.create_task(ctx.agent.say("Thank you. Finally, please describe the issue in one or two sentences.", allow_interruptions=True))
+        asyncio.create_task(ctx.say("Thank you. Finally, please describe the issue in one or two sentences.", allow_interruptions=True))
         return ctx.handled()
 
     if state.support_state == "ticket_issue":
@@ -129,7 +129,7 @@ async def handle(ctx: FlowContext, user_text: str) -> bool:
             "Should I create the support ticket now?"
         )
         ctx.suppress_llm(10.0)
-        asyncio.create_task(ctx.agent.say(confirm_text, allow_interruptions=True))
+        asyncio.create_task(ctx.say(confirm_text, allow_interruptions=True))
         return ctx.handled()
 
     if state.support_state == "ticket_confirm":
@@ -137,7 +137,7 @@ async def handle(ctx: FlowContext, user_text: str) -> bool:
             ctx.suppress_llm(15.0)
             asyncio.create_task(ctx.set_ui_state("thinking"))
             ctx.snooze_silence(10.0)
-            asyncio.create_task(ctx.agent.say("Thanks. Creating your support ticket now.", allow_interruptions=True))
+            asyncio.create_task(ctx.say("Thanks. Creating your support ticket now.", allow_interruptions=True))
             asyncio.create_task(_run_create_ticket(ctx))
             return ctx.handled()
         if _is_no(user_text):
@@ -147,12 +147,12 @@ async def handle(ctx: FlowContext, user_text: str) -> bool:
             state.ticket_email = ""
             state.ticket_issue = ""
             ctx.suppress_llm(10.0)
-            asyncio.create_task(ctx.agent.say("No problem. I have cancelled the ticket request.", allow_interruptions=True))
+            asyncio.create_task(ctx.say("No problem. I have cancelled the ticket request.", allow_interruptions=True))
             return ctx.handled()
         
         prompt = "Please say yes to create the ticket, or no to cancel."
         ctx.suppress_llm(10.0)
-        asyncio.create_task(ctx.agent.say(prompt, allow_interruptions=True))
+        asyncio.create_task(ctx.say(prompt, allow_interruptions=True))
         return ctx.handled()
 
     return False
