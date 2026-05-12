@@ -1,4 +1,4 @@
-﻿"""
+"""
 Meallion Voice AI - Elena English Agent (clean rewrite)
 English-only voice agent with deterministic order/phone support flow.
 """
@@ -206,7 +206,6 @@ def _create_room_logger(room_name: str, job_id: Optional[str]) -> tuple[logging.
 class SessionState:
     support_state: str = "idle"  # idle|awaiting_order|checking_order|awaiting_phone|checking_phone|ticket_name|ticket_phone|ticket_email|ticket_issue|ticket_confirm|creating_ticket
     ui_state: str = "idle"  # idle|listening|thinking|speaking
-    deterministic_replied: bool = False  # Track if a deterministic handler already called agent.say()
     last_issue: str = ""
     last_order_number: str = ""
     last_phone_number: str = ""
@@ -219,8 +218,8 @@ class SessionState:
     should_end: bool = False
     disconnect_reason: str = "session_end"
     silence_enabled: bool = True
-    silence_timeout_s: float = 5.0
-    silence_max_prompts: int = 0
+    silence_timeout_s: float = 12.0
+    silence_max_prompts: int = 2
     silence_prompt_count: int = 0
     silence_snooze_until: float = 0.0
     waiting_for_user: bool = False
@@ -864,16 +863,6 @@ async def entrypoint(ctx: JobContext):
     room_log("SYSTEM_PROMPT_READY", length=len(system_prompt or ""), has_memory_block=has_memory_block)
     chat_ctx = llm.ChatContext()
     chat_ctx.append(role="system", text=system_prompt)
-    
-    # Add a strict instruction to the LLM to avoid bundling requests for support tickets.
-    # This acts as a safety net if the deterministic regex escape misses a variant.
-    support_flow_instruction = (
-        "\n\nCRITICAL SUPPORT FLOW INSTRUCTION:\n"
-        "If a customer wants to create or raise a support ticket, you MUST ONLY ask for their "
-        "FULL NAME and nothing else. Do NOT ask for phone, email, or issue in the same turn. "
-        "The system will handle the subsequent steps one-by-one."
-    )
-    chat_ctx.append(role="system", text=support_flow_instruction)
 
     configured_endpointing_delay = _as_float(
         get_agent_setting("min_endpointing_delay", 1.2),
@@ -886,15 +875,9 @@ async def entrypoint(ctx: JobContext):
 
     def _before_llm_cb(agent_instance, chat_ctx):
         """Gate the LLM when the deterministic handler has already replied via agent.say()."""
-        if time.time() < state.suppress_llm_until or state.deterministic_replied:
-            room_log("LLM_SUPPRESSED", until=state.suppress_llm_until, deterministic=state.deterministic_replied)
-            cancel_thinking_task()
+        if time.time() < state.suppress_llm_until:
+            room_log("LLM_SUPPRESSED", until=state.suppress_llm_until)
             return False
-        
-        # If we are in the support flow, the LLM is guided by the system prompt 
-        # instruction added in TurnConfig to only ask for one field at a time
-        # if the deterministic regex escape missed it.
-        
         from livekit.agents.pipeline.pipeline_agent import _default_before_llm_cb
         return _default_before_llm_cb(agent_instance, chat_ctx)
 
@@ -926,7 +909,6 @@ async def entrypoint(ctx: JobContext):
     def suppress_llm(seconds: float = 10.0):
         """Suppress LLM synthesis for the next N seconds (used when handler replies deterministically)."""
         state.suppress_llm_until = time.time() + seconds
-        state.deterministic_replied = True
         room_log("LLM_SUPPRESS_SET", seconds=seconds)
 
     async def send_agent_transcript(text: str):
@@ -1041,27 +1023,7 @@ async def entrypoint(ctx: JobContext):
 
         state.last_user_activity = time.time()
         state.silence_prompt_count = 0
-        state.deterministic_replied = False # Reset for this turn
         asyncio.create_task(send_user_transcript(user_text))
-
-        # 1.5) Ticket-creation escape — checked before any order/phone state branches so
-        #      the user can always pivot to ticket creation even if stuck in awaiting_phone.
-        _ticket_escape = bool(re.search(
-            r"\b(human|representative|call me|callback|support ticket|open ticket|create ticket|raise.*ticket|open.*ticket|make.*ticket|want.*ticket|need.*ticket|complaint)\b",
-            user_text.lower()
-        ))
-        _in_ticket_flow = (state.support_state or "").startswith("ticket_") or state.support_state == "creating_ticket"
-        
-        if _ticket_escape and not _in_ticket_flow:
-            room_log("FLOW_TRANSITION", from_state=state.support_state, to_state="ticket_name", reason="ticket_escape")
-            state.support_state = "ticket_name"
-            # Fast-track suppression to stop LLM from starting a "helpful" response
-            suppress_llm(15.0)
-            asyncio.create_task(agent.say(
-                "I can help you with that. First, could you please tell me your full name?",
-                allow_interruptions=True
-            ))
-            return
 
         # 0a) Repetition check: if user repeats the same sentence 2 times, disconnect.
         norm_text = re.sub(r"[^a-z0-9]", "", user_text.lower())
@@ -1070,7 +1032,6 @@ async def entrypoint(ctx: JobContext):
             if state.user_repetition_count >= 1: # 1 repetition = 2 times total
                 room_log("REPETITION_TERMINATION", text=user_text)
                 state.silence_enabled = False # Stop silence monitor immediately
-                suppress_llm(15.0)
                 asyncio.create_task(agent.say("I've heard that already. I will end the call now. Goodbye!", allow_interruptions=True))
                 async def _end_rep():
                     await asyncio.sleep(5.0) # Wait for agent to start/finish speaking
@@ -1132,6 +1093,26 @@ async def entrypoint(ctx: JobContext):
             asyncio.create_task(set_ui_state("thinking"))
             snooze_silence(8.0)
             asyncio.create_task(agent.say("I am creating your support ticket now. One moment please.", allow_interruptions=True))
+            return
+
+        # 1.5) Ticket-creation escape — checked before any order/phone state branches so
+        #      the user can always pivot to ticket creation even if stuck in awaiting_phone.
+        _ticket_escape = bool(re.search(
+            r"\b(human|representative|call me|callback|support ticket|open ticket|create ticket)\b",
+            user_text.lower()
+        ))
+        _in_ticket_flow = state.support_state in {
+            "ticket_name", "ticket_phone", "ticket_email",
+            "ticket_issue", "ticket_confirm", "creating_ticket"
+        }
+        if _ticket_escape and not _in_ticket_flow:
+            room_log("FLOW_TRANSITION", from_state=state.support_state, to_state="ticket_name", reason="ticket_escape")
+            state.support_state = "ticket_name"
+            suppress_llm(15.0)
+            asyncio.create_task(agent.say(
+                "I can help you with that. First, could you please tell me your full name?",
+                allow_interruptions=True
+            ))
             return
 
         if state.support_state in {"awaiting_order", "checking_order"}:
@@ -1235,22 +1216,14 @@ async def entrypoint(ctx: JobContext):
             return
 
         if state.support_state == "ticket_email":
-            # Clean email from voice artifacts
-            cleaned_email = user_text.lower().strip()
-            cleaned_email = re.sub(r'\s+at\s+', '@', cleaned_email)
-            cleaned_email = re.sub(r'\s+dot\s+', '.', cleaned_email)
-            cleaned_email = cleaned_email.replace(" ", "")
-            
-            # Basic validation: check for @ and .
-            if "@" not in cleaned_email or "." not in cleaned_email:
-                 suppress_llm()
-                 asyncio.create_task(agent.say("Please share a valid email address.", allow_interruptions=True))
-                 return
-            
-            state.ticket_email = cleaned_email
+            if not _looks_like_email(user_text):
+                suppress_llm()
+                asyncio.create_task(agent.say("Please share a valid email address.", allow_interruptions=True))
+                return
+            state.ticket_email = user_text.strip()
             state.support_state = "ticket_issue"
             suppress_llm()
-            asyncio.create_task(agent.say("Thank you. Finally, please describe the issue in one or two sentences.", allow_interruptions=True))
+            asyncio.create_task(agent.say("Please describe the issue in one or two sentences.", allow_interruptions=True))
             return
 
 
