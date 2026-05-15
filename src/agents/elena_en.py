@@ -24,7 +24,6 @@ except ImportError:
     USE_DEEPGRAM = False
 
 from src.config import settings
-from src.agents.flows import base, termination, farewell, ticket_flow, order_flow, phone_flow, greeting_flow, silence_flow, memory_flow
 from src.agents.prompts import (
     _fetch_from_db,
     get_agent_setting,
@@ -110,7 +109,69 @@ def _extract_digit_parts(text: str) -> list[str]:
     return parts
 
 
-# Migrated to flows/order_flow.py
+def _order_digit_range() -> tuple[int, int]:
+    min_d = _as_int(get_agent_setting("order_id_min_digits", 3), 3, min_value=3, max_value=9)
+    max_d = _as_int(get_agent_setting("order_id_max_digits", 6), 6, min_value=min_d, max_value=9)
+    return min_d, max_d
+
+
+def _normalize_order_id_strict(raw_text: str) -> Optional[str]:
+    min_d, max_d = _order_digit_range()
+    joined = "".join(_extract_digit_parts(raw_text or ""))
+    if min_d <= len(joined) <= max_d:
+        return joined
+    normalized = (raw_text or "").strip().lower()
+    matches = re.findall(rf"\d{{{min_d},{max_d}}}", normalized)
+    return matches[-1] if matches else None
+
+
+def _normalize_phone_for_lookup(raw_text: str) -> Optional[str]:
+    digits = "".join(_extract_digit_parts(raw_text or ""))
+    if not digits:
+        return None
+    min_digits = _as_int(get_agent_setting("phone_lookup_min_digits", 10), 10, min_value=7, max_value=15)
+    max_digits = _as_int(get_agent_setting("phone_lookup_max_digits", 15), 15, min_value=min_digits, max_value=15)
+    rx = str(get_agent_setting("phone_lookup_regex", r"^\d{10,15}$") or "").strip()
+    if rx:
+        try:
+            if re.fullmatch(rx, digits):
+                return digits
+        except re.error:
+            pass
+    if min_digits <= len(digits) <= max_digits:
+        return digits
+    return None
+
+
+def _mentions_no_order_number(text: str) -> bool:
+    t = (text or "").lower()
+    return bool(
+        re.search(r"(i do not have|i don't have|no order number|dont have order|don't have order)", t)
+        or re.search(r"(didn't get|did not get|didn't receive|did not receive).*(email|confirmation)", t)
+    )
+
+
+def _mentions_phone_lookup_intent(text: str) -> bool:
+    t = (text or "").lower()
+    return bool(
+        re.search(r"\b(phone|mobile|number|call me on)\b", t)
+        or re.search(r"(check by phone|use phone|with phone)", t)
+    )
+
+
+def _is_order_relevant(text: str) -> bool:
+    """Check if the text is likely an attempt to provide order info or ask about it."""
+    t = (text or "").lower()
+    # If it has any digits, it's likely an attempt at a number
+    if re.search(r"\d", t):
+        return True
+    # Keywords that suggest they are still in the flow
+    keywords = {
+        "order", "number", "phone", "check", "find", "look", "track", "where",
+        "problem", "issue", "id", "help", "yes", "ok", "sure", "here", "ready"
+    }
+    tokens = set(re.findall(r"\w+", t))
+    return bool(tokens & keywords)
 
 
 # -----------------------------------------------------------------------------
@@ -171,9 +232,6 @@ class SessionState:
     last_clarification_prompt_text: str = ""
     last_clarification_prompt_at: float = 0.0
     suppress_llm_until: float = 0.0
-    last_user_text_norm: str = ""
-    user_repetition_count: int = 0
-    deterministic_replied: bool = False
 
 
 _current = {
@@ -248,27 +306,6 @@ async def save_transcript_to_db(call_id: str, text: str, speaker: str = "agent",
         return False
 
 
-async def _publish_state(ctx: JobContext, state_name: str):
-    """Publish UI state (idle/listening/thinking/speaking) to the frontend via LiveKit data channel."""
-    try:
-        payload = json.dumps({"type": "state", "state": state_name}, ensure_ascii=False)
-        await ctx.room.local_participant.publish_data(payload.encode("utf-8"), reliable=True)
-    except Exception:
-        pass
-
-
-async def _publish_transcript(ctx: JobContext, speaker: str, text: str):
-    """Publish a finalised transcript line (agent or user) to the frontend via LiveKit data channel."""
-    try:
-        payload = json.dumps(
-            {"type": "transcript", "speaker": speaker, "text": text, "interim": False},
-            ensure_ascii=False,
-        )
-        await ctx.room.local_participant.publish_data(payload.encode("utf-8"), reliable=True)
-    except Exception:
-        pass
-
-
 # -----------------------------------------------------------------------------
 # Tools
 # -----------------------------------------------------------------------------
@@ -335,15 +372,6 @@ class ElenaFunctionContext(llm.FunctionContext):
             issue_description,
         )
         room_log("TOOL_RESULT", name="create_support_ticket", result=_truncate(result))
-        
-        # Sync deterministic state: if LLM created a ticket, we are no longer in a support flow.
-        state = _current["state"]
-        state.support_state = "idle"
-        state.ticket_name = ""
-        state.ticket_phone = ""
-        state.ticket_email = ""
-        state.ticket_issue = ""
-        
         return result
 
     @llm.ai_callable()
@@ -501,22 +529,99 @@ def _looks_like_email(text: str) -> bool:
 
 def _is_yes(text: str) -> bool:
     t = (text or "").strip().lower()
-    # Flexible match for common affirmative phrases
-    keywords = {"yes", "yeah", "yep", "sure", "correct", "confirm", "proceed", "okay", "ok", "do it", "create"}
-    return any(w in t for w in keywords)
+    return t in {"yes", "y", "confirm", "confirmed", "correct", "go ahead", "please do"}
 
 
 def _is_no(text: str) -> bool:
     t = (text or "").strip().lower()
-    # Flexible match for common negative phrases
-    keywords = {"no", "nope", "cancel", "stop", "don't", "dont", "never"}
-    return any(w in t for w in keywords)
+    return t in {"no", "n", "cancel", "stop", "not now"}
 
 
-# Migrated to flows/memory_flow.py
+def _normalize_intent_text(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", (text or "").lower())).strip()
 
 
-# Migrated to flows/memory_flow.py
+def _intent_tokens(text: str) -> set[str]:
+    toks = _normalize_intent_text(text).split()
+    normalized: set[str] = set()
+    for tok in toks:
+        if len(tok) < 3 or tok in _MEMORY_STOPWORDS:
+            continue
+        t = tok
+        # Generic light stemming (language-agnostic enough for EN, no domain hardcoding).
+        if t.endswith("ies") and len(t) > 4:
+            t = t[:-3] + "y"
+        elif t.endswith("es") and len(t) > 4:
+            t = t[:-2]
+        elif t.endswith("s") and len(t) > 4:
+            t = t[:-1]
+        elif t.endswith("ing") and len(t) > 5:
+            t = t[:-3]
+        elif t.endswith("ed") and len(t) > 4:
+            t = t[:-2]
+        normalized.add(t)
+    return normalized
+
+
+def _find_memory_match(user_text: str, memory_items: list[dict]) -> Optional[str]:
+    user_norm = _normalize_intent_text(user_text)
+    user_tokens = _intent_tokens(user_text)
+    if not user_norm or not user_tokens:
+        return None
+
+    best_answer: Optional[str] = None
+    best_score = 0.0
+
+    for item in memory_items:
+        q = str(item.get("question") or "").strip()
+        a = str(item.get("answer") or "").strip()
+        if not q or not a:
+            continue
+        q_norm = _normalize_intent_text(q)
+        q_tokens = _intent_tokens(q)
+        if not q_tokens:
+            continue
+
+        overlap = len(user_tokens & q_tokens)
+        coverage = overlap / max(1, len(q_tokens))
+        recall = overlap / max(1, len(user_tokens))
+        phrase_hit = 1.0 if (q_norm in user_norm or user_norm in q_norm) else 0.0
+        score = (coverage * 0.55) + (recall * 0.35) + (phrase_hit * 0.25)
+
+        if score > best_score and (overlap >= 2 or phrase_hit > 0):
+            best_score = score
+            best_answer = a
+
+    return best_answer if best_score >= 0.40 else None
+
+
+def _build_memory_prompt_block(memory_items: list[dict]) -> str:
+    lines: list[str] = []
+    for item in memory_items:
+        q = str(item.get("question") or "").strip()
+        a = str(item.get("answer") or "").strip()
+        c = str(item.get("comment") or item.get("comments") or "").strip()
+        if not q or not a:
+            continue
+        lines.append(f'SCENARIO (match by intent, not exact words): "{q}"')
+        lines.append(f'EXPECTED RESPONSE: "{a}"')
+        if c:
+            lines.append(f"GUIDELINE: {c}")
+        lines.append("-" * 20)
+    if not lines:
+        return ""
+    return (
+        "### CRITICAL: LONG-TERM MEMORY (HIGHEST PRIORITY)\n"
+        "When user intent matches any memory scenario, respond using that memory response first.\n"
+        "Treat scenario matching as semantic/intention-based (not exact wording).\n\n"
+        "### ABSOLUTE VERBAL GUARDRAILS (INTERNAL ONLY)\n"
+        "- NEVER speak section headers (e.g., '## Closing', '### CORE BEHAVIOR', 'GUIDELINE').\n"
+        "- NEVER speak behavioral instructions or meta-rules (e.g., phrases starting with 'Never say...', 'Always say...', 'Avoid...', 'Close naturally...').\n"
+        "- Bullet points in the 'CORE BEHAVIOR' or 'Closing' sections are for your logic reasoning ONLY.\n"
+        "- NEVER speak the internal tags: 'SCENARIO', 'EXPECTED RESPONSE', or 'GUIDELINE'.\n"
+        "- ONLY speak the actual conversational text intended for the customer.\n\n"
+        + "\n".join(lines)
+    )
 
 
 def create_vad(is_sip_call: bool = False):
@@ -531,7 +636,103 @@ def create_vad(is_sip_call: bool = False):
 # -----------------------------------------------------------------------------
 
 
-# Migrated to flows/order_flow.py and flows/ticket_flow.py
+def _is_order_not_found_text(text: str) -> bool:
+    t = (text or "").lower()
+    return "could not find" in t or "no order" in t
+
+
+async def _publish_transcript(ctx: JobContext, speaker: str, text: str):
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return
+    payload = json.dumps({"type": "transcript", "speaker": speaker, "text": cleaned}, ensure_ascii=False)
+    try:
+        await ctx.room.local_participant.publish_data(payload.encode("utf-8"), reliable=True)
+    except Exception:
+        pass
+
+
+async def _publish_state(ctx: JobContext, state_name: str):
+    payload = json.dumps({"type": "state", "state": state_name}, ensure_ascii=False)
+    try:
+        await ctx.room.local_participant.publish_data(payload.encode("utf-8"), reliable=True)
+    except Exception:
+        pass
+
+
+async def _run_order_lookup(agent: VoicePipelineAgent, order_number: str):
+    state: SessionState = _current["state"]
+    if state.lookup_inflight:
+        return
+    state.lookup_inflight = True
+    state.support_state = "checking_order"
+    room_log("ORDER_LOOKUP_STARTED", order_number=order_number)
+    try:
+        result = await order_lookup.lookup_order(order_number)
+        room_log("ORDER_LOOKUP_RESULT", result=_truncate(result))
+        
+        # Clean up text to prevent awkward TTS pauses on punctuation/colons/brackets
+        from src.utils.voice_formatting import clean_text_for_tts
+        cleaned_result = clean_text_for_tts(result, lang="en")
+        await agent.say(cleaned_result, allow_interruptions=True)
+        
+        state.last_order_number = order_number
+        if _is_order_not_found_text(result):
+            state.support_state = "awaiting_order"
+        else:
+            state.support_state = "idle"
+    finally:
+        state.lookup_inflight = False
+
+
+async def _run_phone_lookup(agent: VoicePipelineAgent, phone_number: str):
+    state: SessionState = _current["state"]
+    if state.lookup_inflight:
+        return
+    state.lookup_inflight = True
+    state.support_state = "checking_phone"
+    room_log("PHONE_LOOKUP_STARTED", phone=phone_number)
+    try:
+        result = await order_lookup.lookup_order_by_phone(phone_number)
+        room_log("PHONE_LOOKUP_RESULT", result=_truncate(result))
+        
+        # Clean up text to prevent awkward TTS pauses on punctuation/colons/brackets
+        from src.utils.voice_formatting import clean_text_for_tts
+        cleaned_result = clean_text_for_tts(result, lang="en")
+        await agent.say(cleaned_result, allow_interruptions=True)
+        
+        state.last_phone_number = phone_number
+        if "no order" in (result or "").lower() or "could not" in (result or "").lower():
+            state.support_state = "awaiting_phone"
+        else:
+            state.support_state = "idle"
+    finally:
+        state.lookup_inflight = False
+
+
+async def _run_create_ticket(agent: VoicePipelineAgent):
+    state: SessionState = _current["state"]
+    if state.ticket_inflight:
+        return
+    state.ticket_inflight = True
+    state.support_state = "creating_ticket"
+    room_log("TICKET_CREATE_STARTED")
+    try:
+        result = await support_ticket.create_support_ticket(
+            state.ticket_name or "Customer",
+            state.ticket_phone,
+            state.ticket_email,
+            state.ticket_issue,
+        )
+        room_log("TICKET_CREATE_RESULT", result=_truncate(result))
+        await agent.say(result, allow_interruptions=True)
+        state.support_state = "idle"
+        state.ticket_name = ""
+        state.ticket_phone = ""
+        state.ticket_email = ""
+        state.ticket_issue = ""
+    finally:
+        state.ticket_inflight = False
 
 
 # -----------------------------------------------------------------------------
@@ -545,8 +746,8 @@ async def entrypoint(ctx: JobContext):
     cache_task = asyncio.create_task(_fetch_from_db())
 
     state = SessionState(
-        silence_timeout_s=_as_float(get_agent_setting("silence_timeout_seconds", 12.0), 12.0, min_value=1.0, max_value=60.0),
-        silence_max_prompts=_as_int(get_agent_setting("silence_max_prompts", 2), 2, min_value=0, max_value=5),
+        silence_timeout_s=_as_float(get_agent_setting("silence_timeout_seconds", 12.0), 12.0, min_value=6.0, max_value=60.0),
+        silence_max_prompts=_as_int(get_agent_setting("silence_max_prompts", 2), 2, min_value=1, max_value=5),
         last_user_activity=time.time(),
         last_agent_activity=time.time(),
     )
@@ -640,7 +841,7 @@ async def entrypoint(ctx: JobContext):
             "For order issues, ask for order number first, then phone number if needed."
         )
     # Ensure memory guidance is always present even if prompts cache misses memory context.
-    memory_block = memory_flow.build_memory_prompt_block(memory_items)
+    memory_block = _build_memory_prompt_block(memory_items)
     if memory_block and "CRITICAL: LONG-TERM MEMORY" not in (system_prompt or ""):
         system_prompt = f"{memory_block}\n\n{system_prompt}"
     has_memory_block = "LONG-TERM MEMORY" in (system_prompt or "")
@@ -659,8 +860,8 @@ async def entrypoint(ctx: JobContext):
 
     def _before_llm_cb(agent_instance, chat_ctx):
         """Gate the LLM when the deterministic handler has already replied via agent.say()."""
-        if state.deterministic_replied or time.time() < state.suppress_llm_until:
-            room_log("LLM_SUPPRESSED", deterministic=state.deterministic_replied, until=state.suppress_llm_until)
+        if time.time() < state.suppress_llm_until:
+            room_log("LLM_SUPPRESSED", until=state.suppress_llm_until)
             return False
         from livekit.agents.pipeline.pipeline_agent import _default_before_llm_cb
         return _default_before_llm_cb(agent_instance, chat_ctx)
@@ -700,16 +901,11 @@ async def entrypoint(ctx: JobContext):
         if not cleaned:
             return
         now_ts = time.time()
-        # Deduplication: prevent duplicate transcripts if events arrive late (SDK latency).
-        # We use a 60s window for normalized text matches to prevent double greetings.
-        norm_cleaned = re.sub(r"\W+", "", cleaned).lower()
-        last_norm = re.sub(r"\W+", "", state.last_agent_transcript_text or "").lower()
-        if norm_cleaned == last_norm and (now_ts - state.last_agent_transcript_at) < 60.0:
+        if cleaned == state.last_agent_transcript_text and (now_ts - state.last_agent_transcript_at) < 2.5:
             room_log("AGENT_TEXT_DEDUPED", text=cleaned)
             return
         state.last_agent_transcript_text = cleaned
         state.last_agent_transcript_at = now_ts
-        state.last_agent_activity = now_ts # Sync silence monitor
         conversation_transcript.append(f"Agent: {cleaned}")
         await _publish_transcript(ctx, "agent", cleaned)
         if call_id:
@@ -789,8 +985,8 @@ async def entrypoint(ctx: JobContext):
     @agent.on("agent_speech_interrupted")
     def _on_agent_speech_interrupted(msg):
         # Fallback: when user barges in before commit, capture whatever text exists.
-        text = (msg.content if hasattr(msg, "content") else None) or ""
-        if text and len(text) > 5: # Only capture meaningful interruptions
+        text = msg.content if hasattr(msg, "content") else None
+        if text:
             room_log("AGENT_TEXT_INTERRUPTED_CAPTURE", text=_truncate(text))
             asyncio.create_task(send_agent_transcript(text))
 
@@ -798,7 +994,6 @@ async def entrypoint(ctx: JobContext):
     def _on_user_started_speaking():
         cancel_thinking_task()
         state.waiting_for_user = False
-        state.deterministic_replied = False # Reset for new turn
         asyncio.create_task(set_ui_state("listening"))
 
     @agent.on("user_stopped_speaking")
@@ -813,42 +1008,259 @@ async def entrypoint(ctx: JobContext):
 
         state.last_user_activity = time.time()
         state.silence_prompt_count = 0
-        state.deterministic_replied = False # Reset for this turn
         asyncio.create_task(send_user_transcript(user_text))
-        
-        async def _route_flows():
-            flow_ctx = base.FlowContext(
-                state=state,
-                agent=agent,
-                suppress_llm=suppress_llm,
-                snooze_silence=snooze_silence,
-                set_ui_state=set_ui_state,
-                room_log=room_log,
-                should_suppress_clarification=_should_suppress_clarification,
-                cancel_thinking_task=cancel_thinking_task,
-                send_transcript=send_agent_transcript,
-                lang="en"
-            )
-            
-            # 1) Termination (Repetition)
-            if await termination.handle(flow_ctx, user_text): return
-            
-            # 2) Farewell
-            if await farewell.handle(flow_ctx, user_text): return
-            
-            # 3) Support Ticket Flow
-            if await ticket_flow.handle(flow_ctx, user_text): return
-            
-            # 4) Order Flow (includes transitioning to phone)
-            if await order_flow.handle(flow_ctx, user_text): return
-            
-            # 5) Phone Flow
-            if await phone_flow.handle(flow_ctx, user_text): return
-            
-            # If no flow handled it, let the LLM take over
-            room_log("FLOW_FALLTHROUGH", text=user_text)
 
-        asyncio.create_task(_route_flows())
+        # 0) Farewell detection — must run BEFORE any support-state branches so that
+        #    "No. Thank you. Goodbye." while in awaiting_order/awaiting_phone still
+        #    triggers call teardown instead of falling into the order/phone handlers.
+        _t = user_text.lower().strip()
+        _farewell_intent = bool(re.search(
+            r"\b(bye|by\b|goodbye|good bye|good night|see you|take care|"
+            r"thanks? bye|that.?s all|no thank|nothing else|"
+            r"i.?m done|all good|that will be all|have a good|have a great|"
+            r"no more|no further|no other)\b",
+            _t
+        ))
+        # Composite: short sentences that combine "thank you" with a clear close signal
+        # e.g. "No. Thank you." / "Okay, thank you." / "Thank you. Bye."
+        if not _farewell_intent:
+            _has_thanks = bool(re.search(r"\bthank", _t))
+            _has_close = bool(re.search(r"\b(no|okay|ok|alright|all right|done|that.?s it|enough)\b", _t))
+            _is_short = len(_t.split()) <= 10
+            if _has_thanks and _has_close and _is_short:
+                _farewell_intent = True
+        # Shield: do not treat digit-heavy strings (order/phone numbers) as farewells.
+        if _farewell_intent and len(re.findall(r"\d", user_text)) >= 3:
+            _farewell_intent = False
+            room_log("FAREWELL_SHIELDED", text=user_text)
+
+        if _farewell_intent:
+            room_log("FAREWELL_DETECTED", text=user_text)
+            state.silence_enabled = False
+            # Suppress LLM and speak a deterministic goodbye so the silence-monitor
+            # order-number prompt can never sneak in between now and teardown.
+            suppress_llm(15.0)
+            goodbye_msg = get_closing("en")
+            asyncio.create_task(agent.say(goodbye_msg, allow_interruptions=True))
+            async def _delayed_end_farewell():
+                await asyncio.sleep(2.0)
+                state.should_end = True
+                state.disconnect_reason = "farewell"
+            asyncio.create_task(_delayed_end_farewell())
+            return
+
+        # 1) If lookup is in progress, keep caller informed and do not branch.
+        if state.lookup_inflight:
+            asyncio.create_task(set_ui_state("thinking"))
+            snooze_silence(8.0)
+            asyncio.create_task(agent.say("I am still checking that now. One moment please.", allow_interruptions=True))
+            return
+
+        if state.ticket_inflight:
+            asyncio.create_task(set_ui_state("thinking"))
+            snooze_silence(8.0)
+            asyncio.create_task(agent.say("I am creating your support ticket now. One moment please.", allow_interruptions=True))
+            return
+
+        # 1.5) Ticket-creation escape — checked before any order/phone state branches so
+        #      the user can always pivot to ticket creation even if stuck in awaiting_phone.
+        _ticket_escape = bool(re.search(
+            r"\b(human|representative|call me|callback|support ticket|open ticket|create ticket)\b",
+            user_text.lower()
+        ))
+        _in_ticket_flow = state.support_state in {
+            "ticket_name", "ticket_phone", "ticket_email",
+            "ticket_issue", "ticket_confirm", "creating_ticket"
+        }
+        if _ticket_escape and not _in_ticket_flow:
+            room_log("FLOW_TRANSITION", from_state=state.support_state, to_state="ticket_name", reason="ticket_escape")
+            state.support_state = "ticket_name"
+            suppress_llm(15.0)
+            asyncio.create_task(agent.say(
+                "I can help you with that. First, could you please tell me your full name?",
+                allow_interruptions=True
+            ))
+            return
+
+        if state.support_state in {"awaiting_order", "checking_order"}:
+            # If user indicates phone lookup path, move flow to phone collection.
+            if _mentions_no_order_number(user_text) or _mentions_phone_lookup_intent(user_text):
+                state.support_state = "awaiting_phone"
+                room_log("FLOW_TRANSITION", from_state="awaiting_order", to_state="awaiting_phone", reason="no_order_or_phone_intent")
+                # Let the LLM handle the transition sentence.
+                return
+
+            # If user already gave a full phone-like number, use phone lookup directly.
+            phone_candidate = _normalize_phone_for_lookup(user_text)
+            if phone_candidate:
+                state.support_state = "awaiting_phone"
+                suppress_llm(15.0)
+                asyncio.create_task(set_ui_state("thinking"))
+                snooze_silence(15.0)
+                asyncio.create_task(_run_phone_lookup(agent, phone_candidate))
+                return
+
+            order_id = _normalize_order_id_strict(user_text)
+            if order_id:
+                suppress_llm(15.0)
+                asyncio.create_task(set_ui_state("thinking"))
+                snooze_silence(15.0)
+                asyncio.create_task(_run_order_lookup(agent, order_id))
+                return
+
+            # If the user is actually talking about the order but didn't give a valid ID, 
+            # give a deterministic hint. Otherwise, let the LLM handle the turn.
+            if _is_order_relevant(user_text):
+                prompt = "Whenever you are ready, please share your order number. If you do not have it, say that and I will check by phone number."
+                if not _should_suppress_clarification(prompt):
+                    suppress_llm()
+                    asyncio.create_task(agent.say(prompt, allow_interruptions=True))
+                return
+
+            # Let the LLM handle potential diversions (time, recipes, etc.)
+            return
+
+        # 3) Active phone-support flow
+        if state.support_state in {"awaiting_phone", "checking_phone"}:
+            if _mentions_phone_lookup_intent(user_text):
+                prompt = "Sure. Please provide the full phone number used for the order."
+                if not _should_suppress_clarification(prompt):
+                    suppress_llm()
+                    asyncio.create_task(agent.say(prompt, allow_interruptions=True))
+                return
+            phone = _normalize_phone_for_lookup(user_text)
+            if phone:
+                suppress_llm(15.0)
+                asyncio.create_task(set_ui_state("thinking"))
+                snooze_silence(15.0)
+                asyncio.create_task(_run_phone_lookup(agent, phone))
+                return
+            # Escape: user may give an order ID instead of a phone number.
+            order_id_escape = _normalize_order_id_strict(user_text)
+            if order_id_escape:
+                room_log("FLOW_TRANSITION", from_state="awaiting_phone", to_state="awaiting_order", reason="order_id_given_in_phone_flow")
+                state.support_state = "awaiting_order"
+                suppress_llm(15.0)
+                asyncio.create_task(set_ui_state("thinking"))
+                snooze_silence(15.0)
+                asyncio.create_task(_run_order_lookup(agent, order_id_escape))
+                return
+
+            # Only clarify if the user is actually trying to give a phone or talking about the order.
+            if _is_order_relevant(user_text):
+                prompt = "I need the full phone number to check the order. Please share it once."
+                if not _should_suppress_clarification(prompt):
+                    suppress_llm()
+                    asyncio.create_task(agent.say(prompt, allow_interruptions=True))
+                return
+
+            # Fall through to LLM for diversions.
+            return
+
+        # 3b) Support ticket flow
+        if state.support_state == "ticket_name":
+            state.ticket_name = user_text
+            state.support_state = "ticket_phone"
+            suppress_llm()
+            asyncio.create_task(agent.say("Thanks. Please share your phone number.", allow_interruptions=True))
+            return
+
+        if state.support_state == "ticket_phone":
+            ticket_phone = _normalize_phone_for_lookup(user_text)
+            if not ticket_phone:
+                prompt = "Please share a valid phone number."
+                if not _should_suppress_clarification(prompt):
+                    suppress_llm()
+                    asyncio.create_task(agent.say(prompt, allow_interruptions=True))
+                return
+            state.ticket_phone = ticket_phone
+            state.support_state = "ticket_email"
+            suppress_llm()
+            asyncio.create_task(agent.say("Got it. Now please share your email address.", allow_interruptions=True))
+            return
+
+        if state.support_state == "ticket_email":
+            if not _looks_like_email(user_text):
+                suppress_llm()
+                asyncio.create_task(agent.say("Please share a valid email address.", allow_interruptions=True))
+                return
+            state.ticket_email = user_text.strip()
+            state.support_state = "ticket_issue"
+            suppress_llm()
+            asyncio.create_task(agent.say("Please describe the issue in one or two sentences.", allow_interruptions=True))
+            return
+
+
+
+        if state.support_state == "ticket_issue":
+            state.ticket_issue = user_text
+            state.support_state = "ticket_confirm"
+            confirm_text = (
+                f"I have your details as name {state.ticket_name}, phone {state.ticket_phone}, and email {state.ticket_email}. "
+                "Should I create the support ticket now?"
+            )
+            suppress_llm()
+            asyncio.create_task(agent.say(confirm_text, allow_interruptions=True))
+            return
+
+        if state.support_state == "ticket_confirm":
+            if _is_yes(user_text):
+                suppress_llm()
+                asyncio.create_task(set_ui_state("thinking"))
+                snooze_silence(10.0)
+                asyncio.create_task(agent.say("Thanks. Creating your support ticket now.", allow_interruptions=True))
+                asyncio.create_task(_run_create_ticket(agent))
+                return
+            if _is_no(user_text):
+                state.support_state = "idle"
+                state.ticket_name = ""
+                state.ticket_phone = ""
+                state.ticket_email = ""
+                state.ticket_issue = ""
+                suppress_llm()
+                asyncio.create_task(agent.say("No problem. I have cancelled the ticket request.", allow_interruptions=True))
+                return
+            suppress_llm()
+            asyncio.create_task(agent.say("Please say yes to create the ticket, or no to cancel.", allow_interruptions=True))
+            return
+
+        # 3c) Memory is handled through system prompt context (single-response path).
+ 
+        # 4) Detect support intent from any general turn.
+        support_intent = bool(re.search(r"(problem|issue|complaint|order problem|wrong order|late order|my order)", user_text.lower()))
+        if support_intent:
+            state.support_state = "awaiting_order"
+            room_log("FLOW_TRANSITION", from_state="idle", to_state="awaiting_order", reason="support_intent")
+            
+            # Check if an Order ID or Phone was already provided in this same sentence.
+            order_id = _normalize_order_id_strict(user_text)
+            if order_id:
+                suppress_llm(15.0)
+                asyncio.create_task(set_ui_state("thinking"))
+                snooze_silence(15.0)
+                asyncio.create_task(_run_order_lookup(agent, order_id))
+                return
+            
+            phone = _normalize_phone_for_lookup(user_text)
+            if phone:
+                state.support_state = "awaiting_phone"
+                suppress_llm(15.0)
+                asyncio.create_task(set_ui_state("thinking"))
+                snooze_silence(15.0)
+                asyncio.create_task(_run_phone_lookup(agent, phone))
+                return
+            return
+ 
+        ticket_intent = bool(re.search(r"(human|representative|call me|callback|support ticket|open ticket|create ticket)", user_text.lower()))
+        if ticket_intent:
+            state.support_state = "ticket_name"
+            suppress_llm(15.0)
+            asyncio.create_task(agent.say("I can help you with that. First, could you please tell me your full name?", allow_interruptions=True))
+            return
+ 
+        # 5) Farewell intent is now handled at the top of this handler (step 0).
+        #    This block is intentionally left as a no-op to preserve the original
+        #    step numbering for readability.
 
     # Participant disconnect
     @ctx.room.on("participant_disconnected")
@@ -859,19 +1271,6 @@ async def entrypoint(ctx: JobContext):
 
     # Start agent
     agent.start(ctx.room, participant)
-    
-    # 6) Greeting
-    greeting_ctx = base.FlowContext(
-        state=state, agent=agent, suppress_llm=suppress_llm, snooze_silence=snooze_silence,
-        set_ui_state=set_ui_state, room_log=room_log, should_suppress_clarification=_should_suppress_clarification,
-        cancel_thinking_task=cancel_thinking_task,
-        send_transcript=send_agent_transcript,
-        lang="en"
-    )
-    if not getattr(state, "greeting_sent", False):
-        state.greeting_sent = True
-        # Await the greeting so it finishes before any other tasks start.
-        await greeting_flow.handle(greeting_ctx)
 
     # Stream interim user transcripts so user text appears in real time on frontend.
     human_input = getattr(agent, "human_input", None) or getattr(agent, "_human_input", None)
@@ -883,10 +1282,18 @@ async def entrypoint(ctx: JobContext):
                 # ev is a SpeechEvent; extract text from the first alternative
                 text = ev.alternatives[0].text if ev.alternatives else None
             except Exception:
-                return
+                text = None
+                
             if text:
+                cancel_thinking_task()
                 asyncio.create_task(send_user_transcript(text, interim=True))
 
+    # Greet
+    greeting_enabled = _as_bool(get_agent_setting("agent_greeting_enabled", True), default=True)
+    if greeting_enabled:
+        greeting = get_greeting("en")
+        chat_ctx.append(role="assistant", text=greeting)
+        await agent.say(greeting, allow_interruptions=True)
     await set_ui_state("idle")
 
     # Start background audio after greeting so first response is not delayed.
@@ -916,18 +1323,69 @@ async def entrypoint(ctx: JobContext):
     # Prefetch orders in background
     asyncio.create_task(order_lookup.prefetch_orders())
 
+    def _contextual_silence_prompt() -> str:
+        phase = state.silence_prompt_count
+        support_state = state.support_state
+
+        if support_state in {"awaiting_order", "checking_order"}:
+            if phase == 0:
+                return "Whenever you are ready, please share your order number. If you do not have it, say that and I will check by phone number."
+            return "I am still here. Please share your order number, or say you do not have it so I can check by phone."
+
+        if support_state in {"awaiting_phone", "checking_phone"}:
+            if phase == 0:
+                return "Please share the phone number used for the order when you are ready."
+            return "I am ready whenever you are. Please repeat the full phone number."
+
+        if support_state == "ticket_name":
+            return "Whenever you are ready, please tell me your full name so I can create the support ticket."
+        if support_state == "ticket_phone":
+            return "Please share your phone number when you are ready."
+        if support_state == "ticket_email":
+            return "Please share your email address when you are ready."
+        if support_state == "ticket_issue":
+            return "Please describe the issue in one or two sentences when you are ready."
+        if support_state == "ticket_confirm":
+            return "Please say yes to create the ticket, or no to cancel."
+
+        if state.last_issue:
+            if phase == 0:
+                return "I am still here to help with your issue. Please continue whenever you are ready."
+            return "No rush. I can continue helping with your issue whenever you are ready."
+
+        if phase == 0:
+            return "I am here whenever you are ready."
+        if phase == 1:
+            return "Take your time. I am still here."
+        return "I can continue whenever you are ready."
+
+    # Simple silence monitor
     async def _silence_monitor():
-        monitor_ctx = base.FlowContext(
-            state=state, agent=agent, suppress_llm=suppress_llm, snooze_silence=snooze_silence,
-            set_ui_state=set_ui_state, room_log=room_log, should_suppress_clarification=_should_suppress_clarification,
-            cancel_thinking_task=cancel_thinking_task,
-            send_transcript=send_agent_transcript,
-            lang="en"
-        )
         while not state.should_end:
             await asyncio.sleep(1.0)
-            if await silence_flow.monitor_iteration(monitor_ctx):
+            if not state.silence_enabled or not state.waiting_for_user or state.lookup_inflight:
+                continue
+            now = time.time()
+            if now < state.silence_snooze_until:
+                continue
+            if (now - state.last_user_activity) < state.silence_timeout_s:
+                continue
+            if (now - state.last_agent_activity) < state.silence_timeout_s:
+                continue
+
+            if state.silence_prompt_count >= state.silence_max_prompts:
+                # Disconnect after too much silence to free up resources.
+                room_log("SILENCE_TERMINATION", count=state.silence_prompt_count)
+                state.should_end = True
+                state.disconnect_reason = "silence_termination"
                 break
+
+            text = _contextual_silence_prompt()
+            state.silence_prompt_count += 1
+            # Snooze for 15s to allow the agent to finish speaking and the user to react.
+            state.silence_snooze_until = time.time() + 15.0
+            room_log("SILENCE_PROMPT", count=state.silence_prompt_count, text=text)
+            await agent.say(text, allow_interruptions=True)
 
     silence_task = asyncio.create_task(_silence_monitor())
 
@@ -936,7 +1394,7 @@ async def entrypoint(ctx: JobContext):
         await asyncio.sleep(0.5)
 
     # Short delay to allow the last spoken sentence (e.g., closing message) to reach the user.
-    await asyncio.sleep(6.0)
+    await asyncio.sleep(3.0)
 
     # Cleanup and call end
     silence_task.cancel()
