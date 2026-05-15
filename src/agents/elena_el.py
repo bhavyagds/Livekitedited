@@ -423,47 +423,10 @@ async def entrypoint(ctx: JobContext):
     configured_endpointing_delay = _as_float(get_agent_setting("min_endpointing_delay", 1.2), 1.2)
     effective_endpointing_delay = max(4.0, configured_endpointing_delay)
 
-    async def _process_deterministic_flows(text: str) -> bool:
-        """Evaluate deterministic flows and return True if one handled the response."""
-        flow_ctx = base.FlowContext(
-            state=state,
-            agent=agent,
-            suppress_llm=suppress_llm,
-            snooze_silence=snooze_silence,
-            set_ui_state=set_ui_state,
-            room_log=room_log,
-            should_suppress_clarification=_should_suppress_clarification,
-            cancel_thinking_task=cancel_thinking_task,
-            send_transcript=send_agent_transcript,
-            lang="el"
-        )
-        
-        # Priority order for Greek flows
-        if await termination.handle(flow_ctx, text): return True
-        if await farewell.handle(flow_ctx, text): return True
-        if await ticket_flow.handle(flow_ctx, text): return True
-        if await order_flow.handle(flow_ctx, text): return True
-        if await phone_flow.handle(flow_ctx, text): return True
-        
-        return False
-
-    async def _before_llm_cb(agent_instance, chat_ctx):
-        """Gate the LLM. First check deterministic flows, then state-based suppression."""
-        user_text = ""
-        if chat_ctx.messages and chat_ctx.messages[-1].role == "user":
-            user_text = chat_ctx.messages[-1].content or ""
-
-        # 1) Try deterministic flows first
-        if user_text:
-            if await _process_deterministic_flows(user_text):
-                room_log("LLM_SUPPRESSED", reason="flow_handled")
-                return False
-
-        # 2) Check time-based suppression or explicit flags
+    def _before_llm_cb(agent_instance, chat_ctx):
         if state.deterministic_replied or time.time() < state.suppress_llm_until:
             room_log("LLM_SUPPRESSED", deterministic=state.deterministic_replied, until=state.suppress_llm_until)
             return False
-            
         from livekit.agents.pipeline.pipeline_agent import _default_before_llm_cb
         return _default_before_llm_cb(agent_instance, chat_ctx)
 
@@ -484,9 +447,7 @@ async def entrypoint(ctx: JobContext):
 
     async def send_agent_transcript(text: str):
         cleaned = (text or "").strip()
-        # Filter out empty or placeholder transcripts (like '---')
-        if not cleaned or cleaned in {"---", "--", ".", ".."}:
-            return
+        if not cleaned: return
         now_ts = time.time()
         # Deduplication: prevent duplicate transcripts if events arrive late (SDK latency).
         # We use a 60s window for normalized text matches to prevent double greetings.
@@ -571,8 +532,20 @@ async def entrypoint(ctx: JobContext):
         state.deterministic_replied = False
         asyncio.create_task(send_user_transcript(user_text))
         
-        # Note: We no longer trigger _route_flows here.
-        # It is now handled within _before_llm_cb.
+        async def _route_flows():
+            flow_ctx = base.FlowContext(
+                state=state, agent=agent, suppress_llm=suppress_llm, snooze_silence=snooze_silence,
+                set_ui_state=set_ui_state, room_log=room_log, should_suppress_clarification=_should_suppress_clarification,
+                cancel_thinking_task=cancel_thinking_task, send_transcript=send_agent_transcript, lang="el"
+            )
+            if await termination.handle(flow_ctx, user_text): return
+            if await farewell.handle(flow_ctx, user_text): return
+            if await ticket_flow.handle(flow_ctx, user_text): return
+            if await order_flow.handle(flow_ctx, user_text): return
+            if await phone_flow.handle(flow_ctx, user_text): return
+            room_log("FLOW_FALLTHROUGH", text=user_text)
+
+        asyncio.create_task(_route_flows())
 
     agent.start(ctx.room, participant)
     
