@@ -870,6 +870,15 @@ async def entrypoint(ctx: JobContext):
     )
     if not getattr(state, "greeting_sent", False):
         state.greeting_sent = True
+        
+        # Wait for the remote participant to be fully joined and data channel to settle.
+        # This prevents the greeting from being lost if sent too fast.
+        for _ in range(10):
+            if ctx.room.remote_participants:
+                break
+            await asyncio.sleep(0.5)
+        await asyncio.sleep(1.5) # Buffer for data channel initialization
+        
         # Await the greeting so it finishes before any other tasks start.
         await greeting_flow.handle(greeting_ctx)
 

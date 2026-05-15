@@ -556,6 +556,14 @@ async def entrypoint(ctx: JobContext):
     )
     if not getattr(state, "greeting_sent", False):
         state.greeting_sent = True
+        
+        # Wait for the remote participant and data channel to settle
+        for _ in range(10):
+            if ctx.room.remote_participants:
+                break
+            await asyncio.sleep(0.5)
+        await asyncio.sleep(1.5)
+        
         await greeting_flow.handle(greeting_ctx)
 
     async def _silence_monitor():
