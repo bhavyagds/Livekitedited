@@ -108,7 +108,7 @@ services:
     networks:
       - meallion-network
     healthcheck:
-      test: ["CMD-SHELL", "grep -qa 'src.agents.elena' /proc/1/cmdline || exit 1"]
+      test: ["CMD-SHELL", "grep -qa 'src.agents.patch1' /proc/1/cmdline || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
