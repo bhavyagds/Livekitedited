@@ -62,7 +62,8 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: meallion-agent
-    command: ["python", "-m", "src.agents.elena", "start"]
+    #command: ["python", "-m", "src.agents.elena", "start"] # -orginal elena agent
+    command: ["python", "-m", "src.agents.patch1", "start"]
     # Limit CPU to prevent crash loop from consuming all resources
     deploy:
       resources:
