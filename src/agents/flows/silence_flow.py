@@ -29,7 +29,14 @@ async def monitor_iteration(ctx: FlowContext) -> bool:
     """One iteration of the silence monitor. Returns True if should break/stop."""
     state = ctx.state
     
-    if not state.silence_enabled or not state.waiting_for_user or state.lookup_inflight:
+    # Never fire during active lookups or when waiting is not expected
+    if not state.silence_enabled or not state.waiting_for_user:
+        return False
+    if state.lookup_inflight:
+        return False
+    # Also block when in any active checking state (covers race where inflight flag
+    # resets but the user hasn't had a chance to hear the result yet)
+    if state.support_state in {"checking_order", "checking_phone"}:
         return False
         
     now = time.time()
