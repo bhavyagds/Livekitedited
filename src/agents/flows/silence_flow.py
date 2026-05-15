@@ -48,7 +48,19 @@ async def monitor_iteration(ctx: FlowContext) -> bool:
                 message = "Δεν σας ακούω. Θα κλείσω την κλήση τώρα. Γεια σας!"
                 
             await ctx.say(message, allow_interruptions=True)
-            await asyncio.sleep(5.0) # Wait for audio to reach user
+            
+            # Final safety check: Wait 5 seconds for the message to be heard,
+            # but abort if the user starts speaking (interrupts) or we enter a thinking state.
+            start_wait = time.time()
+            while time.time() - start_wait < 5.0:
+                await asyncio.sleep(0.5)
+                if not state.waiting_for_user or state.ui_state in {"listening", "thinking"}:
+                    ctx.room_log("SILENCE_TERMINATION_ABORTED", reason="user_interrupted")
+                    state.silence_enabled = True
+                    state.silence_prompt_count = 0
+                    state.should_end = False
+                    return False
+
             state.should_end = True
             state.disconnect_reason = "silence_termination"
             return True

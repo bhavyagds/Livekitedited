@@ -132,11 +132,6 @@ async def handle(ctx: FlowContext, user_text: str) -> bool:
         asyncio.create_task(_run_order_lookup(ctx, order_id))
         return ctx.handled()
 
-    if _is_order_relevant(user_text):
-        prompt = "Whenever you are ready, please share your order number. If you do not have it, say that and I will check by phone number."
-        if not ctx.should_suppress_clarification(prompt, 5.0):
-            ctx.suppress_llm(10.0)
-            asyncio.create_task(ctx.say(prompt, allow_interruptions=True))
-        return ctx.handled()
-
+    # Remove deterministic clarification to avoid double-response with LLM.
+    # LLM will naturally ask for the order number if it sees the support intent.
     return False

@@ -248,6 +248,27 @@ async def save_transcript_to_db(call_id: str, text: str, speaker: str = "agent",
         return False
 
 
+async def _publish_state(ctx: JobContext, state_name: str):
+    """Publish UI state (idle/listening/thinking/speaking) to the frontend via LiveKit data channel."""
+    try:
+        payload = json.dumps({"type": "state", "state": state_name}, ensure_ascii=False)
+        await ctx.room.local_participant.publish_data(payload.encode("utf-8"), reliable=True)
+    except Exception:
+        pass
+
+
+async def _publish_transcript(ctx: JobContext, speaker: str, text: str):
+    """Publish a finalised transcript line (agent or user) to the frontend via LiveKit data channel."""
+    try:
+        payload = json.dumps(
+            {"type": "transcript", "speaker": speaker, "text": text, "interim": False},
+            ensure_ascii=False,
+        )
+        await ctx.room.local_participant.publish_data(payload.encode("utf-8"), reliable=True)
+    except Exception:
+        pass
+
+
 # -----------------------------------------------------------------------------
 # Tools
 # -----------------------------------------------------------------------------
@@ -524,8 +545,8 @@ async def entrypoint(ctx: JobContext):
     cache_task = asyncio.create_task(_fetch_from_db())
 
     state = SessionState(
-        silence_timeout_s=_as_float(get_agent_setting("silence_timeout_seconds", 5.0), 5.0, min_value=1.0, max_value=60.0),
-        silence_max_prompts=_as_int(get_agent_setting("silence_max_prompts", 0), 0, min_value=0, max_value=5),
+        silence_timeout_s=_as_float(get_agent_setting("silence_timeout_seconds", 12.0), 12.0, min_value=1.0, max_value=60.0),
+        silence_max_prompts=_as_int(get_agent_setting("silence_max_prompts", 2), 2, min_value=0, max_value=5),
         last_user_activity=time.time(),
         last_agent_activity=time.time(),
     )
@@ -679,11 +700,16 @@ async def entrypoint(ctx: JobContext):
         if not cleaned:
             return
         now_ts = time.time()
-        if cleaned == state.last_agent_transcript_text and (now_ts - state.last_agent_transcript_at) < 2.5:
+        # Deduplication: prevent duplicate transcripts if events arrive late (SDK latency).
+        # We use a 60s window for normalized text matches to prevent double greetings.
+        norm_cleaned = re.sub(r"\W+", "", cleaned).lower()
+        last_norm = re.sub(r"\W+", "", state.last_agent_transcript_text or "").lower()
+        if norm_cleaned == last_norm and (now_ts - state.last_agent_transcript_at) < 60.0:
             room_log("AGENT_TEXT_DEDUPED", text=cleaned)
             return
         state.last_agent_transcript_text = cleaned
         state.last_agent_transcript_at = now_ts
+        state.last_agent_activity = now_ts # Sync silence monitor
         conversation_transcript.append(f"Agent: {cleaned}")
         await _publish_transcript(ctx, "agent", cleaned)
         if call_id:
@@ -763,8 +789,8 @@ async def entrypoint(ctx: JobContext):
     @agent.on("agent_speech_interrupted")
     def _on_agent_speech_interrupted(msg):
         # Fallback: when user barges in before commit, capture whatever text exists.
-        text = msg.content if hasattr(msg, "content") else None
-        if text:
+        text = (msg.content if hasattr(msg, "content") else None) or ""
+        if text and len(text) > 5: # Only capture meaningful interruptions
             room_log("AGENT_TEXT_INTERRUPTED_CAPTURE", text=_truncate(text))
             asyncio.create_task(send_agent_transcript(text))
 
@@ -772,6 +798,7 @@ async def entrypoint(ctx: JobContext):
     def _on_user_started_speaking():
         cancel_thinking_task()
         state.waiting_for_user = False
+        state.deterministic_replied = False # Reset for new turn
         asyncio.create_task(set_ui_state("listening"))
 
     @agent.on("user_stopped_speaking")
@@ -841,7 +868,10 @@ async def entrypoint(ctx: JobContext):
         send_transcript=send_agent_transcript,
         lang="en"
     )
-    asyncio.create_task(greeting_flow.handle(greeting_ctx))
+    if not getattr(state, "greeting_sent", False):
+        state.greeting_sent = True
+        # Await the greeting so it finishes before any other tasks start.
+        await greeting_flow.handle(greeting_ctx)
 
     # Stream interim user transcripts so user text appears in real time on frontend.
     human_input = getattr(agent, "human_input", None) or getattr(agent, "_human_input", None)

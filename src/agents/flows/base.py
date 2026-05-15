@@ -25,8 +25,8 @@ class FlowContext:
         return True
 
     async def say(self, text: str, allow_interruptions: bool = True):
-        """Helper to speak and send transcript simultaneously."""
-        # 1) Speak
-        await self.agent.say(text, allow_interruptions=allow_interruptions)
-        # 2) Send Transcript (so it appears on frontend)
+        """Helper to speak and send transcript simultaneously (transcript first)."""
+        # 1) Send Transcript (so it appears on frontend immediately)
         await self.send_transcript(text)
+        # 2) Speak
+        await self.agent.say(text, allow_interruptions=allow_interruptions)
