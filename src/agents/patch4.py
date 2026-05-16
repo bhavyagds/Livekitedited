@@ -1065,10 +1065,38 @@ async def entrypoint(ctx: JobContext):
         all_digits = "".join(_extract_digit_parts(user_text))
         room_log("USER_TURN_DEBUG", state=state.support_state, text=user_text, extracted_digits=all_digits)
 
-        # PATCH 4: Detect incomplete numbers (7-9 digits)
-        if 7 <= len(all_digits) <= 9 and state.support_state == "awaiting_phone":
+        # ---------------------------------------------------------------------
+        # GLOBAL DIGIT DETECTION (State-Agnostic)
+        # ---------------------------------------------------------------------
+        # If the user provides a clear phone number or order ID, act immediately 
+        # regardless of current state.
+        
+        # 1) Check for 10-digit Phone Number
+        phone_candidate = _normalize_phone_for_lookup(user_text)
+        if phone_candidate:
+            room_log("GLOBAL_PHONE_MATCH", phone=phone_candidate)
+            agent.interrupt()
+            suppress_llm(15.0)
+            asyncio.create_task(set_ui_state("thinking"))
+            snooze_silence(20.0)
+            asyncio.create_task(_run_phone_lookup(agent, phone_candidate))
+            return
+
+        # 2) Check for 5-6 digit Order ID
+        order_id_candidate = _normalize_order_id_strict(user_text)
+        if order_id_candidate:
+            room_log("GLOBAL_ORDER_MATCH", order_id=order_id_candidate)
+            agent.interrupt()
+            suppress_llm(15.0)
+            asyncio.create_task(set_ui_state("thinking"))
+            snooze_silence(20.0)
+            asyncio.create_task(_run_order_lookup(agent, order_id_candidate))
+            return
+
+        # 3) Detect incomplete numbers (7-9 digits)
+        if 7 <= len(all_digits) <= 9 and state.support_state in {"awaiting_phone", "idle"}:
             room_log("INCOMPLETE_PHONE_DETECTED", digits=len(all_digits))
-            agent.interrupt() # PATCH 4: Kill pending LLM
+            agent.interrupt()
             suppress_llm(10.0)
             snooze_silence(20.0)
             asyncio.create_task(agent.say(
@@ -1142,28 +1170,7 @@ async def entrypoint(ctx: JobContext):
             return
 
         if state.support_state in {"awaiting_order", "checking_order"}:
-            # PATCH 3: Check for PHONE number first, as it's more specific (10+ digits).
-            # This prevents phone numbers from being misidentified as order IDs.
-            phone_candidate = _normalize_phone_for_lookup(user_text)
-            if phone_candidate:
-                agent.interrupt() # PATCH 4: Kill pending LLM
-                state.support_state = "awaiting_phone"
-                suppress_llm(15.0)
-                asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(20.0) # Longer snooze for lookups
-                asyncio.create_task(_run_phone_lookup(agent, phone_candidate))
-                return
-
-            # Then check for Order ID.
-            order_id = _normalize_order_id_strict(user_text)
-            if order_id:
-                agent.interrupt() # PATCH 4: Kill pending LLM
-                suppress_llm(15.0)
-                asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(20.0)
-                asyncio.create_task(_run_order_lookup(agent, order_id))
-                return
-
+            
             # If user indicates phone lookup path, move flow to phone collection.
             if _mentions_no_order_number(user_text) or _mentions_phone_lookup_intent(user_text):
                 state.support_state = "awaiting_phone"
@@ -1179,29 +1186,10 @@ async def entrypoint(ctx: JobContext):
             return
 
         # 3) Active phone-support flow
-        if state.support_state in {"awaiting_phone", "checking_phone"} or len(all_digits) >= 10:
-            # Check for Order ID first as an escape path, even in phone flow.
-            order_id_escape = _normalize_order_id_strict(user_text)
-            if order_id_escape:
-                room_log("ORDER_ESCAPE_MATCH", order_id=order_id_escape)
-                agent.interrupt()
-                state.support_state = "awaiting_order"
-                suppress_llm(15.0)
-                asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(20.0)
-                asyncio.create_task(_run_order_lookup(agent, order_id_escape))
-                return
-
-            # Then check for phone number digits.
-            phone = _normalize_phone_for_lookup(user_text)
-            if phone:
-                room_log("PHONE_MATCH_FOUND", phone=phone, state=state.support_state)
-                agent.interrupt() # PATCH 4: Kill pending LLM
-                suppress_llm(15.0)
-                asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(20.0)
-                asyncio.create_task(_run_phone_lookup(agent, phone))
-                return
+        if state.support_state in {"awaiting_phone", "checking_phone"}:
+            # (Digits were already checked globally above)
+            
+            # PATCH 4: Detect intent to switch back to order number lookup
 
             # PATCH 4: Detect intent to switch back to order number lookup
             if _mentions_order_lookup_intent(user_text):
@@ -1296,25 +1284,8 @@ async def entrypoint(ctx: JobContext):
             state.support_state = "awaiting_order"
             room_log("FLOW_TRANSITION", from_state="idle", to_state="awaiting_order", reason="support_intent")
             
-            # PATCH 3: Check for PHONE first here too.
-            phone = _normalize_phone_for_lookup(user_text)
-            if phone:
-                agent.interrupt() # PATCH 4: Kill pending LLM
-                state.support_state = "awaiting_phone"
-                suppress_llm(15.0)
-                asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(20.0)
-                asyncio.create_task(_run_phone_lookup(agent, phone))
-                return
-
-            order_id = _normalize_order_id_strict(user_text)
-            if order_id:
-                agent.interrupt() # PATCH 4: Kill pending LLM
-                suppress_llm(15.0)
-                asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(20.0)
-                asyncio.create_task(_run_order_lookup(agent, order_id))
-                return
+            # (Digits were already checked globally above)
+            return
             return
  
         ticket_intent = bool(re.search(r"(human|representative|call me|callback|support ticket|open ticket|create ticket)", user_text.lower()))
