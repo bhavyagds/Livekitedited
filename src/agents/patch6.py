@@ -901,6 +901,15 @@ async def entrypoint(ctx: JobContext):
     if memory_block and "CRITICAL: LONG-TERM MEMORY" not in (system_prompt or ""):
         system_prompt = f"{memory_block}\n\n{system_prompt}"
     has_memory_block = "LONG-TERM MEMORY" in (system_prompt or "")
+    
+    # PATCH 6.1: Forbid fillers that compete with deterministic lookups
+    filler_rule = (
+        "\n\n### CRITICAL: NO FILLERS FOR NUMBERS\n"
+        "NEVER say 'Thanks, got it. Give me a moment...' or similar acknowledgment fillers when the user is providing an order number or phone number. "
+        "The system will handle the lookup automatically. Just stay silent or wait for the lookup result."
+    )
+    system_prompt = f"{system_prompt}{filler_rule}"
+    
     room_log("SYSTEM_PROMPT_READY", length=len(system_prompt or ""), has_memory_block=has_memory_block)
     chat_ctx = llm.ChatContext()
     chat_ctx.append(role="system", text=system_prompt)
