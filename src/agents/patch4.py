@@ -697,10 +697,10 @@ async def _run_order_lookup(agent: VoicePipelineAgent, order_number: str):
     state.support_state = "checking_order"
     room_log("ORDER_LOOKUP_STARTED", order_number=order_number)
     try:
-        result = await order_lookup.lookup_order(order_number)
+        # PATCH 4: Add 10-second timeout to prevent dead states on slow APIs
+        result = await asyncio.wait_for(order_lookup.lookup_order(order_number), timeout=10.0)
         room_log("ORDER_LOOKUP_RESULT", result=_truncate(result))
         
-        # Clean up text to prevent awkward TTS pauses on punctuation/colons/brackets
         from src.utils.voice_formatting import clean_text_for_tts
         cleaned_result = clean_text_for_tts(result, lang="en")
         await agent.say(cleaned_result, allow_interruptions=True)
@@ -708,13 +708,15 @@ async def _run_order_lookup(agent: VoicePipelineAgent, order_number: str):
         state.last_order_number = order_number
         if _is_order_not_found_text(result):
             state.support_state = "awaiting_order"
-            # PATCH 3/4: Snooze silence monitor to allow user to process the "not found" message.
             snooze_silence(20.0)
         else:
             state.support_state = "idle"
+    except asyncio.TimeoutError:
+        room_log("ORDER_LOOKUP_TIMEOUT")
+        await agent.say("I'm sorry, it's taking me a bit longer than usual to find your order. Could you please repeat the order number for me?", allow_interruptions=True)
+        state.support_state = "awaiting_order"
     except Exception as e:
         logger.error("Order lookup error: %s", e)
-        # PATCH 4: Fallback speech to prevent dead states
         await agent.say("I'm sorry, I'm having trouble checking that order number right now. Please try again in a moment.", allow_interruptions=True)
         state.support_state = "awaiting_order"
     finally:
@@ -729,10 +731,10 @@ async def _run_phone_lookup(agent: VoicePipelineAgent, phone_number: str):
     state.support_state = "checking_phone"
     room_log("PHONE_LOOKUP_STARTED", phone=phone_number)
     try:
-        result = await order_lookup.lookup_order_by_phone(phone_number)
+        # PATCH 4: Add 10-second timeout to prevent dead states on slow APIs
+        result = await asyncio.wait_for(order_lookup.lookup_order_by_phone(phone_number), timeout=10.0)
         room_log("PHONE_LOOKUP_RESULT", result=_truncate(result))
         
-        # Clean up text to prevent awkward TTS pauses on punctuation/colons/brackets
         from src.utils.voice_formatting import clean_text_for_tts
         cleaned_result = clean_text_for_tts(result, lang="en")
         await agent.say(cleaned_result, allow_interruptions=True)
@@ -740,13 +742,15 @@ async def _run_phone_lookup(agent: VoicePipelineAgent, phone_number: str):
         state.last_phone_number = phone_number
         if "no order" in (result or "").lower() or "could not" in (result or "").lower():
             state.support_state = "awaiting_phone"
-            # PATCH 3/4: Snooze silence monitor to allow user to process the "not found" message.
             snooze_silence(20.0)
         else:
             state.support_state = "idle"
+    except asyncio.TimeoutError:
+        room_log("PHONE_LOOKUP_TIMEOUT")
+        await agent.say("I'm sorry, I'm having a little trouble looking that up. Could you please share the phone number one more time?", allow_interruptions=True)
+        state.support_state = "awaiting_phone"
     except Exception as e:
         logger.error("Phone lookup error: %s", e)
-        # PATCH 4: Fallback speech to prevent dead states
         await agent.say("I'm sorry, I'm having trouble checking that phone number right now. Please try again in a moment.", allow_interruptions=True)
         state.support_state = "awaiting_phone"
     finally:
@@ -1170,7 +1174,19 @@ async def entrypoint(ctx: JobContext):
 
         # 3) Active phone-support flow
         if state.support_state in {"awaiting_phone", "checking_phone"} or len(all_digits) >= 10:
-            # Prioritize phone number digits over generic intent.
+            # Check for Order ID first as an escape path, even in phone flow.
+            order_id_escape = _normalize_order_id_strict(user_text)
+            if order_id_escape:
+                room_log("ORDER_ESCAPE_MATCH", order_id=order_id_escape)
+                agent.interrupt()
+                state.support_state = "awaiting_order"
+                suppress_llm(15.0)
+                asyncio.create_task(set_ui_state("thinking"))
+                snooze_silence(20.0)
+                asyncio.create_task(_run_order_lookup(agent, order_id_escape))
+                return
+
+            # Then check for phone number digits.
             phone = _normalize_phone_for_lookup(user_text)
             if phone:
                 room_log("PHONE_MATCH_FOUND", phone=phone, state=state.support_state)
@@ -1179,18 +1195,6 @@ async def entrypoint(ctx: JobContext):
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(20.0)
                 asyncio.create_task(_run_phone_lookup(agent, phone))
-                return
-
-            # Escape: user may give an order ID instead of a phone number.
-            order_id_escape = _normalize_order_id_strict(user_text)
-            if order_id_escape:
-                agent.interrupt() # PATCH 4: Kill pending LLM
-                room_log("FLOW_TRANSITION", from_state="awaiting_phone", to_state="awaiting_order", reason="order_id_given_in_phone_flow")
-                state.support_state = "awaiting_order"
-                suppress_llm(15.0)
-                asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(20.0)
-                asyncio.create_task(_run_order_lookup(agent, order_id_escape))
                 return
 
             if _mentions_phone_lookup_intent(user_text):
