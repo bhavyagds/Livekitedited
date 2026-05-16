@@ -1345,6 +1345,13 @@ async def entrypoint(ctx: JobContext):
             if text:
                 cancel_thinking_task()
                 asyncio.create_task(send_user_transcript(text, interim=True))
+                
+                # PATCH 4: Preemptive filler suppression. 
+                # If we see a sequence of 4+ digits in the interim text, 
+                # kill any proactive LLM fillers before they start.
+                if re.search(r"\d{4,}", text):
+                    agent.interrupt()
+                    suppress_llm(3.0)
 
     # Greet
     greeting_enabled = _as_bool(get_agent_setting("agent_greeting_enabled", True), default=True)
