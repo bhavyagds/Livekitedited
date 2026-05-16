@@ -163,6 +163,15 @@ def _clean_transcript_phone(text: str) -> str:
     return cleaned
 
 
+def snooze_silence(seconds: float):
+    """PATCH 4: Globally accessible snooze function."""
+    state = _current.get("state")
+    if state:
+        now_ts = time.time()
+        state.silence_snooze_until = max(state.silence_snooze_until, now_ts + max(0.0, seconds))
+        room_log("SILENCE_SNOOZE", until=state.silence_snooze_until, seconds=seconds)
+
+
 def _mentions_no_order_number(text: str) -> bool:
     t = (text or "").lower()
     return bool(
@@ -816,11 +825,6 @@ async def entrypoint(ctx: JobContext):
 
         thinking_task = asyncio.create_task(_set_thinking())
 
-    def snooze_silence(seconds: float):
-        now_ts = time.time()
-        state.silence_snooze_until = max(state.silence_snooze_until, now_ts + max(0.0, seconds))
-        room_log("SILENCE_SNOOZE", until=state.silence_snooze_until, seconds=seconds)
-
     def _should_suppress_clarification(text: str, min_gap_s: float = 6.0) -> bool:
         now_ts = time.time()
         normalized = " ".join((text or "").strip().lower().split())
@@ -1047,11 +1051,14 @@ async def entrypoint(ctx: JobContext):
         state.silence_prompt_count = 0
         asyncio.create_task(send_user_transcript(user_text))
 
-        # PATCH 4: Detect incomplete numbers (7-9 digits)
+        # PATCH 4: Diagnostic logging
         all_digits = "".join(_extract_digit_parts(user_text))
+        room_log("USER_TURN_DEBUG", state=state.support_state, text=user_text, extracted_digits=all_digits)
+
+        # PATCH 4: Detect incomplete numbers (7-9 digits)
         if 7 <= len(all_digits) <= 9 and state.support_state == "awaiting_phone":
             room_log("INCOMPLETE_PHONE_DETECTED", digits=len(all_digits))
-            agent.interrupt(all_at_once=True) # PATCH 4: Kill pending LLM
+            agent.interrupt() # PATCH 4: Kill pending LLM
             suppress_llm(10.0)
             snooze_silence(20.0)
             asyncio.create_task(agent.say(
@@ -1129,7 +1136,7 @@ async def entrypoint(ctx: JobContext):
             # This prevents phone numbers from being misidentified as order IDs.
             phone_candidate = _normalize_phone_for_lookup(user_text)
             if phone_candidate:
-                agent.interrupt(all_at_once=True) # PATCH 4: Kill pending LLM
+                agent.interrupt() # PATCH 4: Kill pending LLM
                 state.support_state = "awaiting_phone"
                 suppress_llm(15.0)
                 asyncio.create_task(set_ui_state("thinking"))
@@ -1140,7 +1147,7 @@ async def entrypoint(ctx: JobContext):
             # Then check for Order ID.
             order_id = _normalize_order_id_strict(user_text)
             if order_id:
-                agent.interrupt(all_at_once=True) # PATCH 4: Kill pending LLM
+                agent.interrupt() # PATCH 4: Kill pending LLM
                 suppress_llm(15.0)
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(20.0)
@@ -1162,11 +1169,12 @@ async def entrypoint(ctx: JobContext):
             return
 
         # 3) Active phone-support flow
-        if state.support_state in {"awaiting_phone", "checking_phone"}:
+        if state.support_state in {"awaiting_phone", "checking_phone"} or len(all_digits) >= 10:
             # Prioritize phone number digits over generic intent.
             phone = _normalize_phone_for_lookup(user_text)
             if phone:
-                agent.interrupt(all_at_once=True) # PATCH 4: Kill pending LLM
+                room_log("PHONE_MATCH_FOUND", phone=phone, state=state.support_state)
+                agent.interrupt() # PATCH 4: Kill pending LLM
                 suppress_llm(15.0)
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(20.0)
@@ -1176,7 +1184,7 @@ async def entrypoint(ctx: JobContext):
             # Escape: user may give an order ID instead of a phone number.
             order_id_escape = _normalize_order_id_strict(user_text)
             if order_id_escape:
-                agent.interrupt(all_at_once=True) # PATCH 4: Kill pending LLM
+                agent.interrupt() # PATCH 4: Kill pending LLM
                 room_log("FLOW_TRANSITION", from_state="awaiting_phone", to_state="awaiting_order", reason="order_id_given_in_phone_flow")
                 state.support_state = "awaiting_order"
                 suppress_llm(15.0)
@@ -1274,7 +1282,7 @@ async def entrypoint(ctx: JobContext):
             # PATCH 3: Check for PHONE first here too.
             phone = _normalize_phone_for_lookup(user_text)
             if phone:
-                agent.interrupt(all_at_once=True) # PATCH 4: Kill pending LLM
+                agent.interrupt() # PATCH 4: Kill pending LLM
                 state.support_state = "awaiting_phone"
                 suppress_llm(15.0)
                 asyncio.create_task(set_ui_state("thinking"))
@@ -1284,7 +1292,7 @@ async def entrypoint(ctx: JobContext):
 
             order_id = _normalize_order_id_strict(user_text)
             if order_id:
-                agent.interrupt(all_at_once=True) # PATCH 4: Kill pending LLM
+                agent.interrupt() # PATCH 4: Kill pending LLM
                 suppress_llm(15.0)
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(20.0)
