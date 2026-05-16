@@ -1384,24 +1384,46 @@ async def entrypoint(ctx: JobContext):
         return "I can continue whenever you are ready."
 
     async def _silence_monitor():
+        room_log("SILENCE_MONITOR_START")
         while not state.should_end:
             await asyncio.sleep(1.0)
-            if not state.silence_enabled or not state.waiting_for_user or state.lookup_inflight:
+            if not state.silence_enabled or not state.waiting_for_user:
                 continue
+            
             now = time.time()
+            # PATCH 4: Detailed debug logging for silence monitor (throttled)
+            if int(now) % 15 == 0:
+                room_log("SILENCE_DEBUG", 
+                         now=now, 
+                         user_idle=now - state.last_user_activity, 
+                         agent_idle=now - state.last_agent_activity,
+                         snooze_until=state.silence_snooze_until,
+                         lookup_inflight=state.lookup_inflight,
+                         ui_state=state.ui_state)
+
+            if state.lookup_inflight:
+                continue
             if now < state.silence_snooze_until:
                 continue
             if (now - state.last_user_activity) < state.silence_timeout_s:
                 continue
             if (now - state.last_agent_activity) < state.silence_timeout_s:
                 continue
-            if state.ui_state in {"speaking", "thinking", "listening"}:
+            
+            # PATCH 4: Allow silence prompt even if 'thinking' to prevent dead states
+            if state.ui_state in {"speaking", "listening"}:
                 continue
+                
             if state.silence_prompt_count >= state.silence_max_prompts:
+                room_log("SILENCE_MAX_REACHED", count=state.silence_prompt_count)
                 state.should_end = True
-                state.disconnect_reason = "silence_termination"
                 break
-            text = _contextual_silence_prompt()
+                
+            text = "I am still here. Please share your order number or phone number."
+            if state.support_state == "awaiting_phone":
+                text = "I'm still ready to help. Please share the phone number for the order whenever you can."
+            
+            room_log("SILENCE_PROMPT_TRIGGERED", text=text, count=state.silence_prompt_count)
             state.silence_prompt_count += 1
             state.silence_snooze_until = time.time() + 15.0
             suppress_llm(15.0)
