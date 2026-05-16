@@ -2,12 +2,11 @@
 Meallion Voice AI - Elena English Agent (Patch 6)
 All fixes from Patch 5, plus:
 - Fix: interrupted filler speech (e.g. "Thanks, got it. Give me a moment...") is
-  NO LONGER published to the transcript or UI. Interrupted speech that was partially
-  played is silently dropped — it will be superseded by the deterministic lookup result.
-- Fix: digit detection now fires in INTERIM transcripts (while user is still speaking).
-  agent.interrupt() + suppress_llm() are called the moment >=3 digits are heard,
-  killing any in-flight filler TTS before even a syllable of it can be played.
-  A per-turn flag (_digit_interrupt_fired) prevents repeated calls on every interim.
+  NO LONGER published to the transcript or UI. Interrupted speech was partially spoken
+  and will always be superseded by the deterministic lookup result, so it must be
+  silently dropped instead of being captured and displayed.
+- Fix: agent.interrupt() is now called immediately in the early-digit-suppression path
+  so the filler TTS is killed the instant digits are detected in the user turn.
 """
 
 import asyncio
@@ -1052,16 +1051,10 @@ async def entrypoint(ctx: JobContext):
         if text:
             room_log("AGENT_TEXT_INTERRUPTED_DROPPED", text=_truncate(text))
 
-    # PATCH 6: Flag to ensure we call agent.interrupt() at most once per user turn
-    # when digits are detected in interim transcripts. Reset on each new utterance.
-    _digit_interrupt_fired = False
-
     @agent.on("user_started_speaking")
     def _on_user_started_speaking():
-        nonlocal _digit_interrupt_fired
         cancel_thinking_task()
         state.waiting_for_user = False
-        _digit_interrupt_fired = False  # PATCH 6: reset for each new turn
         # PATCH 2/3: Immediately snooze silence monitor when user starts speaking
         snooze_silence(5.0)
         asyncio.create_task(set_ui_state("listening"))
@@ -1080,13 +1073,14 @@ async def entrypoint(ctx: JobContext):
         state.silence_prompt_count = 0
         asyncio.create_task(send_user_transcript(user_text))
 
-        # PATCH 6: Final-turn digit check — also fire interrupt here in case
-        # the interim handler didn't catch it (e.g. single-word number like "127").
+        # PATCH 6: Early check for digits to suppress LLM AND interrupt any
+        # in-flight filler speech immediately. This kills "Thanks, got it..."
+        # before it gets a chance to be spoken or committed to the transcript.
         all_digits = "".join(_extract_digit_parts(user_text))
-        if len(all_digits) >= 3 and not _digit_interrupt_fired:
+        if len(all_digits) >= 3:
             suppress_llm(5.0)
-            agent.interrupt()  # kill any remaining in-flight filler TTS
-            room_log("EARLY_DIGIT_SUPPRESSION_COMMITTED", digits=len(all_digits))
+            agent.interrupt()  # PATCH 6: kill in-flight filler TTS right away
+            room_log("EARLY_DIGIT_SUPPRESSION", digits=len(all_digits))
 
         # PATCH 4: Diagnostic logging
         all_digits = "".join(_extract_digit_parts(user_text))
@@ -1365,27 +1359,13 @@ async def entrypoint(ctx: JobContext):
     if human_input:
         @human_input.on("interim_transcript")
         def _on_interim_transcript(ev):
-            nonlocal _digit_interrupt_fired
             try:
                 text = ev.alternatives[0].text if ev.alternatives else None
             except Exception:
                 text = None
-            if not text:
-                return
-            cancel_thinking_task()
-            asyncio.create_task(send_user_transcript(text, interim=True))
-
-            # PATCH 6: Detect digits in interim transcript WHILE user is still speaking.
-            # This fires BEFORE user_speech_committed, so we can kill the filler TTS
-            # (e.g. "Thanks, got it. Give me a moment...") before any audio plays.
-            # Only interrupt once per turn to avoid hammering the pipeline.
-            if not _digit_interrupt_fired:
-                interim_digits = "".join(_extract_digit_parts(text))
-                if len(interim_digits) >= 3:
-                    _digit_interrupt_fired = True
-                    suppress_llm(10.0)  # suppress longer — user hasn't finished yet
-                    agent.interrupt()
-                    room_log("INTERIM_DIGIT_INTERRUPT", digits=len(interim_digits), text=text)
+            if text:
+                cancel_thinking_task()
+                asyncio.create_task(send_user_transcript(text, interim=True))
 
     # Greet
     greeting_enabled = _as_bool(get_agent_setting("agent_greeting_enabled", True), default=True)
