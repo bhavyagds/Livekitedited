@@ -180,6 +180,12 @@ def _mentions_no_order_number(text: str) -> bool:
     )
 
 
+def _mentions_order_lookup_intent(text: str) -> bool:
+    """Check if the user wants to switch back to looking up by order number."""
+    t = (text or "").lower()
+    return bool(re.search(r"(order number|order id|order #|check order|search order|another order)", t))
+
+
 def _mentions_phone_lookup_intent(text: str) -> bool:
     t = (text or "").lower()
     # PATCH 2/3: narrowed intent matching
@@ -1195,6 +1201,13 @@ async def entrypoint(ctx: JobContext):
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(20.0)
                 asyncio.create_task(_run_phone_lookup(agent, phone))
+                return
+
+            # PATCH 4: Detect intent to switch back to order number lookup
+            if _mentions_order_lookup_intent(user_text):
+                state.support_state = "awaiting_order"
+                room_log("FLOW_TRANSITION", from_state="awaiting_phone", to_state="awaiting_order", reason="order_id_intent_given")
+                # Do NOT suppress LLM; let it provide the natural transition message.
                 return
 
             if _mentions_phone_lookup_intent(user_text):
