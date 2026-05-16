@@ -903,8 +903,9 @@ async def entrypoint(ctx: JobContext):
         min_value=0.2,
         max_value=3.0,
     )
-    # Patience: wait at least ~4s after user stops speaking before replying.
-    effective_endpointing_delay = max(4.0, configured_endpointing_delay)
+    # Patience: wait at least ~5s after user stops speaking before replying.
+    # This gives the deterministic handler time to fire and suppress the LLM.
+    effective_endpointing_delay = max(5.0, configured_endpointing_delay)
 
     def _before_llm_cb(agent_instance, chat_ctx):
         """Gate the LLM when the deterministic handler has already replied via agent.say()."""
@@ -1060,6 +1061,15 @@ async def entrypoint(ctx: JobContext):
         state.last_user_activity = time.time()
         state.silence_prompt_count = 0
         asyncio.create_task(send_user_transcript(user_text))
+
+        # PATCH 4: Early check for digits to suppress LLM immediately.
+        # This prevents the LLM from starting "Thanks, got it..." fillers
+        # only to be cut off by the deterministic handler.
+        all_digits = "".join(_extract_digit_parts(user_text))
+        if len(all_digits) >= 3:
+            suppress_llm(5.0)
+            agent.interrupt()
+            room_log("EARLY_DIGIT_SUPPRESSION", digits=len(all_digits))
 
         # PATCH 4: Diagnostic logging
         all_digits = "".join(_extract_digit_parts(user_text))
@@ -1345,13 +1355,6 @@ async def entrypoint(ctx: JobContext):
             if text:
                 cancel_thinking_task()
                 asyncio.create_task(send_user_transcript(text, interim=True))
-                
-                # PATCH 4: Preemptive filler suppression. 
-                # If we see a sequence of 4+ digits in the interim text, 
-                # kill any proactive LLM fillers before they start.
-                if re.search(r"\d{4,}", text):
-                    agent.interrupt()
-                    suppress_llm(3.0)
 
     # Greet
     greeting_enabled = _as_bool(get_agent_setting("agent_greeting_enabled", True), default=True)
