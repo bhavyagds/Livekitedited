@@ -1,6 +1,6 @@
 """
 Meallion Voice AI - Elena English Agent (Patch 4)
-Fixed version with aggressive interruption and transcript digit cleaning.
+Fixed version with aggressive interruption, restored state management, and transcript cleaning.
 """
 
 import asyncio
@@ -80,6 +80,16 @@ def _truncate(text: str, max_len: int = 180) -> str:
     return s if len(s) <= max_len else s[: max_len - 3] + "..."
 
 
+def _clean_transcript_digits(text: str) -> str:
+    """PATCH 4: Strip parentheses and hyphens from transcript digits for cleaner UI."""
+    if not text:
+        return ""
+    # Convert (694) 263-3977 -> 694 263 3977
+    text = re.sub(r"\((\d+)\)", r"\1", text)
+    text = text.replace("-", " ")
+    return text
+
+
 _ORDER_WORDS = {
     "zero": "0", "oh": "0", "o": "0",
     "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
@@ -119,7 +129,6 @@ def _normalize_order_id_strict(raw_text: str) -> Optional[str]:
     min_d, max_d = _order_digit_range()
     joined = "".join(_extract_digit_parts(raw_text or ""))
     
-    # PATCH 3: If the total number of digits is too high, it's likely a phone number.
     if len(joined) > max_d:
         return None
         
@@ -149,15 +158,6 @@ def _normalize_phone_for_lookup(raw_text: str) -> Optional[str]:
     return None
 
 
-def _clean_transcript_digits(text: str) -> str:
-    """PATCH 4: Strip brackets and hyphens from phone-like formatted numbers."""
-    # 1. Handle (XXX) XXX-XXXX
-    text = re.sub(r"\((\d{3})\)\s*(\d{3})-(\d{4})", r"\1\2\3", text)
-    # 2. Handle XXX-XXX-XXXX
-    text = re.sub(r"(\d{3})-(\d{3})-(\d{4})", r"\1\2\3", text)
-    return text
-
-
 def _mentions_no_order_number(text: str) -> bool:
     t = (text or "").lower()
     return bool(
@@ -174,7 +174,6 @@ def _mentions_phone_lookup_intent(text: str) -> bool:
 
 
 def _is_order_relevant(text: str) -> bool:
-    """Check if the text is likely an attempt to provide order info or ask about it."""
     t = (text or "").lower()
     if re.search(r"\d", t):
         return True
@@ -216,8 +215,8 @@ def _create_room_logger(room_name: str, job_id: Optional[str]) -> tuple[logging.
 
 @dataclass
 class SessionState:
-    support_state: str = "idle"  # idle|awaiting_order|checking_order|awaiting_phone|checking_phone|ticket_name|ticket_phone|ticket_email|ticket_issue|ticket_confirm|creating_ticket
-    ui_state: str = "idle"  # idle|listening|thinking|speaking
+    support_state: str = "idle"
+    ui_state: str = "idle"
     last_issue: str = ""
     last_order_number: str = ""
     last_phone_number: str = ""
@@ -326,11 +325,9 @@ async def save_transcript_to_db(call_id: str, text: str, speaker: str = "agent",
 class ElenaFunctionContext(llm.FunctionContext):
     @llm.ai_callable()
     async def lookup_order(self, order_number: Annotated[str, llm.TypeInfo(description="Order number")]) -> str:
-        """Look up an order by order number and return a customer-facing summary."""
         clean_num = re.sub(r"\D", "", str(order_number))
         if len(clean_num) >= 7:
             return "ERROR: This tool is only for 3-6 digit order numbers. For phone numbers, please wait for the automated lookup."
-
         room_log("TOOL_CALL", name="lookup_order", order_number=order_number)
         result = await order_lookup.lookup_order(order_number)
         room_log("TOOL_RESULT", name="lookup_order", result=_truncate(result))
@@ -338,7 +335,6 @@ class ElenaFunctionContext(llm.FunctionContext):
 
     @llm.ai_callable()
     async def get_order_details(self, order_number: Annotated[str, llm.TypeInfo(description="Order number or last")] = "last") -> str:
-        """Fetch detailed information for a specific order or the last looked-up order."""
         room_log("TOOL_CALL", name="get_order_details", order_number=order_number)
         result = await order_lookup.get_order_details(order_number)
         room_log("TOOL_RESULT", name="get_order_details", result=_truncate(result))
@@ -346,11 +342,9 @@ class ElenaFunctionContext(llm.FunctionContext):
 
     @llm.ai_callable()
     async def lookup_order_by_phone(self, phone: Annotated[str, llm.TypeInfo(description="10-digit phone number")]) -> str:
-        """Look up an order by phone number and return a customer-facing summary."""
         clean_phone = re.sub(r"\D", "", str(phone))
         if len(clean_phone) < 10:
             return "ERROR: This tool requires a full 10-digit phone number."
-
         room_log("TOOL_CALL", name="lookup_order_by_phone", phone=phone)
         result = await order_lookup.lookup_order_by_phone(phone)
         room_log("TOOL_RESULT", name="lookup_order_by_phone", result=_truncate(result))
@@ -358,7 +352,6 @@ class ElenaFunctionContext(llm.FunctionContext):
 
     @llm.ai_callable()
     async def search_knowledge_base(self, query: Annotated[str, llm.TypeInfo(description="Question to search")]) -> str:
-        """Search the knowledge base for policy, menu, and general support answers."""
         room_log("TOOL_CALL", name="search_knowledge_base", query=query)
         result = await knowledge_base.search_knowledge_base(query, language="en")
         room_log("TOOL_RESULT", name="search_knowledge_base", result=_truncate(result))
@@ -372,7 +365,6 @@ class ElenaFunctionContext(llm.FunctionContext):
         customer_email: Annotated[str, llm.TypeInfo(description="Customer email")],
         issue_description: Annotated[str, llm.TypeInfo(description="Issue")],
     ) -> str:
-        """Create a support ticket when an issue cannot be resolved during the call."""
         room_log("TOOL_CALL", name="create_support_ticket")
         result = await support_ticket.create_support_ticket(
             customer_name,
@@ -385,28 +377,14 @@ class ElenaFunctionContext(llm.FunctionContext):
 
     @llm.ai_callable()
     async def end_session(self) -> str:
-        """
-        End the voice call session gracefully.
-        Use this when the customer says goodbye, thanks, or indicates they're done.
-
-        Returns:
-            Goodbye message - you MUST speak this message, the call will end after
-        """
         logger.info("Session end requested - scheduling disconnect after goodbye")
         room_log("SESSION_END_REQUESTED")
-
-        # Disable silence monitor immediately!
         _current["state"].silence_enabled = False
-
-        # Schedule the disconnect with a delay to allow goodbye to be spoken
         async def delayed_end():
             await asyncio.sleep(6.0)
             _current["state"].should_end = True
             logger.info("Delayed session end triggered")
-
         asyncio.create_task(delayed_end())
-
-        # Return closing message
         goodbye = get_closing("en")
         room_log("SESSION_END_MESSAGE", text=_truncate(goodbye))
         return goodbye
@@ -434,14 +412,16 @@ def create_stt(is_sip_call: bool = False):
             "punctuate": True,
             "smart_format": True,
         }
-        for kwargs in [{**base, "api_key": deepgram_api_key}, base]:
+        for kwargs in [
+            {**base, "api_key": deepgram_api_key},
+            base,
+        ]:
             try:
-                logger.info("Creating Deepgram STT: model=%s", model)
+                logger.info("Creating Deepgram STT: model=%s api_key_passed=%s", model, "api_key" in kwargs)
                 return deepgram.STT(**kwargs)
             except TypeError:
                 continue
         return deepgram.STT(model=model)
-
     openai_model = str(get_agent_setting("openai_stt_model", "whisper-1") or "whisper-1")
     return openai.STT(model=openai_model, api_key=settings.openai_api_key, language="en")
 
@@ -455,16 +435,13 @@ def create_tts():
             speed=_as_float(get_agent_setting("openai_tts_speed", 1.0), 1.0, min_value=0.25, max_value=4.0),
             api_key=settings.openai_api_key,
         )
-
     eleven_api_key = getattr(settings, "elevenlabs_api_key", None)
     if not eleven_api_key:
         return openai.TTS(api_key=settings.openai_api_key)
-
-    voice_id = str(get_agent_setting("agent_voice_id", getattr(settings, "elevenlabs_voice_id", "")) or "")
+    voice_id = str(get_agent_setting("agent_voice_id", getattr(settings, "elevenlabs_voice_id", "")) or getattr(settings, "elevenlabs_voice_id", ""))
     similarity = _as_float(get_agent_setting("agent_voice_similarity", 0.9), 0.9, min_value=0.0, max_value=1.0)
     stability = _as_float(get_agent_setting("agent_voice_stability", 0.65), 0.65, min_value=0.0, max_value=1.0)
-    model = str(get_agent_setting("elevenlabs_model", "eleven_turbo_v2_5"))
-
+    model = str(get_agent_setting("elevenlabs_model", "eleven_turbo_v2_5") or "eleven_turbo_v2_5")
     try:
         voice = elevenlabs.Voice(
             id=voice_id,
@@ -473,7 +450,7 @@ def create_tts():
             settings=elevenlabs.VoiceSettings(stability=stability, similarity_boost=similarity),
         )
         return elevenlabs.TTS(voice=voice, model=model)
-    except TypeError:
+    except Exception:
         return openai.TTS(api_key=settings.openai_api_key)
 
 
@@ -491,88 +468,14 @@ def _is_no(text: str) -> bool:
     return t in {"no", "n", "cancel", "stop", "not now"}
 
 
-def _normalize_intent_text(text: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", (text or "").lower())).strip()
-
-
-def _intent_tokens(text: str) -> set[str]:
-    toks = _normalize_intent_text(text).split()
-    normalized: set[str] = set()
-    for tok in toks:
-        if len(tok) < 3 or tok in _MEMORY_STOPWORDS:
-            continue
-        t = tok
-        if t.endswith("ies") and len(t) > 4:
-            t = t[:-3] + "y"
-        elif t.endswith("es") and len(t) > 4:
-            t = t[:-2]
-        elif t.endswith("s") and len(t) > 4:
-            t = t[:-1]
-        elif t.endswith("ing") and len(t) > 5:
-            t = t[:-3]
-        elif t.endswith("ed") and len(t) > 4:
-            t = t[:-2]
-        normalized.add(t)
-    return normalized
-
-
-def _find_memory_match(user_text: str, memory_items: list[dict]) -> Optional[str]:
-    user_norm = _normalize_intent_text(user_text)
-    user_tokens = _intent_tokens(user_text)
-    if not user_norm or not user_tokens:
-        return None
-    best_answer: Optional[str] = None
-    best_score = 0.0
-    for item in memory_items:
-        q = str(item.get("question") or "").strip()
-        a = str(item.get("answer") or "").strip()
-        if not q or not a:
-            continue
-        q_norm = _normalize_intent_text(q)
-        q_tokens = _intent_tokens(q)
-        if not q_tokens:
-            continue
-        overlap = len(user_tokens & q_tokens)
-        coverage = overlap / max(1, len(q_tokens))
-        recall = overlap / max(1, len(user_tokens))
-        phrase_hit = 1.0 if (q_norm in user_norm or user_norm in q_norm) else 0.0
-        score = (coverage * 0.55) + (recall * 0.35) + (phrase_hit * 0.25)
-        if score > best_score and (overlap >= 2 or phrase_hit > 0):
-            best_score = score
-            best_answer = a
-    return best_answer if best_score >= 0.40 else None
-
-
-def _build_memory_prompt_block(memory_items: list[dict]) -> str:
-    lines: list[str] = []
-    for item in memory_items:
-        q = str(item.get("question") or "").strip()
-        a = str(item.get("answer") or "").strip()
-        c = str(item.get("comment") or item.get("comments") or "").strip()
-        if not q or not a:
-            continue
-        lines.append(f'SCENARIO: "{q}"')
-        lines.append(f'EXPECTED RESPONSE: "{a}"')
-        if c:
-            lines.append(f"GUIDELINE: {c}")
-        lines.append("-" * 20)
-    if not lines:
-        return ""
-    return (
-        "### CRITICAL: LONG-TERM MEMORY (HIGHEST PRIORITY)\n"
-        "When user intent matches any memory scenario, respond using that memory response first.\n\n"
-        + "\n".join(lines)
-    )
-
-
-def create_vad(is_sip_call: bool = False):
-    min_speech = _as_float(get_agent_setting("vad_min_speech_duration", 0.15), 0.15, min_value=0.05, max_value=1.0)
-    min_silence = _as_float(get_agent_setting("vad_min_silence_duration", 1.0), 1.0, min_value=0.1, max_value=3.0)
+def create_vad():
+    min_speech = _as_float(get_agent_setting("vad_min_speech_duration", 0.15), 0.15)
+    min_silence = _as_float(get_agent_setting("vad_min_silence_duration", 1.0), 1.0)
     return silero.VAD.load(min_speech_duration=min_speech, min_silence_duration=min_silence, activation_threshold=0.6)
 
 
 # -----------------------------------------------------------------------------
-# Room logs and state
+# Core logic
 # -----------------------------------------------------------------------------
 
 
@@ -611,7 +514,7 @@ async def _run_order_lookup(agent: VoicePipelineAgent, order_number: str):
         result = await order_lookup.lookup_order(order_number)
         room_log("ORDER_LOOKUP_RESULT", result=_truncate(result))
         
-        # PATCH 4: Small delay to allow LLM interruption to settle
+        # PATCH 4: Delay to allow interruption to settle
         await asyncio.sleep(0.5)
         
         from src.utils.voice_formatting import clean_text_for_tts
@@ -621,7 +524,7 @@ async def _run_order_lookup(agent: VoicePipelineAgent, order_number: str):
         state.last_order_number = order_number
         if _is_order_not_found_text(result):
             state.support_state = "awaiting_order"
-            snooze_silence(20.0)
+            snooze_silence(15.0)
         else:
             state.support_state = "idle"
     finally:
@@ -639,7 +542,7 @@ async def _run_phone_lookup(agent: VoicePipelineAgent, phone_number: str):
         result = await order_lookup.lookup_order_by_phone(phone_number)
         room_log("PHONE_LOOKUP_RESULT", result=_truncate(result))
         
-        # PATCH 4: Small delay to allow LLM interruption to settle
+        # PATCH 4: Delay to allow interruption to settle
         await asyncio.sleep(0.5)
         
         from src.utils.voice_formatting import clean_text_for_tts
@@ -649,7 +552,7 @@ async def _run_phone_lookup(agent: VoicePipelineAgent, phone_number: str):
         state.last_phone_number = phone_number
         if "no order" in (result or "").lower() or "could not" in (result or "").lower():
             state.support_state = "awaiting_phone"
-            snooze_silence(20.0)
+            snooze_silence(15.0)
         else:
             state.support_state = "idle"
     finally:
@@ -673,6 +576,10 @@ async def _run_create_ticket(agent: VoicePipelineAgent):
         room_log("TICKET_CREATE_RESULT", result=_truncate(result))
         await agent.say(result, allow_interruptions=True)
         state.support_state = "idle"
+        state.ticket_name = ""
+        state.ticket_phone = ""
+        state.ticket_email = ""
+        state.ticket_issue = ""
     finally:
         state.ticket_inflight = False
 
@@ -687,7 +594,7 @@ async def entrypoint(ctx: JobContext):
     cache_task = asyncio.create_task(_fetch_from_db())
 
     state = SessionState(
-        silence_timeout_s=_as_float(get_agent_setting("silence_timeout_seconds", 12.0), 12.0, min_value=6.0, max_value=60.0),
+        silence_timeout_s=_as_float(get_agent_setting("silence_timeout_seconds", 12.0), 12.0),
         silence_max_prompts=_as_int(get_agent_setting("silence_max_prompts", 2), 2),
         last_user_activity=time.time(),
         last_agent_activity=time.time(),
@@ -753,24 +660,22 @@ async def entrypoint(ctx: JobContext):
     _current["call_id"] = call_id
 
     try:
+        await asyncio.wait_for(cache_task, timeout=8.0)
         from src.services.database import get_database_service
         db = get_database_service()
         memory_items = await db.get_memory_items(active_only=True)
     except Exception:
         pass
 
-    try:
-        system_prompt = await get_system_prompt_async("en")
-    except Exception:
-        system_prompt = "You are Elena from Meallion. Reply in concise, friendly English."
+    system_prompt = await get_system_prompt_async("en")
     memory_block = _build_memory_prompt_block(memory_items)
     if memory_block and "CRITICAL: LONG-TERM MEMORY" not in (system_prompt or ""):
         system_prompt = f"{memory_block}\n\n{system_prompt}"
-    
     chat_ctx = llm.ChatContext()
     chat_ctx.append(role="system", text=system_prompt)
 
-    effective_endpointing_delay = max(4.0, _as_float(get_agent_setting("min_endpointing_delay", 1.2), 1.2))
+    configured_endpointing_delay = _as_float(get_agent_setting("min_endpointing_delay", 1.2), 1.2)
+    effective_endpointing_delay = max(4.0, configured_endpointing_delay)
 
     def _before_llm_cb(agent_instance, chat_ctx):
         if time.time() < state.suppress_llm_until:
@@ -797,7 +702,6 @@ async def entrypoint(ctx: JobContext):
 
     def suppress_llm(seconds: float = 10.0):
         state.suppress_llm_until = time.time() + seconds
-        room_log("LLM_SUPPRESS_SET", seconds=seconds)
 
     async def send_agent_transcript(text: str):
         cleaned = (text or "").strip()
@@ -820,7 +724,7 @@ async def entrypoint(ctx: JobContext):
 
     async def send_user_transcript(text: str, *, interim: bool = False):
         nonlocal _last_user_interim, _last_user_interim_sent_at
-        # PATCH 4: Clean transcript digits before processing
+        # PATCH 4: Clean digits for UI
         cleaned = _clean_transcript_digits((text or "").strip())
         if not cleaned:
             return
@@ -922,7 +826,6 @@ async def entrypoint(ctx: JobContext):
                 snooze_silence(25.0)
                 asyncio.create_task(_run_phone_lookup(agent, phone_candidate))
                 return
-
             order_id = _normalize_order_id_strict(user_text)
             if order_id:
                 # PATCH 4: Aggressive Interruption
@@ -932,7 +835,6 @@ async def entrypoint(ctx: JobContext):
                 snooze_silence(25.0)
                 asyncio.create_task(_run_order_lookup(agent, order_id))
                 return
-
             if _mentions_no_order_number(user_text) or _mentions_phone_lookup_intent(user_text):
                 state.support_state = "awaiting_phone"
                 return
@@ -948,11 +850,45 @@ async def entrypoint(ctx: JobContext):
                 asyncio.create_task(_run_phone_lookup(agent, phone))
                 return
 
-        # Handle support intent
+        # 3b) Ticket flow restoration
+        if state.support_state == "ticket_name":
+            state.ticket_name = user_text
+            state.support_state = "ticket_phone"
+            suppress_llm()
+            asyncio.create_task(agent.say("Thanks. Please share your phone number.", allow_interruptions=True))
+            return
+        if state.support_state == "ticket_phone":
+            ticket_phone = _normalize_phone_for_lookup(user_text)
+            if ticket_phone:
+                state.ticket_phone = ticket_phone
+                state.support_state = "ticket_email"
+                suppress_llm()
+                asyncio.create_task(agent.say("Got it. Now please share your email address.", allow_interruptions=True))
+                return
+        if state.support_state == "ticket_email":
+            if _looks_like_email(user_text):
+                state.ticket_email = user_text.strip()
+                state.support_state = "ticket_issue"
+                suppress_llm()
+                asyncio.create_task(agent.say("Please describe the issue in one or two sentences.", allow_interruptions=True))
+                return
+        if state.support_state == "ticket_issue":
+            state.ticket_issue = user_text
+            state.support_state = "ticket_confirm"
+            suppress_llm()
+            asyncio.create_task(agent.say("Should I create the support ticket now?", allow_interruptions=True))
+            return
+        if state.support_state == "ticket_confirm":
+            if _is_yes(user_text):
+                suppress_llm()
+                asyncio.create_task(set_ui_state("thinking"))
+                asyncio.create_task(_run_create_ticket(agent))
+                return
+
+        # Intent detection
         support_intent = bool(re.search(r"(problem|issue|complaint|order|wrong|late)", user_text.lower()))
         if support_intent and state.support_state == "idle":
             state.support_state = "awaiting_order"
-            # Re-check for digits if the sentence contains the intent
             phone = _normalize_phone_for_lookup(user_text)
             if phone:
                 agent.interrupt(all_at_once=True)
@@ -986,6 +922,18 @@ async def entrypoint(ctx: JobContext):
         chat_ctx.append(role="assistant", text=greeting)
         await agent.say(greeting, allow_interruptions=True)
     await set_ui_state("idle")
+
+    bg_audio_player = None
+    async def _start_background_audio():
+        nonlocal bg_audio_player
+        try:
+            from src.services.background_audio import create_background_audio_player
+            bg_audio_player = await create_background_audio_player()
+            if bg_audio_player:
+                await bg_audio_player.start(ctx.room)
+        except Exception:
+            pass
+    asyncio.create_task(_start_background_audio())
 
     async def _silence_monitor():
         while not state.should_end:
@@ -1025,7 +973,12 @@ async def entrypoint(ctx: JobContext):
     silence_task.cancel()
     transcript_text = "\n".join(conversation_transcript)
     await end_call_in_db(call_id=call_id, room_name=ctx.room.name, status="completed", transcript=transcript_text)
-    await ctx.room.disconnect()
+    try:
+        if bg_audio_player:
+            await bg_audio_player.stop()
+        await ctx.room.disconnect()
+    except Exception:
+        pass
 
 def run_agent():
     logging.basicConfig(level=logging.INFO)
