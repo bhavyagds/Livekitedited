@@ -63,7 +63,7 @@ services:
       dockerfile: Dockerfile
     container_name: meallion-agent
     #command: ["python", "-m", "src.agents.elena", "start"] # -orginal elena agent
-    command: ["python", "-m", "src.agents.patch4", "start"]
+    command: ["python", "-m", "src.agents.patch5", "start"]
     # Limit CPU to prevent crash loop from consuming all resources
     deploy:
       resources:
@@ -108,7 +108,7 @@ services:
     networks:
       - meallion-network
     healthcheck:
-      test: ["CMD-SHELL", "grep -qa 'src.agents.patch4' /proc/1/cmdline || exit 1"]
+      test: ["CMD-SHELL", "grep -qa 'src.agents.patch5' /proc/1/cmdline || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
