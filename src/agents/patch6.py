@@ -923,16 +923,6 @@ async def entrypoint(ctx: JobContext):
         from livekit.agents.pipeline.pipeline_agent import _default_before_llm_cb
         return _default_before_llm_cb(agent_instance, chat_ctx)
 
-    def _before_tts_cb(agent_instance, text):
-        if isinstance(text, str):
-            _t = text.lower()
-            # Drop filler speech explicitly so it is neither spoken nor transcribed
-            if "thanks, got it" in _t or "give me a moment" in _t:
-                room_log("DROPPED_FILLER_SPEECH", text=text)
-                return ""
-        from livekit.agents.pipeline.pipeline_agent import _default_before_tts_cb
-        return _default_before_tts_cb(agent_instance, text)
-
     agent = VoicePipelineAgent(
         vad=create_vad(),
         stt=create_stt(),
@@ -947,7 +937,6 @@ async def entrypoint(ctx: JobContext):
         # memory/order flow handlers finish, which can produce double answers.
         preemptive_synthesis=_as_bool(get_agent_setting("preemptive_synthesis", False), default=False),
         before_llm_cb=_before_llm_cb,
-        before_tts_cb=_before_tts_cb,
     )
 
     room_log(
@@ -1376,6 +1365,15 @@ async def entrypoint(ctx: JobContext):
                 text = None
             if text:
                 cancel_thinking_task()
+                
+                # Suppress LLM early if digits are detected during interim speech.
+                # This prevents the LLM from generating filler text (e.g. "Thanks, got it...")
+                # if the user pauses briefly while reading out their number.
+                all_digits = "".join(_extract_digit_parts(text))
+                if len(all_digits) >= 3:
+                    suppress_llm(5.0)
+                    agent.interrupt()
+                    
                 asyncio.create_task(send_user_transcript(text, interim=True))
 
     # Greet
