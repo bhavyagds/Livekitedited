@@ -29,12 +29,11 @@ async def entrypoint(ctx: JobContext):
     logger.info(f"Elena Router: dispatching call {ctx.job.id} to {lang.upper()} agent")
     
     if lang == "el":
-        from src.agents.patch5_el import entrypoint as el_entrypoint
+        from src.agents.elena_el import entrypoint as el_entrypoint
         await el_entrypoint(ctx)
     else:
-        from src.agents.patch5 import entrypoint as en_entrypoint
+        from src.agents.elena_en import entrypoint as en_entrypoint
         await en_entrypoint(ctx)
-
 
 def prewarm(proc: JobProcess):
     """
@@ -47,18 +46,11 @@ def prewarm(proc: JobProcess):
     logger.info(f"Elena Router: prewarming {lang.upper()} agent process")
     
     if lang == "el":
-        try:
-            from src.agents.patch5_el import prewarm as el_prewarm
-            el_prewarm(proc)
-        except ImportError:
-            logger.info("patch5_el has no prewarm")
+        from src.agents.elena_el import prewarm as el_prewarm
+        el_prewarm(proc)
     else:
-        try:
-            from src.agents.patch5 import prewarm as en_prewarm
-            en_prewarm(proc)
-        except ImportError:
-            logger.info("patch5 has no prewarm")
-
+        from src.agents.elena_en import prewarm as en_prewarm
+        en_prewarm(proc)
 
 def run_agent():
     """
