@@ -906,9 +906,9 @@ async def entrypoint(ctx: JobContext):
         min_value=0.2,
         max_value=3.0,
     )
-    # Patience: wait at least ~1.2s after user stops speaking before replying.
+    # Patience: wait at least ~5s after user stops speaking before replying.
     # This gives the deterministic handler time to fire and suppress the LLM.
-    effective_endpointing_delay = configured_endpointing_delay
+    effective_endpointing_delay = max(5.0, configured_endpointing_delay)
 
     def _before_llm_cb(agent_instance, chat_ctx):
         """Gate the LLM when the deterministic handler has already replied via agent.say()."""
