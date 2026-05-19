@@ -1362,7 +1362,19 @@ async def entrypoint(ctx: JobContext):
                 room_log("FLOW_TRANSITION", from_state="awaiting_order", to_state="awaiting_phone", reason="no_order_or_phone_intent")
                 suppress_llm(15.0)
                 agent.interrupt()
+                snooze_silence(20.0)
                 asyncio.create_task(_safe_say("No problem. Please share the phone number used for the order when you are ready."))
+                return
+
+            # User said something order-related but gave no usable number.
+            # Give a deterministic clarification instead of letting the LLM repeat
+            # the same canned response on every turn (matches patch5.py behaviour).
+            if _is_order_relevant(user_text):
+                prompt = "Whenever you are ready, please share your order number. If you do not have it, say that and I will check by phone number."
+                if not _should_suppress_clarification(prompt):
+                    suppress_llm(10.0)
+                    snooze_silence(20.0)
+                    asyncio.create_task(_safe_say(prompt))
                 return
 
             return
@@ -1619,9 +1631,7 @@ async def entrypoint(ctx: JobContext):
                 state.should_end = True
                 break
                 
-            text = "I am still here. Please share your order number or phone number."
-            if state.support_state == "awaiting_phone":
-                text = "I'm still ready to help. Please share the phone number for the order whenever you can."
+            text = _contextual_silence_prompt()
             
             room_log("SILENCE_PROMPT_TRIGGERED", text=text, count=state.silence_prompt_count)
             state.silence_prompt_count += 1
