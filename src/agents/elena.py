@@ -32,7 +32,7 @@ async def entrypoint(ctx: JobContext):
         from src.agents.elena_el import entrypoint as el_entrypoint
         await el_entrypoint(ctx)
     else:
-        from src.agents.elena_en import entrypoint as en_entrypoint
+        from src.agents.patch8 import entrypoint as en_entrypoint
         await en_entrypoint(ctx)
 
 def prewarm(proc: JobProcess):
@@ -49,7 +49,7 @@ def prewarm(proc: JobProcess):
         from src.agents.elena_el import prewarm as el_prewarm
         el_prewarm(proc)
     else:
-        from src.agents.elena_en import prewarm as en_prewarm
+        from src.agents.patch8 import prewarm as en_prewarm
         en_prewarm(proc)
 
 def run_agent():

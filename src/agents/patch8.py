@@ -1121,11 +1121,14 @@ async def entrypoint(ctx: JobContext):
 
     @agent.on("agent_speech_interrupted")
     def _on_agent_speech_interrupted(msg):
-        # Fallback: when user barges in before commit, capture whatever text exists.
+        # PATCH 6/8: Do NOT publish interrupted speech to the transcript.
+        # When the agent's filler (e.g. "Thanks, got it. Give me a moment...") is
+        # interrupted by the user speaking, the audio was only partially played.
+        # Publishing it creates a misleading half-sentence in the transcript and
+        # the UI. The deterministic lookup result that follows is the real reply.
         text = msg.content if hasattr(msg, "content") else None
         if text:
-            room_log("AGENT_TEXT_INTERRUPTED_CAPTURE", text=_truncate(text))
-            asyncio.create_task(send_agent_transcript(text))
+            room_log("AGENT_TEXT_INTERRUPTED_DROPPED", text=_truncate(text))
 
     @agent.on("user_started_speaking")
     def _on_user_started_speaking():
@@ -1232,6 +1235,7 @@ async def entrypoint(ctx: JobContext):
             room_log("FLOW_TRANSITION", from_state=state.support_state, to_state="ticket_name", reason="ticket_escape")
             state.support_state = "ticket_name"
             suppress_llm(15.0)
+            agent.interrupt()
             asyncio.create_task(agent.say(
                 "I can help you with that. First, could you please tell me your full name?",
                 allow_interruptions=True
@@ -1271,6 +1275,7 @@ async def entrypoint(ctx: JobContext):
                 prompt = "Whenever you are ready, please share your order number. If you do not have it, say that and I will check by phone number."
                 if not _should_suppress_clarification(prompt):
                     suppress_llm()
+                    agent.interrupt()
                     asyncio.create_task(agent.say(prompt, allow_interruptions=True))
                 return
             return
@@ -1311,6 +1316,7 @@ async def entrypoint(ctx: JobContext):
                 prompt = "Sure. Please provide the full phone number used for the order."
                 if not _should_suppress_clarification(prompt):
                     suppress_llm()
+                    agent.interrupt()
                     asyncio.create_task(agent.say(prompt, allow_interruptions=True))
                 return
 
@@ -1318,6 +1324,7 @@ async def entrypoint(ctx: JobContext):
                 prompt = "I need the full phone number to check the order. Please share it once."
                 if not _should_suppress_clarification(prompt):
                     suppress_llm()
+                    agent.interrupt()
                     asyncio.create_task(agent.say(prompt, allow_interruptions=True))
                 return
             return
@@ -1327,6 +1334,7 @@ async def entrypoint(ctx: JobContext):
             state.ticket_name = user_text
             state.support_state = "ticket_phone"
             suppress_llm()
+            agent.interrupt()
             asyncio.create_task(agent.say("Thanks. Please share your phone number.", allow_interruptions=True))
             return
 
@@ -1336,22 +1344,26 @@ async def entrypoint(ctx: JobContext):
                 prompt = "Please share a valid phone number."
                 if not _should_suppress_clarification(prompt):
                     suppress_llm()
+                    agent.interrupt()
                     asyncio.create_task(agent.say(prompt, allow_interruptions=True))
                 return
             state.ticket_phone = ticket_phone
             state.support_state = "ticket_email"
             suppress_llm()
+            agent.interrupt()
             asyncio.create_task(agent.say("Got it. Now please share your email address.", allow_interruptions=True))
             return
 
         if state.support_state == "ticket_email":
             if not _looks_like_email(user_text):
                 suppress_llm()
+                agent.interrupt()
                 asyncio.create_task(agent.say("Please share a valid email address.", allow_interruptions=True))
                 return
             state.ticket_email = user_text.strip()
             state.support_state = "ticket_issue"
             suppress_llm()
+            agent.interrupt()
             asyncio.create_task(agent.say("Please describe the issue in one or two sentences.", allow_interruptions=True))
             return
 
@@ -1363,6 +1375,7 @@ async def entrypoint(ctx: JobContext):
                 "Should I create the support ticket now?"
             )
             suppress_llm()
+            agent.interrupt()
             asyncio.create_task(agent.say(confirm_text, allow_interruptions=True))
             return
 
@@ -1371,6 +1384,7 @@ async def entrypoint(ctx: JobContext):
                 suppress_llm()
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(10.0)
+                agent.interrupt()
                 asyncio.create_task(agent.say("Thanks. Creating your support ticket now.", allow_interruptions=True))
                 asyncio.create_task(_run_create_ticket(agent))
                 return
@@ -1381,9 +1395,11 @@ async def entrypoint(ctx: JobContext):
                 state.ticket_email = ""
                 state.ticket_issue = ""
                 suppress_llm()
+                agent.interrupt()
                 asyncio.create_task(agent.say("No problem. I have cancelled the ticket request.", allow_interruptions=True))
                 return
             suppress_llm()
+            agent.interrupt()
             asyncio.create_task(agent.say("Please say yes to create the ticket, or no to cancel.", allow_interruptions=True))
             return
 
@@ -1563,6 +1579,11 @@ async def entrypoint(ctx: JobContext):
             await ctx.room.disconnect()
     except Exception:
         pass
+
+
+def prewarm(proc: JobProcess):
+    """Prewarm the English agent process (lightweight to prevent connection pool exhaustion)."""
+    logger.info("Prewarm: English Elena ready (lightweight)")
 
 
 def run_agent():
