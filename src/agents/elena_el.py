@@ -171,7 +171,8 @@ _MEMORY_STOPWORDS = {
 
 
 def _extract_digit_parts(text: str) -> list[str]:
-    tokens = re.findall(r"[a-zA-Z0-9]+", (text or "").lower())
+    # Use \w+ to capture Unicode (Greek) words, not just ASCII
+    tokens = re.findall(r"[\w]+", (text or "").lower())
     parts: list[str] = []
     for token in tokens:
         if token in _ORDER_WORDS:
@@ -1417,7 +1418,46 @@ async def entrypoint(ctx: JobContext):
                 asyncio.create_task(_run_order_lookup(agent, order_id))
                 return
             return
- 
+
+        # 4b) IDLE state: user directly provides an order number or phone without stating a support intent.
+        # This handles the common case where the agent greets and the user immediately says
+        # their order number (e.g. "Ο αριθμός παραγγελίας είναι ένα, δύο, επτά, πέντε, επτά").
+        # The support_state is still "idle" at this point but we must attempt lookup.
+        if state.support_state == "idle":
+            # Check for order-number keywords in the user's text (Greek + English)
+            _has_order_keyword = bool(re.search(
+                r"(αριθμ|παραγγελ|order|number|\bno\b|#)",
+                user_text.lower()
+            ))
+            # Extract digits from the transcript (handles Greek word numbers via _ORDER_WORDS)
+            _idle_digits = "".join(_extract_digit_parts(user_text))
+
+            if _has_order_keyword or len(_idle_digits) >= 3:
+                # Enough digits to attempt a lookup — transition to awaiting_order first
+                state.support_state = "awaiting_order"
+                room_log("FLOW_TRANSITION", from_state="idle", to_state="awaiting_order", reason="idle_digit_or_keyword")
+
+                # Check for phone number first (10+ digits)
+                phone = _normalize_phone_for_lookup(user_text)
+                if phone:
+                    agent.interrupt()
+                    state.support_state = "awaiting_phone"
+                    suppress_llm(15.0)
+                    asyncio.create_task(set_ui_state("thinking"))
+                    snooze_silence(20.0)
+                    asyncio.create_task(_run_phone_lookup(agent, phone))
+                    return
+
+                # Then check for order ID (3-6 digits)
+                order_id = _normalize_order_id_strict(user_text)
+                if order_id:
+                    agent.interrupt()
+                    suppress_llm(15.0)
+                    asyncio.create_task(set_ui_state("thinking"))
+                    snooze_silence(20.0)
+                    asyncio.create_task(_run_order_lookup(agent, order_id))
+                    return
+
         ticket_intent = bool(re.search(r"(άνθρωπο|εκπρόσωπο|καλέστε με|αίτημα υποστήριξης|ticket|human|representative|support ticket)", user_text.lower()))
         if ticket_intent:
             state.support_state = "ticket_name"
