@@ -1361,7 +1361,19 @@ async def entrypoint(ctx: JobContext):
                 room_log("FLOW_TRANSITION", from_state="awaiting_order", to_state="awaiting_phone", reason="no_order_or_phone_intent")
                 suppress_llm(15.0)
                 agent.interrupt()
+                snooze_silence(20.0)
                 asyncio.create_task(_safe_say("Κανένα πρόβλημα. Παρακαλώ δώστε μου τον αριθμό τηλεφώνου που χρησιμοποιήσατε για την παραγγελία σας."))
+                return
+
+            # User said something order-related but gave no usable number.
+            # Give a deterministic clarification instead of letting the LLM repeat
+            # the same canned response on every turn.
+            if _is_order_relevant(user_text):
+                prompt = "Όποτε είστε έτοιμοι, πείτε μου τον αριθμό παραγγελίας σας. Αν δεν τον έχετε, πείτε το και θα ελέγξω με τον αριθμό τηλεφώνου σας."
+                if not _should_suppress_clarification(prompt):
+                    suppress_llm(10.0)
+                    snooze_silence(20.0)
+                    asyncio.create_task(_safe_say(prompt))
                 return
 
             return
@@ -1657,9 +1669,7 @@ async def entrypoint(ctx: JobContext):
                 state.should_end = True
                 break
                 
-            text = "Είμαι ακόμα εδώ. Παρακαλώ πείτε μου τον αριθμό παραγγελίας ή τηλεφώνου."
-            if state.support_state == "awaiting_phone":
-                text = "Είμαι έτοιμος να βοηθήσω. Παρακαλώ δώστε μου το τηλέφωνο της παραγγελίας όταν μπορέσετε."
+            text = _contextual_silence_prompt()
             
             room_log("SILENCE_PROMPT_TRIGGERED", text=text, count=state.silence_prompt_count)
             state.silence_prompt_count += 1
