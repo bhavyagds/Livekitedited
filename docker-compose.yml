@@ -56,19 +56,18 @@ services:
       retries: 3
       start_period: 10s
 
-  # Elena Voice Agent (LiveKit Worker)
-  agent:
+  # English Voice Agent Worker
+  agent-en:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: meallion-agent
-    #command: ["python", "-m", "src.agents.elena", "start"] # -orginal elena agent
-    command: ["python", "-m", "src.agents.elena", "start"]
+    container_name: meallion-agent-en
+    command: ["python", "-m", "src.agents.en.agent", "start"]
     # Limit CPU to prevent crash loop from consuming all resources
     deploy:
       resources:
         limits:
-          cpus: '1.0'
+          cpus: '0.8'
           memory: 1G
     environment:
       # Increase initialization timeout significantly for slow VPS
@@ -79,11 +78,11 @@ services:
       - LIVEKIT_PUBLIC_URL=${LIVEKIT_PUBLIC_URL_LOCAL:-ws://localhost:7880}
       - LIVEKIT_API_KEY=devkey
       - LIVEKIT_API_SECRET=secret
-      - AGENT_LANGUAGE=${AGENT_LANGUAGE:-}
+      - AGENT_LANGUAGE=en
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY:-}
       - ELEVEN_API_KEY=${ELEVENLABS_API_KEY}
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
-      - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID:-aTP4J5SJLQl74WTSRXKW}
+      - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID_EN:-aTP4J5SJLQl74WTSRXKW}
       - ELEVENLABS_MODEL=${ELEVENLABS_MODEL:-eleven_multilingual_v2}
       - ELEVENLABS_VOICE_STABILITY=${ELEVENLABS_VOICE_STABILITY:-0.45}
       - ELEVENLABS_VOICE_SIMILARITY=${ELEVENLABS_VOICE_SIMILARITY:-0.80}
@@ -108,7 +107,65 @@ services:
     networks:
       - meallion-network
     healthcheck:
-      test: ["CMD-SHELL", "grep -qa 'src.agents.elena' /proc/1/cmdline || exit 1"]
+      test: ["CMD-SHELL", "grep -qa 'src.agents.en.agent' /proc/1/cmdline || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  # Greek Voice Agent Worker
+  agent-el:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: meallion-agent-el
+    command: ["python", "-m", "src.agents.el.agent", "start"]
+    # Limit CPU to prevent crash loop from consuming all resources
+    deploy:
+      resources:
+        limits:
+          cpus: '0.8'
+          memory: 1G
+    environment:
+      # Increase initialization timeout significantly for slow VPS
+      - LIVEKIT_AGENTS_INITIALIZE_TIMEOUT=120
+      - LIVEKIT_AGENTS_NUM_IDLE_PROCESSES=1
+      - LIVEKIT_AGENTS_LOAD_THRESHOLD=0.9
+      - LIVEKIT_URL=ws://livekit:7880
+      - LIVEKIT_PUBLIC_URL=${LIVEKIT_PUBLIC_URL_LOCAL:-ws://localhost:7880}
+      - LIVEKIT_API_KEY=devkey
+      - LIVEKIT_API_SECRET=secret
+      - AGENT_LANGUAGE=el
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY:-}
+      - ELEVEN_API_KEY=${ELEVENLABS_API_KEY}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID_EL:-21m00Tcm4TlvDq8ikWAM}
+      - ELEVENLABS_MODEL=${ELEVENLABS_MODEL:-eleven_multilingual_v2}
+      - ELEVENLABS_VOICE_STABILITY=${ELEVENLABS_VOICE_STABILITY:-0.45}
+      - ELEVENLABS_VOICE_SIMILARITY=${ELEVENLABS_VOICE_SIMILARITY:-0.80}
+      - ELEVENLABS_VOICE_SPEED=${ELEVENLABS_VOICE_SPEED:-0.60}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - SHOPIFY_STORE_URL=${SHOPIFY_STORE_URL}
+      - SHOPIFY_ACCESS_TOKEN=${SHOPIFY_ACCESS_TOKEN}
+      - CLICKUP_API_TOKEN=${CLICKUP_API_TOKEN}
+      - CLICKUP_LIST_ID=${CLICKUP_LIST_ID}
+      - POSTGRES_URL=${POSTGRES_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/meallion}
+      - ROOM_LOG_DIR=/app/data/room-logs
+    volumes:
+      - ./src:/app/src:ro
+      - ./data:/app/data
+    depends_on:
+      livekit:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - meallion-network
+    healthcheck:
+      test: ["CMD-SHELL", "grep -qa 'src.agents.el.agent' /proc/1/cmdline || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3

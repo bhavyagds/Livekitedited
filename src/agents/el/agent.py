@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, Optional
 
-from livekit.agents import AutoSubscribe, JobContext, JobProcess, WorkerOptions, cli, llm
+from livekit.agents import AutoSubscribe, JobContext, JobProcess, WorkerOptions, cli, llm, JobRequest
 from livekit.agents.pipeline import VoicePipelineAgent
 from livekit.plugins import elevenlabs, openai, silero
 
@@ -26,15 +26,16 @@ except ImportError:
     USE_DEEPGRAM = False
 
 from src.config import settings
-from src.agents.prompts import (
+from src.agents.el.prompts import (
     _fetch_from_db,
     get_agent_setting,
     get_closing,
     get_greeting,
     get_system_prompt_async,
-    set_runtime_language,
 )
-from src.agents.tools import knowledge_base, order_lookup, support_ticket
+from src.agents.el import tools as order_lookup
+from src.agents.el import tools as knowledge_base
+from src.agents.el import tools as support_ticket
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,7 @@ async def _refresh_agent_cache(force: bool = False) -> None:
     logger.info("PATCH 8: Refreshing agent cache (TTL=5min, force=%s)...", force)
     # Force prompts.py to re-fetch KB/settings/memory from DB
     try:
-        from src.agents.prompts import _fetch_from_db as _prompts_fetch
+        from src.agents.el.prompts import _fetch_from_db as _prompts_fetch
         await _prompts_fetch(force=True)
     except Exception as e:
         logger.warning("PATCH 8: prompts re-fetch error: %s", e)
@@ -353,6 +354,12 @@ _current = {
     "call_id": None,
     "state": SessionState(),
 }
+
+
+async def _safe_say(text: str, delay_s: float = 0.1):
+    func = _current.get("safe_say")
+    if func:
+        await func(text, delay_s)
 
 
 def room_log(event: str, **fields):
@@ -782,13 +789,12 @@ async def _run_order_lookup(agent: VoicePipelineAgent, order_number: str):
     state.support_state = "checking_order"
     room_log("ORDER_LOOKUP_STARTED", order_number=order_number)
     try:
-        # PATCH 4: Add 10-second timeout to prevent dead states on slow APIs
         result = await asyncio.wait_for(order_lookup.lookup_order(order_number), timeout=10.0)
         room_log("ORDER_LOOKUP_RESULT", result=_truncate(result))
         
         from src.utils.voice_formatting import clean_text_for_tts
         cleaned_result = clean_text_for_tts(result, lang="el")
-        await agent.say(cleaned_result, allow_interruptions=True)
+        await _safe_say(cleaned_result, delay_s=0.0)
         
         state.last_order_number = order_number
         if _is_order_not_found_text(result):
@@ -798,11 +804,11 @@ async def _run_order_lookup(agent: VoicePipelineAgent, order_number: str):
             state.support_state = "idle"
     except asyncio.TimeoutError:
         room_log("ORDER_LOOKUP_TIMEOUT")
-        await agent.say("Λυπάμαι, χρειάζεται λίγο περισσότερος χρόνος από το συνηθισμένο. Μπορείτε να επαναλάβετε τον αριθμό παραγγελίας;", allow_interruptions=True)
+        await _safe_say("Λυπάμαι, χρειάζεται λίγο περισσότερος χρόνος από το συνηθισμένο. Μπορείτε να επαναλάβετε τον αριθμό παραγγελίας;", delay_s=0.0)
         state.support_state = "awaiting_order"
     except Exception as e:
         logger.error("Order lookup error: %s", e)
-        await agent.say("Λυπάμαι, αντιμετωπίζω πρόβλημα στον έλεγχο αυτής της παραγγελίας. Παρακαλώ δοκιμάστε ξανά σε λίγο.", allow_interruptions=True)
+        await _safe_say("Λυπάμαι, αντιμετωπίζω πρόβλημα στον έλεγχο αυτής της παραγγελίας. Παρακαλώ δοκιμάστε ξανά σε λίγο.", delay_s=0.0)
         state.support_state = "awaiting_order"
     finally:
         state.lookup_inflight = False
@@ -822,7 +828,7 @@ async def _run_phone_lookup(agent: VoicePipelineAgent, phone_number: str):
         
         from src.utils.voice_formatting import clean_text_for_tts
         cleaned_result = clean_text_for_tts(result, lang="el")
-        await agent.say(cleaned_result, allow_interruptions=True)
+        await _safe_say(cleaned_result, delay_s=0.0)
         
         state.last_phone_number = phone_number
         if "δεν βρέθηκε" in (result or "").lower() or "no order" in (result or "").lower() or "could not" in (result or "").lower():
@@ -834,11 +840,11 @@ async def _run_phone_lookup(agent: VoicePipelineAgent, phone_number: str):
             state.support_state = "idle"
     except asyncio.TimeoutError:
         room_log("PHONE_LOOKUP_TIMEOUT")
-        await agent.say("Λυπάμαι, έχω λίγο πρόβλημα με την αναζήτηση. Μπορείτε να επαναλάβετε τον αριθμό τηλεφώνου;", allow_interruptions=True)
+        await _safe_say("Λυπάμαι, έχω λίγο πρόβλημα με την αναζήτηση. Μπορείτε να επαναλάβετε τον αριθμό τηλεφώνου;", delay_s=0.0)
         state.support_state = "awaiting_phone"
     except Exception as e:
         logger.error("Phone lookup error: %s", e)
-        await agent.say("Λυπάμαι, αντιμετωπίζω πρόβλημα με τον έλεγχο αυτού του τηλεφώνου. Παρακαλώ δοκιμάστε ξανά σε λίγο.", allow_interruptions=True)
+        await _safe_say("Λυπάμαι, αντιμετωπίζω πρόβλημα με τον έλεγχο αυτού του τηλεφώνου. Παρακαλώ δοκιμάστε ξανά σε λίγο.", delay_s=0.0)
         state.support_state = "awaiting_phone"
     finally:
         state.lookup_inflight = False
@@ -859,7 +865,7 @@ async def _run_create_ticket(agent: VoicePipelineAgent):
             state.ticket_issue,
         )
         room_log("TICKET_CREATE_RESULT", result=_truncate(result))
-        await agent.say(result, allow_interruptions=True)
+        await _safe_say(result, delay_s=0.0)
         state.support_state = "idle"
         state.ticket_name = ""
         state.ticket_phone = ""
@@ -875,7 +881,6 @@ async def _run_create_ticket(agent: VoicePipelineAgent):
 
 
 async def entrypoint(ctx: JobContext):
-    set_runtime_language("el")
     # PATCH 8: Warm the 5-min agent cache at startup (includes prompts + memory_items).
     cache_task = asyncio.create_task(_refresh_agent_cache(force=True))
 
@@ -997,10 +1002,84 @@ async def entrypoint(ctx: JobContext):
     effective_endpointing_delay = max(5.0, configured_endpointing_delay)
 
     def _before_llm_cb(agent_instance, chat_ctx):
-        """Gate the LLM when the deterministic handler has already replied via agent.say()."""
+        """Gate the LLM when the deterministic handler has already replied via agent.say() or is about to."""
         if time.time() < state.suppress_llm_until:
             room_log("LLM_SUPPRESSED", until=state.suppress_llm_until)
             return False
+
+        user_msg = None
+        for msg in reversed(chat_ctx.messages):
+            if msg.role == "user":
+                user_msg = msg
+                break
+
+        if user_msg and user_msg.content:
+            user_text = user_msg.content
+
+            # 0) Farewell detection
+            _t = user_text.lower().strip()
+            _farewell_intent = bool(re.search(
+                r"(\bαντίο\b|καληνύχτα|γεια σας|τίποτα άλλο|όχι ευχαριστώ|τελειώσαμε|αυτά ήταν|αυτό ήταν|όλα καλά"
+                r"|ευχαριστώ|ευχαριστούμε|τα λέμε|καλή συνέχεια|καλή μέρα|καλή εσπέρα"
+                r"|\bbye\b|goodbye|take care|see you|no thank|nothing else|that.?s all)",
+                _t
+            ))
+            if not _farewell_intent:
+                _has_thanks = bool(re.search(r"(ευχαριστ|τηνκ s|thanks)", _t))
+                _has_close = bool(re.search(r"(όχι|εντάξει|ok|okay|done|\bno\b)", _t))
+                _is_short = len(_t.split()) <= 10
+                if _has_thanks and _has_close and _is_short:
+                    _farewell_intent = True
+            if _farewell_intent and len(re.findall(r"\d", user_text)) >= 3:
+                _farewell_intent = False
+
+            if _farewell_intent:
+                room_log("LLM_PREVENT_RACE_FAREWELL", text=user_text)
+                return False
+
+            # Incomplete phone number check
+            all_digits = "".join(_extract_digit_parts(user_text))
+            if 7 <= len(all_digits) <= 9 and state.support_state == "awaiting_phone":
+                room_log("LLM_PREVENT_RACE_INCOMPLETE_PHONE", text=user_text)
+                return False
+
+            # Ticket escape check
+            _ticket_escape = bool(re.search(
+                r"(άνθρωπο|εκπρόσωπο|υπάλληλο|καλέστε με|αίτημα υποστήριξης|ticket|παράπονο|human|representative|support ticket|create ticket)",
+                user_text.lower()
+            ))
+            _in_ticket_flow = state.support_state in {
+                "ticket_name", "ticket_phone", "ticket_email",
+                "ticket_issue", "ticket_confirm", "creating_ticket"
+            }
+            if _ticket_escape and not _in_ticket_flow:
+                room_log("LLM_PREVENT_RACE_TICKET", text=user_text)
+                return False
+
+            # Order/phone lookup triggers
+            if state.support_state in {"awaiting_order", "checking_order"}:
+                phone_candidate = _normalize_phone_for_lookup(user_text)
+                if phone_candidate:
+                    room_log("LLM_PREVENT_RACE_PHONE", text=user_text)
+                    return False
+                order_id = _normalize_order_id_strict(user_text)
+                if order_id:
+                    room_log("LLM_PREVENT_RACE_ORDER", text=user_text)
+                    return False
+                if _mentions_no_order_number(user_text) or _mentions_phone_lookup_intent(user_text):
+                    room_log("LLM_PREVENT_RACE_PHONE_INTENT", text=user_text)
+                    return False
+
+            elif state.support_state in {"awaiting_phone", "checking_phone"}:
+                phone_candidate = _normalize_phone_for_lookup(user_text)
+                if phone_candidate:
+                    room_log("LLM_PREVENT_RACE_PHONE", text=user_text)
+                    return False
+                order_id_escape = _normalize_order_id_strict(user_text)
+                if order_id_escape:
+                    room_log("LLM_PREVENT_RACE_ORDER_ESCAPE", text=user_text)
+                    return False
+
         from livekit.agents.pipeline.pipeline_agent import _default_before_llm_cb
         return _default_before_llm_cb(agent_instance, chat_ctx)
 
@@ -1030,9 +1109,16 @@ async def entrypoint(ctx: JobContext):
     conversation_transcript: list[str] = []
 
     async def _safe_say(text: str, delay_s: float = 0.1):
-        """Safely say text after a brief delay to let pipeline interruptions settle."""
-        await asyncio.sleep(delay_s)
+        """Safely say text after a brief delay to let pipeline interruptions settle and publish to transcript."""
+        if delay_s > 0:
+            await asyncio.sleep(delay_s)
+        # Ensure LLM is in sync with deterministic assistant utterances, avoiding duplicates
+        if not chat_ctx.messages or chat_ctx.messages[-1].text != text:
+            chat_ctx.append(role="assistant", text=text)
+        asyncio.create_task(send_agent_transcript(text))
         await agent.say(text, allow_interruptions=True)
+
+    _current["safe_say"] = _safe_say
 
     def suppress_llm(seconds: float = 10.0):
         """Suppress LLM synthesis for the next N seconds (used when handler replies deterministically)."""
@@ -1208,7 +1294,7 @@ async def entrypoint(ctx: JobContext):
             goodbye_msg = get_closing("el")
             asyncio.create_task(_safe_say(goodbye_msg))
             async def _delayed_end_farewell():
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(6.0)
                 state.should_end = True
                 state.disconnect_reason = "farewell"
             asyncio.create_task(_delayed_end_farewell())
@@ -1273,15 +1359,11 @@ async def entrypoint(ctx: JobContext):
             if _mentions_no_order_number(user_text) or _mentions_phone_lookup_intent(user_text):
                 state.support_state = "awaiting_phone"
                 room_log("FLOW_TRANSITION", from_state="awaiting_order", to_state="awaiting_phone", reason="no_order_or_phone_intent")
+                suppress_llm(15.0)
+                agent.interrupt()
+                asyncio.create_task(_safe_say("Κανένα πρόβλημα. Παρακαλώ δώστε μου τον αριθμό τηλεφώνου που χρησιμοποιήσατε για την παραγγελία σας."))
                 return
 
-            if _is_order_relevant(user_text):
-                prompt = "Όποτε είστε έτοιμοι, πείτε μου τον αριθμό παραγγελίας σας. Αν δεν τον έχετε, πείτε το και θα τον βρω με το τηλέφωνό σας."
-                if not _should_suppress_clarification(prompt):
-                    suppress_llm()
-                    agent.interrupt()
-                    asyncio.create_task(_safe_say(prompt))
-                return
             return
 
         # 3) Active phone-support flow
@@ -1494,7 +1576,7 @@ async def entrypoint(ctx: JobContext):
     if greeting_enabled:
         greeting = get_greeting("el")
         chat_ctx.append(role="assistant", text=greeting)
-        await agent.say(greeting, allow_interruptions=True)
+        await _safe_say(greeting, delay_s=1.5)
     await set_ui_state("idle")
 
     bg_audio_player = None
@@ -1583,7 +1665,7 @@ async def entrypoint(ctx: JobContext):
             state.silence_prompt_count += 1
             state.silence_snooze_until = time.time() + 15.0
             suppress_llm(15.0)
-            await agent.say(text, allow_interruptions=True)
+            await _safe_say(text, delay_s=0.0)
 
     silence_task = asyncio.create_task(_silence_monitor())
 
@@ -1609,6 +1691,28 @@ async def entrypoint(ctx: JobContext):
         pass
 
 
+async def request_fnc(req: JobRequest) -> None:
+    """Determine if the Greek agent should accept this job request based on DB language setting."""
+    try:
+        from src.services.database import get_database_service
+        db = get_database_service()
+        settings_dict = await db.get_all_settings()
+        lang = settings_dict.get("agent_language", "en")
+        logger.info("Greek agent: request received. Active DB language: %s", lang)
+        if lang == "el":
+            logger.info("Greek agent: accepting job request")
+            await req.accept()
+        else:
+            logger.info("Greek agent: rejecting job request because active language is English (%s)", lang)
+            await req.reject()
+    except Exception as e:
+        logger.warning("Greek agent: failed to check language in request_fnc, accepting anyway: %s", e)
+        try:
+            await req.accept()
+        except Exception:
+            pass
+
+
 def prewarm(proc: JobProcess):
     """Prewarm the Greek agent process (lightweight to prevent connection pool exhaustion)."""
     logger.info("Prewarm: Greek Elena ready (lightweight)")
@@ -1620,6 +1724,8 @@ def run_agent():
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
+            prewarm_fnc=prewarm,
+            request_fnc=request_fnc,
             api_key=settings.livekit_api_key,
             api_secret=settings.livekit_api_secret,
             ws_url=settings.livekit_url,
