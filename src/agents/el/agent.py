@@ -1056,8 +1056,8 @@ async def entrypoint(ctx: JobContext):
                 room_log("LLM_PREVENT_RACE_TICKET", text=user_text)
                 return False
 
-            # Order/phone lookup triggers
-            if state.support_state in {"awaiting_order", "checking_order"}:
+            # Order/phone lookup triggers — skip entirely when in ticket flow
+            if not _in_ticket_flow and state.support_state in {"awaiting_order", "checking_order"}:
                 phone_candidate = _normalize_phone_for_lookup(user_text)
                 if phone_candidate:
                     room_log("LLM_PREVENT_RACE_PHONE", text=user_text)
@@ -1070,7 +1070,7 @@ async def entrypoint(ctx: JobContext):
                     room_log("LLM_PREVENT_RACE_PHONE_INTENT", text=user_text)
                     return False
 
-            elif state.support_state in {"awaiting_phone", "checking_phone"}:
+            elif not _in_ticket_flow and state.support_state in {"awaiting_phone", "checking_phone"}:
                 phone_candidate = _normalize_phone_for_lookup(user_text)
                 if phone_candidate:
                     room_log("LLM_PREVENT_RACE_PHONE", text=user_text)
@@ -1378,8 +1378,8 @@ async def entrypoint(ctx: JobContext):
 
             return
 
-        # 3) Active phone-support flow
-        if state.support_state in {"awaiting_phone", "checking_phone"} or len(all_digits) >= 10:
+        # 3) Active phone-support flow — skip entirely when collecting ticket contact info
+        if (state.support_state in {"awaiting_phone", "checking_phone"} or len(all_digits) >= 10) and not _in_ticket_flow:
             # Check for Order ID first as an escape path, even in phone flow.
             order_id_escape = _normalize_order_id_strict(user_text)
             if order_id_escape:
@@ -1422,15 +1422,16 @@ async def entrypoint(ctx: JobContext):
             return
 
         if state.support_state == "ticket_phone":
-            ticket_phone = _normalize_phone_for_lookup(user_text)
-            if not ticket_phone:
+            # Accept any 9-15 digit sequence as contact phone — no Shopify lookup validation needed
+            digits = "".join(_extract_digit_parts(user_text))
+            if not (9 <= len(digits) <= 15):
                 prompt = "Παρακαλώ δώστε μου έναν έγκυρο αριθμό τηλεφώνου."
                 if not _should_suppress_clarification(prompt):
                     suppress_llm()
                     agent.interrupt()
                     asyncio.create_task(_safe_say(prompt))
                 return
-            state.ticket_phone = ticket_phone
+            state.ticket_phone = digits
             state.support_state = "ticket_email"
             suppress_llm()
             agent.interrupt()
