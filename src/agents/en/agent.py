@@ -1043,16 +1043,22 @@ async def entrypoint(ctx: JobContext):
                 room_log("LLM_PREVENT_RACE_INCOMPLETE_PHONE", text=user_text)
                 return False
 
+            # PATCH 9: Block LLM entirely when in ticket flow states.
+            # The deterministic handler in user_speech_committed manages all responses.
+            _in_ticket_flow = state.support_state in {
+                "ticket_name", "ticket_phone", "ticket_email",
+                "ticket_issue", "ticket_confirm", "creating_ticket"
+            }
+            if _in_ticket_flow:
+                room_log("LLM_PREVENT_RACE_TICKET_FLOW", text=user_text, state=state.support_state)
+                return False
+
             # Ticket escape check
             _ticket_escape = bool(re.search(
                 r"\b(human|representative|call me|callback|support ticket|open ticket|create ticket)\b",
                 user_text.lower()
             ))
-            _in_ticket_flow = state.support_state in {
-                "ticket_name", "ticket_phone", "ticket_email",
-                "ticket_issue", "ticket_confirm", "creating_ticket"
-            }
-            if _ticket_escape and not _in_ticket_flow:
+            if _ticket_escape:
                 room_log("LLM_PREVENT_RACE_TICKET", text=user_text)
                 return False
 
