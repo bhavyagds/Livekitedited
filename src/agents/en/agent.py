@@ -1043,22 +1043,16 @@ async def entrypoint(ctx: JobContext):
                 room_log("LLM_PREVENT_RACE_INCOMPLETE_PHONE", text=user_text)
                 return False
 
-            # PATCH 9: Block LLM entirely when in ticket flow states.
-            # The deterministic handler in user_speech_committed manages all responses.
-            _in_ticket_flow = state.support_state in {
-                "ticket_name", "ticket_phone", "ticket_email",
-                "ticket_issue", "ticket_confirm", "creating_ticket"
-            }
-            if _in_ticket_flow:
-                room_log("LLM_PREVENT_RACE_TICKET_FLOW", text=user_text, state=state.support_state)
-                return False
-
             # Ticket escape check
             _ticket_escape = bool(re.search(
                 r"\b(human|representative|call me|callback|support ticket|open ticket|create ticket)\b",
                 user_text.lower()
             ))
-            if _ticket_escape:
+            _in_ticket_flow = state.support_state in {
+                "ticket_name", "ticket_phone", "ticket_email",
+                "ticket_issue", "ticket_confirm", "creating_ticket"
+            }
+            if _ticket_escape and not _in_ticket_flow:
                 room_log("LLM_PREVENT_RACE_TICKET", text=user_text)
                 return False
 
@@ -1119,9 +1113,7 @@ async def entrypoint(ctx: JobContext):
         if delay_s > 0:
             await asyncio.sleep(delay_s)
         # Ensure LLM is in sync with deterministic assistant utterances, avoiding duplicates
-        last_msg = chat_ctx.messages[-1] if chat_ctx.messages else None
-        last_msg_text = getattr(last_msg, "content", None) or getattr(last_msg, "text", None) or ""
-        if not last_msg or last_msg_text != text:
+        if not chat_ctx.messages or chat_ctx.messages[-1].text != text:
             chat_ctx.append(role="assistant", text=text)
         asyncio.create_task(send_agent_transcript(text))
         await agent.say(text, allow_interruptions=True)
@@ -1388,13 +1380,7 @@ async def entrypoint(ctx: JobContext):
             return
 
         # 3) Active phone-support flow
-        # PATCH 9: Exclude ticket flow states from the phone-lookup trigger.
-        # When user is in ticket_phone state, their phone number is contact info, NOT an order lookup.
-        _in_ticket_flow_states = state.support_state in {
-            "ticket_name", "ticket_phone", "ticket_email",
-            "ticket_issue", "ticket_confirm", "creating_ticket"
-        }
-        if state.support_state in {"awaiting_phone", "checking_phone"} or (len(all_digits) >= 10 and not _in_ticket_flow_states):
+        if state.support_state in {"awaiting_phone", "checking_phone"} or len(all_digits) >= 10:
             # Check for Order ID first as an escape path, even in phone flow.
             order_id_escape = _normalize_order_id_strict(user_text)
             if order_id_escape:
@@ -1429,58 +1415,60 @@ async def entrypoint(ctx: JobContext):
 
         # 3b) Support ticket flow
         if state.support_state == "ticket_name":
-            agent.interrupt()  # PATCH 9: Kill any in-flight LLM immediately
             state.ticket_name = user_text
             state.support_state = "ticket_phone"
-            suppress_llm(15.0)
+            suppress_llm()
+            agent.interrupt()
             asyncio.create_task(_safe_say("Thanks. Please share your phone number."))
             return
 
         if state.support_state == "ticket_phone":
-            agent.interrupt()  # PATCH 9: Kill any in-flight LLM immediately
             ticket_phone = _normalize_phone_for_lookup(user_text)
             if not ticket_phone:
                 prompt = "Please share a valid phone number."
                 if not _should_suppress_clarification(prompt):
-                    suppress_llm(15.0)
+                    suppress_llm()
+                    agent.interrupt()
                     asyncio.create_task(_safe_say(prompt))
                 return
             state.ticket_phone = ticket_phone
             state.support_state = "ticket_email"
-            suppress_llm(15.0)
+            suppress_llm()
+            agent.interrupt()
             asyncio.create_task(_safe_say("Got it. Now please share your email address."))
             return
 
         if state.support_state == "ticket_email":
-            agent.interrupt()  # PATCH 9: Kill any in-flight LLM immediately
             if not _looks_like_email(user_text):
-                suppress_llm(15.0)
+                suppress_llm()
+                agent.interrupt()
                 asyncio.create_task(_safe_say("Please share a valid email address."))
                 return
             state.ticket_email = user_text.strip()
             state.support_state = "ticket_issue"
-            suppress_llm(15.0)
+            suppress_llm()
+            agent.interrupt()
             asyncio.create_task(_safe_say("Please describe the issue in one or two sentences."))
             return
 
         if state.support_state == "ticket_issue":
-            agent.interrupt()  # PATCH 9: Kill any in-flight LLM immediately
             state.ticket_issue = user_text
             state.support_state = "ticket_confirm"
             confirm_text = (
                 f"I have your details as name {state.ticket_name}, phone {state.ticket_phone}, and email {state.ticket_email}. "
                 "Should I create the support ticket now?"
             )
-            suppress_llm(15.0)
+            suppress_llm()
+            agent.interrupt()
             asyncio.create_task(_safe_say(confirm_text))
             return
 
         if state.support_state == "ticket_confirm":
-            agent.interrupt()  # PATCH 9: Kill any in-flight LLM immediately
             if _is_yes(user_text):
-                suppress_llm(15.0)
+                suppress_llm()
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(10.0)
+                agent.interrupt()
                 asyncio.create_task(_safe_say("Thanks. Creating your support ticket now."))
                 asyncio.create_task(_run_create_ticket(agent))
                 return
@@ -1490,10 +1478,12 @@ async def entrypoint(ctx: JobContext):
                 state.ticket_phone = ""
                 state.ticket_email = ""
                 state.ticket_issue = ""
-                suppress_llm(15.0)
+                suppress_llm()
+                agent.interrupt()
                 asyncio.create_task(_safe_say("No problem. I have cancelled the ticket request."))
                 return
-            suppress_llm(15.0)
+            suppress_llm()
+            agent.interrupt()
             asyncio.create_task(_safe_say("Please say yes to create the ticket, or no to cancel."))
             return
 
@@ -1528,7 +1518,6 @@ async def entrypoint(ctx: JobContext):
         if ticket_intent:
             state.support_state = "ticket_name"
             suppress_llm(15.0)
-            agent.interrupt()  # PATCH 9: Kill any in-flight LLM
             asyncio.create_task(_safe_say("I can help you with that. First, could you please tell me your full name?"))
             return
 
