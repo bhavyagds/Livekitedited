@@ -434,6 +434,18 @@ class ElenaFunctionContext(llm.FunctionContext):
     @llm.ai_callable()
     async def lookup_order(self, order_number: Annotated[str, llm.TypeInfo(description="Order number")]) -> str:
         """Look up an order by order number and return a customer-facing summary."""
+        # Hard guard: never do order lookups while collecting support ticket fields.
+        _state = _current.get("state")
+        if _state and _state.support_state in {
+            "ticket_name", "ticket_phone", "ticket_email",
+            "ticket_issue", "ticket_confirm", "creating_ticket",
+        }:
+            room_log("ORDER_LOOKUP_BLOCKED", reason="support_ticket_flow", order_number=order_number)
+            return (
+                "Order lookup is not available during support ticket collection. "
+                "Continue collecting the ticket fields."
+            )
+
         # Strict Guard: If it looks like a phone number (7+ digits), reject it.
         # This prevents the LLM from talking over the phone lookup handler.
         clean_num = re.sub(r"\D", "", str(order_number))
@@ -456,7 +468,21 @@ class ElenaFunctionContext(llm.FunctionContext):
     @llm.ai_callable()
     async def lookup_order_by_phone(self, phone: Annotated[str, llm.TypeInfo(description="10-digit phone number")]) -> str:
         """Look up an order by phone number and return a customer-facing summary."""
-        # Strict Guard: Only process 10 digits.
+        # Hard guard: BLOCK phone lookups during support ticket collection.
+        # Phone numbers given at this stage are contact details for the ticket,
+        # NOT order lookup keys — even if the LLM misinterprets the context.
+        _state = _current.get("state")
+        if _state and _state.support_state in {
+            "ticket_name", "ticket_phone", "ticket_email",
+            "ticket_issue", "ticket_confirm", "creating_ticket",
+        }:
+            room_log("PHONE_LOOKUP_BLOCKED", reason="support_ticket_flow", phone=phone)
+            return (
+                "Phone number captured for support ticket contact only. "
+                "Do not perform order lookup. Continue collecting ticket fields."
+            )
+
+        # Strict Guard: Only process 10+ digits.
         clean_phone = re.sub(r"\D", "", str(phone))
         if len(clean_phone) < 10:
             return "ERROR: This tool requires a full 10-digit phone number."
@@ -1378,8 +1404,8 @@ async def entrypoint(ctx: JobContext):
 
             return
 
-        # 3) Active phone-support flow
-        if state.support_state in {"awaiting_phone", "checking_phone"} or len(all_digits) >= 10:
+        # 3) Active phone-support flow — skip entirely when collecting ticket contact info
+        if state.support_state in {"awaiting_phone", "checking_phone"} and not _in_ticket_flow:
             # Check for Order ID first as an escape path, even in phone flow.
             order_id_escape = _normalize_order_id_strict(user_text)
             if order_id_escape:
