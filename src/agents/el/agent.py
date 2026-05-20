@@ -646,6 +646,26 @@ def _looks_like_email(text: str) -> bool:
     return bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", (text or "").strip()))
 
 
+def _normalize_spoken_email(text: str) -> Optional[str]:
+    """Convert a spoken email (with Greek/English verbal cues) into a proper email address.
+    Handles: 'παπάκι'/'at' for @, 'τελεία'/'dot' for .
+    Example: 'vavia παπάκι gmail τελεία com' -> 'vavia@gmail.com'
+    """
+    t = (text or "").strip()
+    # Replace Greek and English verbal substitutes for @ and .
+    t = re.sub(r"\bπαπ[αά]κι\b", "@", t, flags=re.IGNORECASE)
+    t = re.sub(r"\b(at|ατ)\b", "@", t, flags=re.IGNORECASE)
+    t = re.sub(r"\bτελε[ίι]α\b", ".", t, flags=re.IGNORECASE)
+    t = re.sub(r"\b(dot|ντοτ)\b", ".", t, flags=re.IGNORECASE)
+    # Collapse spaces around @ and .
+    t = re.sub(r"\s*@\s*", "@", t)
+    t = re.sub(r"\s*\.\s*", ".", t)
+    t = t.lower().strip()
+    if re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", t):
+        return t
+    return None
+
+
 def _is_yes(text: str) -> bool:
     t = (text or "").strip().lower()
     return t in {"ναι", "σωστά", "επιβεβαιώνω", "προχώρα", "ναι σωστά", "μάλιστα",
@@ -1007,6 +1027,18 @@ async def entrypoint(ctx: JobContext):
             room_log("LLM_SUPPRESSED", until=state.suppress_llm_until)
             return False
 
+        # Block LLM entirely while in support ticket flow.
+        # All ticket prompts are deterministic; the LLM has no context of the ticket state
+        # and would hallucinate order-lookup prompts ("tell me your order/phone number").
+        # The silence monitor handles silence prompts correctly via _contextual_silence_prompt().
+        _in_ticket_flow = state.support_state in {
+            "ticket_name", "ticket_phone", "ticket_email",
+            "ticket_issue", "ticket_confirm", "creating_ticket"
+        }
+        if _in_ticket_flow:
+            room_log("LLM_PREVENT_TICKET_FLOW", support_state=state.support_state)
+            return False
+
         user_msg = None
         for msg in reversed(chat_ctx.messages):
             if msg.role == "user":
@@ -1043,15 +1075,11 @@ async def entrypoint(ctx: JobContext):
                 room_log("LLM_PREVENT_RACE_INCOMPLETE_PHONE", text=user_text)
                 return False
 
-            # Ticket escape check
+            # Ticket escape check (uses _in_ticket_flow defined at the top of this function)
             _ticket_escape = bool(re.search(
                 r"(άνθρωπο|εκπρόσωπο|υπάλληλο|καλέστε με|αίτημα υποστήριξης?|υποστήριξη|ticket|παράπονο|human|representative|support ticket|create ticket)",
                 user_text.lower()
             ))
-            _in_ticket_flow = state.support_state in {
-                "ticket_name", "ticket_phone", "ticket_email",
-                "ticket_issue", "ticket_confirm", "creating_ticket"
-            }
             if _ticket_escape and not _in_ticket_flow:
                 room_log("LLM_PREVENT_RACE_TICKET", text=user_text)
                 return False
@@ -1414,6 +1442,17 @@ async def entrypoint(ctx: JobContext):
 
         # 3b) Support ticket flow
         if state.support_state == "ticket_name":
+            # Reject if user gave digits (e.g. a phone number) instead of a name
+            name_letters = re.sub(r"[^a-zA-Z\u0370-\u03ff\u1f00-\u1fff\s]", "", user_text).strip()
+            name_digits = "".join(_extract_digit_parts(user_text))
+            if not name_letters or (len(name_digits) > 4 and len(name_digits) >= len(name_letters)):
+                prompt = "Παρακαλώ πείτε μου το πλήρες όνομά σας."
+                if not _should_suppress_clarification(prompt):
+                    suppress_llm()
+                    snooze_silence(20.0)
+                    agent.interrupt()
+                    asyncio.create_task(_safe_say(prompt))
+                return
             state.ticket_name = user_text
             state.support_state = "ticket_phone"
             suppress_llm()
@@ -1425,9 +1464,10 @@ async def entrypoint(ctx: JobContext):
             # Accept any 9-15 digit sequence as contact phone — no Shopify lookup validation needed
             digits = "".join(_extract_digit_parts(user_text))
             if not (9 <= len(digits) <= 15):
-                prompt = "Παρακαλώ δώστε μου έναν έγκυρο αριθμό τηλεφώνου."
+                prompt = "Παρακαλώ πείτε μου τον πλήρη αριθμό τηλεφώνου σας, όλα τα ψηφία μαζί."
                 if not _should_suppress_clarification(prompt):
                     suppress_llm()
+                    snooze_silence(25.0)
                     agent.interrupt()
                     asyncio.create_task(_safe_say(prompt))
                 return
@@ -1439,12 +1479,19 @@ async def entrypoint(ctx: JobContext):
             return
 
         if state.support_state == "ticket_email":
-            if not _looks_like_email(user_text):
+            # Try direct match first, then spoken-form normalization (e.g. 'παπάκι' for @, 'τελεία' for .)
+            normalized_email = (_normalize_spoken_email(user_text)
+                                if not _looks_like_email(user_text)
+                                else user_text.strip().lower())
+            if not normalized_email:
                 suppress_llm()
+                snooze_silence(20.0)
                 agent.interrupt()
-                asyncio.create_task(_safe_say("Παρακαλώ δώστε μου μια έγκυρη διεύθυνση email."))
+                asyncio.create_task(_safe_say(
+                    "Παρακαλώ δώστε μου τη διεύθυνση email σας. Για παράδειγμα: name παπάκι gmail τελεία com."
+                ))
                 return
-            state.ticket_email = user_text.strip()
+            state.ticket_email = normalized_email
             state.support_state = "ticket_issue"
             suppress_llm()
             agent.interrupt()
