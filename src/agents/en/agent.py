@@ -1380,7 +1380,13 @@ async def entrypoint(ctx: JobContext):
             return
 
         # 3) Active phone-support flow
-        if state.support_state in {"awaiting_phone", "checking_phone"} or len(all_digits) >= 10:
+        # PATCH 9: Exclude ticket flow states from the phone-lookup trigger.
+        # When user is in ticket_phone state, their phone number is contact info, NOT an order lookup.
+        _in_ticket_flow_states = state.support_state in {
+            "ticket_name", "ticket_phone", "ticket_email",
+            "ticket_issue", "ticket_confirm", "creating_ticket"
+        }
+        if state.support_state in {"awaiting_phone", "checking_phone"} or (len(all_digits) >= 10 and not _in_ticket_flow_states):
             # Check for Order ID first as an escape path, even in phone flow.
             order_id_escape = _normalize_order_id_strict(user_text)
             if order_id_escape:
