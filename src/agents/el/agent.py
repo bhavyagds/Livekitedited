@@ -1007,11 +1007,26 @@ async def entrypoint(ctx: JobContext):
             room_log("LLM_SUPPRESSED", until=state.suppress_llm_until)
             return False
 
+        _in_ticket_flow = state.support_state in {
+            "ticket_name", "ticket_phone", "ticket_email",
+            "ticket_issue", "ticket_confirm", "creating_ticket"
+        }
+
         user_msg = None
         for msg in reversed(chat_ctx.messages):
             if msg.role == "user":
                 user_msg = msg
                 break
+
+        # Suppress LLM for blank/noise turns when in ticket flow to prevent hallucinating order search prompts
+        if _in_ticket_flow:
+            if not user_msg or not user_msg.content:
+                room_log("LLM_PREVENT_RACE_TICKET_SILENCE", text="")
+                return False
+            clean_user_text = re.sub(r"[^a-zA-Z0-9\u0370-\u03ff\u1f00-\u1fff]", "", user_msg.content)
+            if not clean_user_text:
+                room_log("LLM_PREVENT_RACE_TICKET_NOISE", text=user_msg.content)
+                return False
 
         if user_msg and user_msg.content:
             user_text = user_msg.content
@@ -1048,10 +1063,6 @@ async def entrypoint(ctx: JobContext):
                 r"(άνθρωπο|εκπρόσωπο|υπάλληλο|καλέστε με|αίτημα υποστήριξης?|υποστήριξη|ticket|παράπονο|human|representative|support ticket|create ticket)",
                 user_text.lower()
             ))
-            _in_ticket_flow = state.support_state in {
-                "ticket_name", "ticket_phone", "ticket_email",
-                "ticket_issue", "ticket_confirm", "creating_ticket"
-            }
             if _ticket_escape and not _in_ticket_flow:
                 room_log("LLM_PREVENT_RACE_TICKET", text=user_text)
                 return False
@@ -1422,15 +1433,15 @@ async def entrypoint(ctx: JobContext):
             return
 
         if state.support_state == "ticket_phone":
-            ticket_phone = _normalize_phone_for_lookup(user_text)
-            if not ticket_phone:
+            digits = "".join(_extract_digit_parts(user_text))
+            if not (9 <= len(digits) <= 15):
                 prompt = "Παρακαλώ δώστε μου έναν έγκυρο αριθμό τηλεφώνου."
                 if not _should_suppress_clarification(prompt):
                     suppress_llm()
                     agent.interrupt()
                     asyncio.create_task(_safe_say(prompt))
                 return
-            state.ticket_phone = ticket_phone
+            state.ticket_phone = digits
             state.support_state = "ticket_email"
             suppress_llm()
             agent.interrupt()
