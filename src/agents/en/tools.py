@@ -202,7 +202,10 @@ def validate_email(email: str) -> bool:
 
 def validate_phone(phone: str) -> bool:
     cleaned = clean_phone_number(phone)
-    return len(cleaned) >= 10
+    # Accept 9-15 digits — matches the ticket_phone handler's acceptance window.
+    # International numbers (e.g. Greek 10-digit, Indian 10-digit) and some
+    # European formats can be 9 digits without country prefix.
+    return 9 <= len(cleaned) <= 15
 
 
 async def create_support_ticket(
