@@ -1045,7 +1045,7 @@ async def entrypoint(ctx: JobContext):
 
             # Ticket escape check
             _ticket_escape = bool(re.search(
-                r"(άνθρωπο|εκπρόσωπο|υπάλληλο|καλέστε με|αίτημα υποστήριξης|ticket|παράπονο|human|representative|support ticket|create ticket)",
+                r"(άνθρωπο|εκπρόσωπο|υπάλληλο|καλέστε με|αίτημα υποστήριξης?|υποστήριξη|ticket|παράπονο|human|representative|support ticket|create ticket)",
                 user_text.lower()
             ))
             _in_ticket_flow = state.support_state in {
@@ -1315,7 +1315,7 @@ async def entrypoint(ctx: JobContext):
 
         # 1.5) Ticket-creation escape
         _ticket_escape = bool(re.search(
-            r"(άνθρωπο|εκπρόσωπο|υπάλληλο|καλέστε με|αίτημα υποστήριξης|ticket|παράπονο|human|representative|support ticket|create ticket)",
+            r"(άνθρωπο|εκπρόσωπο|υπάλληλο|καλέστε με|αίτημα υποστήριξης?|υποστήριξη|ticket|παράπονο|human|representative|support ticket|create ticket)",
             user_text.lower()
         ))
         _in_ticket_flow = state.support_state in {
@@ -1552,7 +1552,7 @@ async def entrypoint(ctx: JobContext):
                     asyncio.create_task(_run_order_lookup(agent, order_id))
                     return
 
-        ticket_intent = bool(re.search(r"(άνθρωπο|εκπρόσωπο|καλέστε με|αίτημα υποστήριξης|ticket|human|representative|support ticket)", user_text.lower()))
+        ticket_intent = bool(re.search(r"(άνθρωπο|εκπρόσωπο|καλέστε με|αίτημα υποστήριξης?|υποστήριξη|ticket|human|representative|support ticket)", user_text.lower()))
         if ticket_intent:
             state.support_state = "ticket_name"
             suppress_llm(15.0)
