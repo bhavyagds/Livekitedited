@@ -1427,60 +1427,58 @@ async def entrypoint(ctx: JobContext):
 
         # 3b) Support ticket flow
         if state.support_state == "ticket_name":
+            agent.interrupt()  # PATCH 9: Kill any in-flight LLM immediately
             state.ticket_name = user_text
             state.support_state = "ticket_phone"
-            suppress_llm()
-            agent.interrupt()
+            suppress_llm(15.0)
             asyncio.create_task(_safe_say("Thanks. Please share your phone number."))
             return
 
         if state.support_state == "ticket_phone":
+            agent.interrupt()  # PATCH 9: Kill any in-flight LLM immediately
             ticket_phone = _normalize_phone_for_lookup(user_text)
             if not ticket_phone:
                 prompt = "Please share a valid phone number."
                 if not _should_suppress_clarification(prompt):
-                    suppress_llm()
-                    agent.interrupt()
+                    suppress_llm(15.0)
                     asyncio.create_task(_safe_say(prompt))
                 return
             state.ticket_phone = ticket_phone
             state.support_state = "ticket_email"
-            suppress_llm()
-            agent.interrupt()
+            suppress_llm(15.0)
             asyncio.create_task(_safe_say("Got it. Now please share your email address."))
             return
 
         if state.support_state == "ticket_email":
+            agent.interrupt()  # PATCH 9: Kill any in-flight LLM immediately
             if not _looks_like_email(user_text):
-                suppress_llm()
-                agent.interrupt()
+                suppress_llm(15.0)
                 asyncio.create_task(_safe_say("Please share a valid email address."))
                 return
             state.ticket_email = user_text.strip()
             state.support_state = "ticket_issue"
-            suppress_llm()
-            agent.interrupt()
+            suppress_llm(15.0)
             asyncio.create_task(_safe_say("Please describe the issue in one or two sentences."))
             return
 
         if state.support_state == "ticket_issue":
+            agent.interrupt()  # PATCH 9: Kill any in-flight LLM immediately
             state.ticket_issue = user_text
             state.support_state = "ticket_confirm"
             confirm_text = (
                 f"I have your details as name {state.ticket_name}, phone {state.ticket_phone}, and email {state.ticket_email}. "
                 "Should I create the support ticket now?"
             )
-            suppress_llm()
-            agent.interrupt()
+            suppress_llm(15.0)
             asyncio.create_task(_safe_say(confirm_text))
             return
 
         if state.support_state == "ticket_confirm":
+            agent.interrupt()  # PATCH 9: Kill any in-flight LLM immediately
             if _is_yes(user_text):
-                suppress_llm()
+                suppress_llm(15.0)
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(10.0)
-                agent.interrupt()
                 asyncio.create_task(_safe_say("Thanks. Creating your support ticket now."))
                 asyncio.create_task(_run_create_ticket(agent))
                 return
@@ -1490,12 +1488,10 @@ async def entrypoint(ctx: JobContext):
                 state.ticket_phone = ""
                 state.ticket_email = ""
                 state.ticket_issue = ""
-                suppress_llm()
-                agent.interrupt()
+                suppress_llm(15.0)
                 asyncio.create_task(_safe_say("No problem. I have cancelled the ticket request."))
                 return
-            suppress_llm()
-            agent.interrupt()
+            suppress_llm(15.0)
             asyncio.create_task(_safe_say("Please say yes to create the ticket, or no to cancel."))
             return
 
@@ -1530,6 +1526,7 @@ async def entrypoint(ctx: JobContext):
         if ticket_intent:
             state.support_state = "ticket_name"
             suppress_llm(15.0)
+            agent.interrupt()  # PATCH 9: Kill any in-flight LLM
             asyncio.create_task(_safe_say("I can help you with that. First, could you please tell me your full name?"))
             return
 
