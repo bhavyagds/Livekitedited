@@ -1006,6 +1006,18 @@ async def entrypoint(ctx: JobContext):
             room_log("LLM_SUPPRESSED", until=state.suppress_llm_until)
             return False
 
+        # Block LLM entirely while in support ticket flow.
+        # All ticket prompts are deterministic; the LLM has no context of the ticket state
+        # and would hallucinate order-lookup prompts or call lookup_order_by_phone
+        # with the contact phone number given for the ticket.
+        _in_ticket_flow = state.support_state in {
+            "ticket_name", "ticket_phone", "ticket_email",
+            "ticket_issue", "ticket_confirm", "creating_ticket"
+        }
+        if _in_ticket_flow:
+            room_log("LLM_PREVENT_TICKET_FLOW", support_state=state.support_state)
+            return False
+
         user_msg = None
         for msg in reversed(chat_ctx.messages):
             if msg.role == "user":
@@ -1379,8 +1391,8 @@ async def entrypoint(ctx: JobContext):
 
             return
 
-        # 3) Active phone-support flow
-        if state.support_state in {"awaiting_phone", "checking_phone"} or len(all_digits) >= 10:
+        # 3) Active phone-support flow — skip entirely when collecting ticket contact info
+        if (state.support_state in {"awaiting_phone", "checking_phone"} or len(all_digits) >= 10) and not _in_ticket_flow:
             # Check for Order ID first as an escape path, even in phone flow.
             order_id_escape = _normalize_order_id_strict(user_text)
             if order_id_escape:
@@ -1423,15 +1435,17 @@ async def entrypoint(ctx: JobContext):
             return
 
         if state.support_state == "ticket_phone":
-            ticket_phone = _normalize_phone_for_lookup(user_text)
-            if not ticket_phone:
-                prompt = "Please share a valid phone number."
+            # Accept any 9-15 digit sequence as contact phone — no order-lookup validation needed
+            digits = "".join(_extract_digit_parts(user_text))
+            if not (9 <= len(digits) <= 15):
+                prompt = "Please share your full phone number, all digits together."
                 if not _should_suppress_clarification(prompt):
                     suppress_llm()
+                    snooze_silence(25.0)
                     agent.interrupt()
                     asyncio.create_task(_safe_say(prompt))
                 return
-            state.ticket_phone = ticket_phone
+            state.ticket_phone = digits
             state.support_state = "ticket_email"
             suppress_llm()
             agent.interrupt()
