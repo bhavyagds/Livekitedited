@@ -1119,7 +1119,9 @@ async def entrypoint(ctx: JobContext):
         if delay_s > 0:
             await asyncio.sleep(delay_s)
         # Ensure LLM is in sync with deterministic assistant utterances, avoiding duplicates
-        if not chat_ctx.messages or chat_ctx.messages[-1].text != text:
+        last_msg = chat_ctx.messages[-1] if chat_ctx.messages else None
+        last_msg_text = getattr(last_msg, "content", None) or getattr(last_msg, "text", None) or ""
+        if not last_msg or last_msg_text != text:
             chat_ctx.append(role="assistant", text=text)
         asyncio.create_task(send_agent_transcript(text))
         await agent.say(text, allow_interruptions=True)
