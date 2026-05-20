@@ -345,7 +345,6 @@ class SessionState:
     last_clarification_prompt_text: str = ""
     last_clarification_prompt_at: float = 0.0
     suppress_llm_until: float = 0.0
-    last_lookup_wait_prompt_at: float = 0.0
 
 
 _current = {
@@ -435,18 +434,6 @@ class ElenaFunctionContext(llm.FunctionContext):
     @llm.ai_callable()
     async def lookup_order(self, order_number: Annotated[str, llm.TypeInfo(description="Order number")]) -> str:
         """Look up an order by order number and return a customer-facing summary."""
-        # Hard guard: never do order lookups while collecting support ticket fields.
-        _state = _current.get("state")
-        if _state and _state.support_state in {
-            "ticket_name", "ticket_phone", "ticket_email",
-            "ticket_issue", "ticket_confirm", "creating_ticket",
-        }:
-            room_log("ORDER_LOOKUP_BLOCKED", reason="support_ticket_flow", order_number=order_number)
-            return (
-                "Order lookup is not available during support ticket collection. "
-                "Continue collecting the ticket fields."
-            )
-
         # Strict Guard: If it looks like a phone number (7+ digits), reject it.
         # This prevents the LLM from talking over the phone lookup handler.
         clean_num = re.sub(r"\D", "", str(order_number))
@@ -469,21 +456,7 @@ class ElenaFunctionContext(llm.FunctionContext):
     @llm.ai_callable()
     async def lookup_order_by_phone(self, phone: Annotated[str, llm.TypeInfo(description="10-digit phone number")]) -> str:
         """Look up an order by phone number and return a customer-facing summary."""
-        # Hard guard: BLOCK phone lookups during support ticket collection.
-        # Phone numbers given at this stage are contact details for the ticket,
-        # NOT order lookup keys — even if the LLM misinterprets the context.
-        _state = _current.get("state")
-        if _state and _state.support_state in {
-            "ticket_name", "ticket_phone", "ticket_email",
-            "ticket_issue", "ticket_confirm", "creating_ticket",
-        }:
-            room_log("PHONE_LOOKUP_BLOCKED", reason="support_ticket_flow", phone=phone)
-            return (
-                "Phone number captured for support ticket contact only. "
-                "Do not perform order lookup. Continue collecting ticket fields."
-            )
-
-        # Strict Guard: Only process 10+ digits.
+        # Strict Guard: Only process 10 digits.
         clean_phone = re.sub(r"\D", "", str(phone))
         if len(clean_phone) < 10:
             return "ERROR: This tool requires a full 10-digit phone number."
@@ -1142,6 +1115,7 @@ async def entrypoint(ctx: JobContext):
         # Ensure LLM is in sync with deterministic assistant utterances, avoiding duplicates
         if not chat_ctx.messages or chat_ctx.messages[-1].text != text:
             chat_ctx.append(role="assistant", text=text)
+        asyncio.create_task(send_agent_transcript(text))
         await agent.say(text, allow_interruptions=True)
 
     _current["safe_say"] = _safe_say
@@ -1329,12 +1303,9 @@ async def entrypoint(ctx: JobContext):
 
         # 1) If lookup is in progress, keep caller informed and do not branch.
         if state.lookup_inflight:
-            now_ts = time.time()
-            if now_ts - state.last_lookup_wait_prompt_at > 4.0:
-                state.last_lookup_wait_prompt_at = now_ts
-                asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(8.0)
-                asyncio.create_task(_safe_say("I am still checking that now. One moment please."))
+            asyncio.create_task(set_ui_state("thinking"))
+            snooze_silence(8.0)
+            asyncio.create_task(_safe_say("I am still checking that now. One moment please."))
             return
 
         if state.ticket_inflight:
@@ -1352,10 +1323,11 @@ async def entrypoint(ctx: JobContext):
             "ticket_name", "ticket_phone", "ticket_email",
             "ticket_issue", "ticket_confirm", "creating_ticket"
         }
-        if _ticket_escape and state.support_state == "idle":
+        if _ticket_escape and not _in_ticket_flow:
             room_log("FLOW_TRANSITION", from_state=state.support_state, to_state="ticket_name", reason="ticket_escape")
             state.support_state = "ticket_name"
             suppress_llm(15.0)
+            agent.interrupt()
             asyncio.create_task(_safe_say(
                 "I can help you with that. First, could you please tell me your full name?"
             ))
@@ -1366,16 +1338,18 @@ async def entrypoint(ctx: JobContext):
             # This prevents phone numbers from being misidentified as order IDs.
             phone_candidate = _normalize_phone_for_lookup(user_text)
             if phone_candidate:
+                agent.interrupt() # PATCH 4: Kill pending LLM
                 state.support_state = "awaiting_phone"
                 suppress_llm(15.0)
                 asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(20.0)
+                snooze_silence(20.0) # Longer snooze for lookups
                 asyncio.create_task(_run_phone_lookup(agent, phone_candidate))
                 return
 
             # Then check for Order ID.
             order_id = _normalize_order_id_strict(user_text)
             if order_id:
+                agent.interrupt() # PATCH 4: Kill pending LLM
                 suppress_llm(15.0)
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(20.0)
@@ -1387,6 +1361,7 @@ async def entrypoint(ctx: JobContext):
                 state.support_state = "awaiting_phone"
                 room_log("FLOW_TRANSITION", from_state="awaiting_order", to_state="awaiting_phone", reason="no_order_or_phone_intent")
                 suppress_llm(15.0)
+                agent.interrupt()
                 snooze_silence(20.0)
                 asyncio.create_task(_safe_say("No problem. Please share the phone number used for the order when you are ready."))
                 return
@@ -1404,12 +1379,13 @@ async def entrypoint(ctx: JobContext):
 
             return
 
-        # 3) Active phone-support flow — skip entirely when collecting ticket contact info
-        if state.support_state in {"awaiting_phone", "checking_phone"} and not _in_ticket_flow:
+        # 3) Active phone-support flow
+        if state.support_state in {"awaiting_phone", "checking_phone"} or len(all_digits) >= 10:
             # Check for Order ID first as an escape path, even in phone flow.
             order_id_escape = _normalize_order_id_strict(user_text)
             if order_id_escape:
                 room_log("ORDER_ESCAPE_MATCH", order_id=order_id_escape)
+                agent.interrupt()
                 state.support_state = "awaiting_order"
                 suppress_llm(15.0)
                 asyncio.create_task(set_ui_state("thinking"))
@@ -1421,6 +1397,7 @@ async def entrypoint(ctx: JobContext):
             phone = _normalize_phone_for_lookup(user_text)
             if phone:
                 room_log("PHONE_MATCH_FOUND", phone=phone, state=state.support_state)
+                agent.interrupt() # PATCH 4: Kill pending LLM
                 suppress_llm(15.0)
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(20.0)
@@ -1441,6 +1418,7 @@ async def entrypoint(ctx: JobContext):
             state.ticket_name = user_text
             state.support_state = "ticket_phone"
             suppress_llm()
+            agent.interrupt()
             asyncio.create_task(_safe_say("Thanks. Please share your phone number."))
             return
 
@@ -1450,28 +1428,26 @@ async def entrypoint(ctx: JobContext):
                 prompt = "Please share a valid phone number."
                 if not _should_suppress_clarification(prompt):
                     suppress_llm()
+                    agent.interrupt()
                     asyncio.create_task(_safe_say(prompt))
                 return
             state.ticket_phone = ticket_phone
             state.support_state = "ticket_email"
-            room_log(
-                "FLOW_TRANSITION",
-                from_state="ticket_phone",
-                to_state="ticket_email",
-                phone=ticket_phone,
-            )
             suppress_llm()
+            agent.interrupt()
             asyncio.create_task(_safe_say("Got it. Now please share your email address."))
             return
 
         if state.support_state == "ticket_email":
             if not _looks_like_email(user_text):
                 suppress_llm()
+                agent.interrupt()
                 asyncio.create_task(_safe_say("Please share a valid email address."))
                 return
             state.ticket_email = user_text.strip()
             state.support_state = "ticket_issue"
             suppress_llm()
+            agent.interrupt()
             asyncio.create_task(_safe_say("Please describe the issue in one or two sentences."))
             return
 
@@ -1483,6 +1459,7 @@ async def entrypoint(ctx: JobContext):
                 "Should I create the support ticket now?"
             )
             suppress_llm()
+            agent.interrupt()
             asyncio.create_task(_safe_say(confirm_text))
             return
 
@@ -1491,6 +1468,7 @@ async def entrypoint(ctx: JobContext):
                 suppress_llm()
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(10.0)
+                agent.interrupt()
                 asyncio.create_task(_safe_say("Thanks. Creating your support ticket now."))
                 asyncio.create_task(_run_create_ticket(agent))
                 return
@@ -1501,9 +1479,11 @@ async def entrypoint(ctx: JobContext):
                 state.ticket_email = ""
                 state.ticket_issue = ""
                 suppress_llm()
+                agent.interrupt()
                 asyncio.create_task(_safe_say("No problem. I have cancelled the ticket request."))
                 return
             suppress_llm()
+            agent.interrupt()
             asyncio.create_task(_safe_say("Please say yes to create the ticket, or no to cancel."))
             return
 
@@ -1516,6 +1496,7 @@ async def entrypoint(ctx: JobContext):
             # PATCH 3: Check for PHONE first here too.
             phone = _normalize_phone_for_lookup(user_text)
             if phone:
+                agent.interrupt() # PATCH 4: Kill pending LLM
                 state.support_state = "awaiting_phone"
                 suppress_llm(15.0)
                 asyncio.create_task(set_ui_state("thinking"))
@@ -1525,6 +1506,7 @@ async def entrypoint(ctx: JobContext):
 
             order_id = _normalize_order_id_strict(user_text)
             if order_id:
+                agent.interrupt() # PATCH 4: Kill pending LLM
                 suppress_llm(15.0)
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(20.0)
