@@ -646,25 +646,6 @@ def _looks_like_email(text: str) -> bool:
     return bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", (text or "").strip()))
 
 
-def _normalize_spoken_email(text: str) -> Optional[str]:
-    """Convert spoken email forms to a real email address.
-
-    Handles both English and common spoken variants:
-      'bhavya at gmail dot com'  -> bhavya@gmail.com
-      'bhavya AT gmail DOT com'  -> bhavya@gmail.com
-    """
-    t = (text or "").strip()
-    # Replace spoken 'at' with @
-    t = re.sub(r"\b(at|AT)\b", "@", t)
-    # Replace spoken 'dot' with .
-    t = re.sub(r"\b(dot|DOT)\b", ".", t)
-    # Remove all remaining spaces so 'bhavya @ gmail . com' -> 'bhavya@gmail.com'
-    t = t.replace(" ", "")
-    if _looks_like_email(t):
-        return t.lower()
-    return None
-
-
 def _is_yes(text: str) -> bool:
     t = (text or "").strip().lower()
     return t in {"yes", "y", "confirm", "confirmed", "correct", "go ahead", "please do"}
@@ -883,28 +864,12 @@ async def _run_create_ticket(agent: VoicePipelineAgent):
             state.ticket_issue,
         )
         room_log("TICKET_CREATE_RESULT", result=_truncate(result))
-        # Check if the tool returned a validation error
-        if result.startswith("Cannot create ticket:"):
-            # Keep ticket data intact and move back to ticket_phone so the user
-            # can re-enter their contact number without triggering order lookup.
-            room_log("TICKET_CREATE_VALIDATION_FAIL", result=result)
-            state.support_state = "ticket_phone"
-            suppress_msg = "I'm sorry, there was an issue with the phone number you provided. Could you please repeat your full phone number, all digits?"
-            suppress_llm(15.0)
-            agent.interrupt()
-            asyncio.create_task(_safe_say(suppress_msg, delay_s=0.0))
-            return
-        # Success: clear all ticket data
         await _safe_say(result, delay_s=0.0)
         state.support_state = "idle"
         state.ticket_name = ""
         state.ticket_phone = ""
         state.ticket_email = ""
         state.ticket_issue = ""
-    except Exception as e:
-        logger.error("Ticket creation error: %s", e)
-        await _safe_say("I'm sorry, I was unable to create the support ticket right now. Please try again in a moment.", delay_s=0.0)
-        state.support_state = "ticket_phone"
     finally:
         state.ticket_inflight = False
 
@@ -1488,19 +1453,12 @@ async def entrypoint(ctx: JobContext):
             return
 
         if state.support_state == "ticket_email":
-            # Try direct match first, then spoken-form normalization (e.g. 'at' for @, 'dot' for .)
-            normalized_email = (_normalize_spoken_email(user_text)
-                                if not _looks_like_email(user_text)
-                                else user_text.strip().lower())
-            if not normalized_email:
-                prompt = "Please share a valid email address. You can say it as, for example, bhavya at gmail dot com."
-                if not _should_suppress_clarification(prompt):
-                    suppress_llm()
-                    snooze_silence(25.0)
-                    agent.interrupt()
-                    asyncio.create_task(_safe_say(prompt))
+            if not _looks_like_email(user_text):
+                suppress_llm()
+                agent.interrupt()
+                asyncio.create_task(_safe_say("Please share a valid email address."))
                 return
-            state.ticket_email = normalized_email
+            state.ticket_email = user_text.strip()
             state.support_state = "ticket_issue"
             suppress_llm()
             agent.interrupt()
