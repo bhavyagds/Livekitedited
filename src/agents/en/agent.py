@@ -1056,12 +1056,13 @@ async def entrypoint(ctx: JobContext):
                 room_log("LLM_PREVENT_RACE_TICKET", text=user_text)
                 return False
 
-            # NEW: Block LLM from processing any digit input during ticket collection
+            # Block LLM from processing ANY input during ticket collection states.
+            # The deterministic ticket state machine handles all turns in this flow.
+            # Without this, the LLM sees the full conversation and calls create_support_ticket
+            # on its own, bypassing the state machine and using wrong/missing data.
             if _in_ticket_flow:
-                all_digits_cb = "".join(_extract_digit_parts(user_text))
-                if len(all_digits_cb) >= 3:
-                    room_log("LLM_PREVENT_RACE_TICKET_DIGITS", text=user_text)
-                    return False
+                room_log("LLM_PREVENT_TICKET_FLOW", state=state.support_state, text=user_text)
+                return False
 
             # Order/phone lookup triggers
             if state.support_state in {"awaiting_order", "checking_order"}:
@@ -1119,10 +1120,11 @@ async def entrypoint(ctx: JobContext):
         """Safely say text after a brief delay to let pipeline interruptions settle and publish to transcript."""
         if delay_s > 0:
             await asyncio.sleep(delay_s)
-        # Ensure LLM is in sync with deterministic assistant utterances, avoiding duplicates
+        # Ensure LLM is in sync with deterministic assistant utterances, avoiding duplicates.
+        # Do NOT call send_agent_transcript here — agent_speech_committed fires after agent.say()
+        # completes and handles transcript publishing. Calling it here causes double-publishing.
         if not chat_ctx.messages or chat_ctx.messages[-1].content != text:
             chat_ctx.append(role="assistant", text=text)
-        asyncio.create_task(send_agent_transcript(text))
         await agent.say(text, allow_interruptions=True)
 
     _current["safe_say"] = _safe_say
@@ -1137,7 +1139,7 @@ async def entrypoint(ctx: JobContext):
         if not cleaned:
             return
         now_ts = time.time()
-        if cleaned == state.last_agent_transcript_text and (now_ts - state.last_agent_transcript_at) < 2.5:
+        if cleaned == state.last_agent_transcript_text and (now_ts - state.last_agent_transcript_at) < 30.0:
             room_log("AGENT_TEXT_DEDUPED", text=cleaned)
             return
         state.last_agent_transcript_text = cleaned
@@ -1260,6 +1262,17 @@ async def entrypoint(ctx: JobContext):
             suppress_llm(15.0)
             # agent.interrupt() # Removed in PATCH 5 to avoid interfering with pipeline state in phone flow
             room_log("EARLY_DIGIT_SUPPRESSION", digits=len(all_digits))
+
+        # PATCH 9: Suppress LLM for ALL turns while in the ticket flow.
+        # The deterministic state machine handles every step; letting the LLM through
+        # allows it to call create_support_ticket via tool use, skipping state collection.
+        _early_in_ticket_flow = state.support_state in {
+            "ticket_name", "ticket_phone", "ticket_email",
+            "ticket_issue", "ticket_confirm", "creating_ticket"
+        }
+        if _early_in_ticket_flow:
+            suppress_llm(15.0)
+            room_log("EARLY_TICKET_FLOW_SUPPRESSION", state=state.support_state)
 
         # PATCH 4: Diagnostic logging
         all_digits = "".join(_extract_digit_parts(user_text))
