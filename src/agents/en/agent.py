@@ -1411,6 +1411,20 @@ async def entrypoint(ctx: JobContext):
                 # Do NOT suppress LLM; let it provide the natural transition message.
                 return
 
+            if _mentions_phone_lookup_intent(user_text):
+                prompt = "Sure. Please provide the full phone number used for the order."
+                if not _should_suppress_clarification(prompt):
+                    suppress_llm()
+                    asyncio.create_task(_safe_say(prompt))
+                return
+
+            if _is_order_relevant(user_text):
+                prompt = "I need the full phone number to check the order. Please share it once."
+                if not _should_suppress_clarification(prompt):
+                    suppress_llm()
+                    asyncio.create_task(_safe_say(prompt))
+                return
+
             return
 
         # 3b) Support ticket flow
