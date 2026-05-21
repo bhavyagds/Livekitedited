@@ -1379,7 +1379,7 @@ async def entrypoint(ctx: JobContext):
             return
 
         # 3) Active phone-support flow
-        if state.support_state in {"awaiting_phone", "checking_phone"} or len(all_digits) >= 10:
+        if (state.support_state in {"awaiting_phone", "checking_phone"} or len(all_digits) >= 10) and not _in_ticket_flow:
             # Check for Order ID first as an escape path, even in phone flow.
             order_id_escape = _normalize_order_id_strict(user_text)
             if order_id_escape:

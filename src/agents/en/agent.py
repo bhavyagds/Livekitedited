@@ -1113,7 +1113,7 @@ async def entrypoint(ctx: JobContext):
         if delay_s > 0:
             await asyncio.sleep(delay_s)
         # Ensure LLM is in sync with deterministic assistant utterances, avoiding duplicates
-        if not chat_ctx.messages or chat_ctx.messages[-1].text != text:
+        if not chat_ctx.messages or chat_ctx.messages[-1].content != text:
             chat_ctx.append(role="assistant", text=text)
         asyncio.create_task(send_agent_transcript(text))
         await agent.say(text, allow_interruptions=True)
@@ -1380,7 +1380,7 @@ async def entrypoint(ctx: JobContext):
             return
 
         # 3) Active phone-support flow
-        if state.support_state in {"awaiting_phone", "checking_phone"} or len(all_digits) >= 10:
+        if (state.support_state in {"awaiting_phone", "checking_phone"} or len(all_digits) >= 10) and not _in_ticket_flow:
             # Check for Order ID first as an escape path, even in phone flow.
             order_id_escape = _normalize_order_id_strict(user_text)
             if order_id_escape:
