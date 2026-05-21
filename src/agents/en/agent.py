@@ -1058,8 +1058,9 @@ async def entrypoint(ctx: JobContext):
 
             # Block LLM from processing ANY input during ticket collection states.
             # The deterministic ticket state machine handles all turns in this flow.
-            # Without this, the LLM sees the full conversation and calls create_support_ticket
-            # on its own, bypassing the state machine and using wrong/missing data.
+            # Without this guard the LLM sees the full conversation history and calls
+            # create_support_ticket on its own, skipping state collection steps,
+            # or intercepts phone numbers meant for the ticket with order-lookup logic.
             if _in_ticket_flow:
                 room_log("LLM_PREVENT_TICKET_FLOW", state=state.support_state, text=user_text)
                 return False
@@ -1122,7 +1123,8 @@ async def entrypoint(ctx: JobContext):
             await asyncio.sleep(delay_s)
         # Ensure LLM is in sync with deterministic assistant utterances, avoiding duplicates.
         # Do NOT call send_agent_transcript here — agent_speech_committed fires after agent.say()
-        # completes and handles transcript publishing. Calling it here causes double-publishing.
+        # completes and handles transcript publishing. Calling it here causes double-publishing
+        # and the "---" separator artifact appearing in the transcript.
         if not chat_ctx.messages or chat_ctx.messages[-1].content != text:
             chat_ctx.append(role="assistant", text=text)
         await agent.say(text, allow_interruptions=True)
@@ -1265,13 +1267,15 @@ async def entrypoint(ctx: JobContext):
 
         # PATCH 9: Suppress LLM for ALL turns while in the ticket flow.
         # The deterministic state machine handles every step; letting the LLM through
-        # allows it to call create_support_ticket via tool use, skipping state collection.
+        # allows it to call create_support_ticket via tool use, bypassing state collection,
+        # or to intercept phone numbers meant for the ticket with the order-lookup flow.
         _early_in_ticket_flow = state.support_state in {
             "ticket_name", "ticket_phone", "ticket_email",
             "ticket_issue", "ticket_confirm", "creating_ticket"
         }
         if _early_in_ticket_flow:
             suppress_llm(15.0)
+            agent.interrupt()
             room_log("EARLY_TICKET_FLOW_SUPPRESSION", state=state.support_state)
 
         # PATCH 4: Diagnostic logging
