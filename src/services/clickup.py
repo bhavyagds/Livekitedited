@@ -284,6 +284,32 @@ class ClickUpService:
         
         return result
 
+    async def add_task_comment(self, task_id: str, comment_text: str) -> dict:
+        """Add a comment to an existing ClickUp task."""
+        client = await self.get_client()
+        try:
+            response = await client.post(
+                f"{self.BASE_URL}/task/{task_id}/comment",
+                json={"comment_text": comment_text},
+            )
+            response.raise_for_status()
+            logger.info(f"Added comment to ClickUp task {task_id}")
+            return {"success": True}
+        except httpx.HTTPStatusError as e:
+            logger.error(f"ClickUp comment error: {e.response.status_code} - {e.response.text}")
+            return {"success": False, "error": f"API error: {e.response.status_code}"}
+        except Exception as e:
+            logger.error(f"Failed to add ClickUp comment: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def update_ticket_phone(self, task_id: str, phone: str) -> dict:
+        """Update an existing ticket by appending the customer's phone number as a comment."""
+        return await self.add_task_comment(
+            task_id,
+            f"📞 Customer Phone Number (provided after ticket creation): {phone}",
+        )
+
+
 
 # Singleton instance
 clickup_service = ClickUpService()

@@ -317,7 +317,7 @@ def _create_room_logger(room_name: str, job_id: Optional[str]) -> tuple[logging.
 
 @dataclass
 class SessionState:
-    support_state: str = "idle"  # idle|awaiting_order|checking_order|awaiting_phone|checking_phone|ticket_name|ticket_phone|ticket_email|ticket_issue|ticket_confirm|creating_ticket
+    support_state: str = "idle"  # idle|awaiting_order|checking_order|awaiting_phone|checking_phone|ticket_name|ticket_email|ticket_issue|ticket_confirm|creating_ticket|ticket_phone
     ui_state: str = "idle"  # idle|listening|thinking|speaking
     last_issue: str = ""
     last_order_number: str = ""
@@ -328,6 +328,7 @@ class SessionState:
     ticket_phone: str = ""
     ticket_email: str = ""
     ticket_issue: str = ""
+    ticket_id: str = ""
     should_end: bool = False
     disconnect_reason: str = "session_end"
     silence_enabled: bool = True
@@ -850,6 +851,7 @@ async def _run_phone_lookup(agent: VoicePipelineAgent, phone_number: str):
 
 
 async def _run_create_ticket(agent: VoicePipelineAgent):
+    """Create ticket without phone (phone collected afterward and added as a comment)."""
     state: SessionState = _current["state"]
     if state.ticket_inflight:
         return
@@ -857,21 +859,62 @@ async def _run_create_ticket(agent: VoicePipelineAgent):
     state.support_state = "creating_ticket"
     room_log("TICKET_CREATE_STARTED")
     try:
-        result = await support_ticket.create_support_ticket(
+        result = await support_ticket.create_ticket_without_phone(
             state.ticket_name or "Customer",
-            state.ticket_phone,
             state.ticket_email,
             state.ticket_issue,
         )
-        room_log("TICKET_CREATE_RESULT", result=_truncate(result))
-        await _safe_say(result, delay_s=0.0)
+        room_log("TICKET_CREATE_RESULT", success=result.get("success"))
+        if result["success"]:
+            state.ticket_id = result["task_id"]
+            await _safe_say(
+                f"{result['message']} "
+                "Now, could you please share your phone number so our team can reach you?",
+                delay_s=0.0,
+            )
+            state.support_state = "ticket_phone"
+        else:
+            await _safe_say(result["message"], delay_s=0.0)
+            state.support_state = "idle"
+            state.ticket_name = ""
+            state.ticket_email = ""
+            state.ticket_issue = ""
+            state.ticket_id = ""
+    except Exception as e:
+        logger.error("Ticket creation error: %s", e)
+        await _safe_say("I'm sorry, something went wrong creating your ticket. Please try again.", delay_s=0.0)
+        state.support_state = "idle"
+    finally:
+        state.ticket_inflight = False
+
+
+async def _run_update_ticket_phone(agent: VoicePipelineAgent, phone: str):
+    """Add the customer's phone number to an already-created ticket as a ClickUp comment."""
+    state: SessionState = _current["state"]
+    room_log("TICKET_PHONE_UPDATE_STARTED", task_id=state.ticket_id, phone=phone)
+    try:
+        result = await support_ticket.update_ticket_with_phone(state.ticket_id, phone)
+        if result.get("success"):
+            await _safe_say(
+                "Perfect. I have added your phone number to your ticket. "
+                "Our team will be in touch with you soon.",
+                delay_s=0.0,
+            )
+        else:
+            await _safe_say(
+                "Your ticket is confirmed. Our team will contact you at your email address.",
+                delay_s=0.0,
+            )
+    except Exception as e:
+        logger.error("Ticket phone update error: %s", e)
+        await _safe_say("Your ticket is confirmed. Our team will follow up soon.", delay_s=0.0)
+    finally:
         state.support_state = "idle"
         state.ticket_name = ""
         state.ticket_phone = ""
         state.ticket_email = ""
         state.ticket_issue = ""
-    finally:
-        state.ticket_inflight = False
+        state.ticket_id = ""
 
 
 # -----------------------------------------------------------------------------
@@ -1421,29 +1464,13 @@ async def entrypoint(ctx: JobContext):
 
             return
 
-        # 3b) Support ticket flow
+        # 3b) Support ticket flow: name → email → issue → confirm → [create] → phone → [update]
         if state.support_state == "ticket_name":
             state.ticket_name = user_text
-            state.support_state = "ticket_phone"
-            suppress_llm()
-            agent.interrupt()
-            asyncio.create_task(_safe_say("Thanks. Please share your phone number."))
-            return
-
-        if state.support_state == "ticket_phone":
-            ticket_phone = _normalize_phone_for_lookup(user_text)
-            if not ticket_phone:
-                prompt = "Please share a valid phone number."
-                if not _should_suppress_clarification(prompt):
-                    suppress_llm()
-                    agent.interrupt()
-                    asyncio.create_task(_safe_say(prompt))
-                return
-            state.ticket_phone = ticket_phone
             state.support_state = "ticket_email"
             suppress_llm()
             agent.interrupt()
-            asyncio.create_task(_safe_say("Got it. Now please share your email address."))
+            asyncio.create_task(_safe_say("Thanks. Now please share your email address."))
             return
 
         if state.support_state == "ticket_email":
@@ -1456,14 +1483,14 @@ async def entrypoint(ctx: JobContext):
             state.support_state = "ticket_issue"
             suppress_llm()
             agent.interrupt()
-            asyncio.create_task(_safe_say("Please describe the issue in one or two sentences."))
+            asyncio.create_task(_safe_say("Got it. Please describe the issue in one or two sentences."))
             return
 
         if state.support_state == "ticket_issue":
             state.ticket_issue = user_text
             state.support_state = "ticket_confirm"
             confirm_text = (
-                f"I have your details as name {state.ticket_name}, phone {state.ticket_phone}, and email {state.ticket_email}. "
+                f"I have your name as {state.ticket_name} and email as {state.ticket_email}. "
                 "Should I create the support ticket now?"
             )
             suppress_llm()
@@ -1475,15 +1502,14 @@ async def entrypoint(ctx: JobContext):
             if _is_yes(user_text):
                 suppress_llm()
                 asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(10.0)
+                snooze_silence(15.0)
                 agent.interrupt()
-                asyncio.create_task(_safe_say("Thanks. Creating your support ticket now."))
+                asyncio.create_task(_safe_say("Creating your support ticket now."))
                 asyncio.create_task(_run_create_ticket(agent))
                 return
             if _is_no(user_text):
                 state.support_state = "idle"
                 state.ticket_name = ""
-                state.ticket_phone = ""
                 state.ticket_email = ""
                 state.ticket_issue = ""
                 suppress_llm()
@@ -1493,6 +1519,35 @@ async def entrypoint(ctx: JobContext):
             suppress_llm()
             agent.interrupt()
             asyncio.create_task(_safe_say("Please say yes to create the ticket, or no to cancel."))
+            return
+
+        # ticket_phone: collected AFTER ticket creation — updates the existing ticket
+        if state.support_state == "ticket_phone":
+            if _is_no(user_text) or re.search(r"\b(skip|no phone|don't have)", user_text.lower()):
+                suppress_llm()
+                asyncio.create_task(_safe_say(
+                    "No problem. Your ticket is confirmed and our team will contact you via email."
+                ))
+                state.support_state = "idle"
+                state.ticket_name = ""
+                state.ticket_phone = ""
+                state.ticket_email = ""
+                state.ticket_issue = ""
+                state.ticket_id = ""
+                return
+            ticket_phone = _normalize_phone_for_lookup(user_text)
+            if not ticket_phone:
+                prompt = "Please share a valid phone number, or say skip if you prefer not to."
+                if not _should_suppress_clarification(prompt):
+                    suppress_llm()
+                    agent.interrupt()
+                    asyncio.create_task(_safe_say(prompt))
+                return
+            state.ticket_phone = ticket_phone
+            suppress_llm()
+            asyncio.create_task(set_ui_state("thinking"))
+            snooze_silence(10.0)
+            asyncio.create_task(_run_update_ticket_phone(agent, ticket_phone))
             return
 
         # 4) Detect support intent from any general turn.
