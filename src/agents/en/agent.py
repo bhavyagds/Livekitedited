@@ -1044,25 +1044,16 @@ async def entrypoint(ctx: JobContext):
                 return False
 
             # Ticket escape check
-            _in_ticket_flow = state.support_state in {
-                "ticket_name", "ticket_phone", "ticket_email",
-                "ticket_issue", "ticket_confirm", "creating_ticket"
-            }
             _ticket_escape = bool(re.search(
                 r"\b(human|representative|call me|callback|support ticket|open ticket|create ticket)\b",
                 user_text.lower()
             ))
+            _in_ticket_flow = state.support_state in {
+                "ticket_name", "ticket_phone", "ticket_email",
+                "ticket_issue", "ticket_confirm", "creating_ticket"
+            }
             if _ticket_escape and not _in_ticket_flow:
                 room_log("LLM_PREVENT_RACE_TICKET", text=user_text)
-                return False
-
-            # Block LLM from processing ANY input during ticket collection states.
-            # The deterministic ticket state machine handles all turns in this flow.
-            # Without this guard the LLM sees the full conversation history and calls
-            # create_support_ticket on its own, skipping state collection steps,
-            # or intercepts phone numbers meant for the ticket with order-lookup logic.
-            if _in_ticket_flow:
-                room_log("LLM_PREVENT_TICKET_FLOW", state=state.support_state, text=user_text)
                 return False
 
             # Order/phone lookup triggers
@@ -1121,12 +1112,10 @@ async def entrypoint(ctx: JobContext):
         """Safely say text after a brief delay to let pipeline interruptions settle and publish to transcript."""
         if delay_s > 0:
             await asyncio.sleep(delay_s)
-        # Ensure LLM is in sync with deterministic assistant utterances, avoiding duplicates.
-        # Do NOT call send_agent_transcript here — agent_speech_committed fires after agent.say()
-        # completes and handles transcript publishing. Calling it here causes double-publishing
-        # and the "---" separator artifact appearing in the transcript.
+        # Ensure LLM is in sync with deterministic assistant utterances, avoiding duplicates
         if not chat_ctx.messages or chat_ctx.messages[-1].content != text:
             chat_ctx.append(role="assistant", text=text)
+        asyncio.create_task(send_agent_transcript(text))
         await agent.say(text, allow_interruptions=True)
 
     _current["safe_say"] = _safe_say
@@ -1141,7 +1130,7 @@ async def entrypoint(ctx: JobContext):
         if not cleaned:
             return
         now_ts = time.time()
-        if cleaned == state.last_agent_transcript_text and (now_ts - state.last_agent_transcript_at) < 30.0:
+        if cleaned == state.last_agent_transcript_text and (now_ts - state.last_agent_transcript_at) < 2.5:
             room_log("AGENT_TEXT_DEDUPED", text=cleaned)
             return
         state.last_agent_transcript_text = cleaned
@@ -1261,22 +1250,9 @@ async def entrypoint(ctx: JobContext):
         # only to be cut off by the deterministic handler.
         all_digits = "".join(_extract_digit_parts(user_text))
         if len(all_digits) >= 3:
-            suppress_llm(15.0)
+            suppress_llm(5.0)
             # agent.interrupt() # Removed in PATCH 5 to avoid interfering with pipeline state in phone flow
             room_log("EARLY_DIGIT_SUPPRESSION", digits=len(all_digits))
-
-        # PATCH 9: Suppress LLM for ALL turns while in the ticket flow.
-        # The deterministic state machine handles every step; letting the LLM through
-        # allows it to call create_support_ticket via tool use, bypassing state collection,
-        # or to intercept phone numbers meant for the ticket with the order-lookup flow.
-        _early_in_ticket_flow = state.support_state in {
-            "ticket_name", "ticket_phone", "ticket_email",
-            "ticket_issue", "ticket_confirm", "creating_ticket"
-        }
-        if _early_in_ticket_flow:
-            suppress_llm(15.0)
-            agent.interrupt()
-            room_log("EARLY_TICKET_FLOW_SUPPRESSION", state=state.support_state)
 
         # PATCH 4: Diagnostic logging
         all_digits = "".join(_extract_digit_parts(user_text))
@@ -1339,14 +1315,14 @@ async def entrypoint(ctx: JobContext):
             return
 
         # 1.5) Ticket-creation escape
-        _in_ticket_flow = state.support_state in {
-            "ticket_name", "ticket_phone", "ticket_email",
-            "ticket_issue", "ticket_confirm", "creating_ticket"
-        }
         _ticket_escape = bool(re.search(
             r"\b(human|representative|call me|callback|support ticket|open ticket|create ticket)\b",
             user_text.lower()
         ))
+        _in_ticket_flow = state.support_state in {
+            "ticket_name", "ticket_phone", "ticket_email",
+            "ticket_issue", "ticket_confirm", "creating_ticket"
+        }
         if _ticket_escape and not _in_ticket_flow:
             room_log("FLOW_TRANSITION", from_state=state.support_state, to_state="ticket_name", reason="ticket_escape")
             state.support_state = "ticket_name"
@@ -1429,12 +1405,6 @@ async def entrypoint(ctx: JobContext):
                 return
 
             # PATCH 4: Detect intent to switch back to order number lookup
-            if _mentions_order_lookup_intent(user_text):
-                state.support_state = "awaiting_order"
-                room_log("FLOW_TRANSITION", from_state="awaiting_phone", to_state="awaiting_order", reason="order_id_intent_given")
-                # Do NOT suppress LLM; let it provide the natural transition message.
-                return
-
             if _mentions_phone_lookup_intent(user_text):
                 prompt = "Sure. Please provide the full phone number used for the order."
                 if not _should_suppress_clarification(prompt):
