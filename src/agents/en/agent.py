@@ -1044,14 +1044,14 @@ async def entrypoint(ctx: JobContext):
                 return False
 
             # Ticket escape check
-            _ticket_escape = bool(re.search(
-                r"\b(human|representative|call me|callback|support ticket|open ticket|create ticket)\b",
-                user_text.lower()
-            ))
             _in_ticket_flow = state.support_state in {
                 "ticket_name", "ticket_phone", "ticket_email",
                 "ticket_issue", "ticket_confirm", "creating_ticket"
             }
+            _ticket_escape = bool(re.search(
+                r"\b(human|representative|call me|callback|support ticket|open ticket|create ticket)\b",
+                user_text.lower()
+            ))
             if _ticket_escape and not _in_ticket_flow:
                 room_log("LLM_PREVENT_RACE_TICKET", text=user_text)
                 return False
@@ -1322,14 +1322,14 @@ async def entrypoint(ctx: JobContext):
             return
 
         # 1.5) Ticket-creation escape
-        _ticket_escape = bool(re.search(
-            r"\b(human|representative|call me|callback|support ticket|open ticket|create ticket)\b",
-            user_text.lower()
-        ))
         _in_ticket_flow = state.support_state in {
             "ticket_name", "ticket_phone", "ticket_email",
             "ticket_issue", "ticket_confirm", "creating_ticket"
         }
+        _ticket_escape = bool(re.search(
+            r"\b(human|representative|call me|callback|support ticket|open ticket|create ticket)\b",
+            user_text.lower()
+        ))
         if _ticket_escape and not _in_ticket_flow:
             room_log("FLOW_TRANSITION", from_state=state.support_state, to_state="ticket_name", reason="ticket_escape")
             state.support_state = "ticket_name"
