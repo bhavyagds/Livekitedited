@@ -1056,6 +1056,13 @@ async def entrypoint(ctx: JobContext):
                 room_log("LLM_PREVENT_RACE_TICKET", text=user_text)
                 return False
 
+            # NEW: Block LLM from processing any digit input during ticket collection
+            if _in_ticket_flow:
+                all_digits_cb = "".join(_extract_digit_parts(user_text))
+                if len(all_digits_cb) >= 3:
+                    room_log("LLM_PREVENT_RACE_TICKET_DIGITS", text=user_text)
+                    return False
+
             # Order/phone lookup triggers
             if state.support_state in {"awaiting_order", "checking_order"}:
                 phone_candidate = _normalize_phone_for_lookup(user_text)
@@ -1250,7 +1257,7 @@ async def entrypoint(ctx: JobContext):
         # only to be cut off by the deterministic handler.
         all_digits = "".join(_extract_digit_parts(user_text))
         if len(all_digits) >= 3:
-            suppress_llm(5.0)
+            suppress_llm(15.0)
             # agent.interrupt() # Removed in PATCH 5 to avoid interfering with pipeline state in phone flow
             room_log("EARLY_DIGIT_SUPPRESSION", digits=len(all_digits))
 
