@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, Optional
 
-from livekit.agents import AutoSubscribe, JobContext, JobProcess, WorkerOptions, cli, llm
+from livekit.agents import AutoSubscribe, JobContext, JobProcess, WorkerOptions, cli, llm, JobRequest
 from livekit.agents.pipeline import VoicePipelineAgent
 from livekit.plugins import elevenlabs, openai, silero
 
@@ -1566,12 +1566,41 @@ async def entrypoint(ctx: JobContext):
         pass
 
 
+async def request_fnc(req: JobRequest) -> None:
+    """Determine if the English agent should accept this job request based on DB language setting."""
+    try:
+        from src.services.database import get_database_service
+        db = get_database_service()
+        settings_dict = await db.get_all_settings()
+        lang = settings_dict.get("agent_language", "en")
+        logger.info("English agent: request received. Active DB language: %s", lang)
+        if lang == "en":
+            logger.info("English agent: accepting job request")
+            await req.accept()
+        else:
+            logger.info("English agent: rejecting job request because active language is Greek (%s)", lang)
+            await req.reject()
+    except Exception as e:
+        logger.warning("English agent: failed to check language in request_fnc, accepting anyway: %s", e)
+        try:
+            await req.accept()
+        except Exception:
+            pass
+
+
+def prewarm(proc: JobProcess):
+    """Prewarm the English agent process (lightweight to prevent connection pool exhaustion)."""
+    logger.info("Prewarm: English Elena ready (lightweight)")
+
+
 def run_agent():
     log_level = getattr(logging, settings.log_level, logging.INFO)
     logging.basicConfig(level=log_level, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
+            prewarm_fnc=prewarm,
+            request_fnc=request_fnc,
             api_key=settings.livekit_api_key,
             api_secret=settings.livekit_api_secret,
             ws_url=settings.livekit_url,
