@@ -1061,10 +1061,25 @@ async def entrypoint(ctx: JobContext):
                 phone_candidate = _normalize_phone_for_lookup(user_text)
                 if phone_candidate:
                     room_log("LLM_PREVENT_RACE_PHONE", text=user_text)
+                    # FIX: If user_speech_committed didn't fire (e.g. interrupted turn),
+                    # kick off the phone lookup here so the call doesn't go dead.
+                    if not state.lookup_inflight:
+                        state.support_state = "awaiting_phone"
+                        state.suppress_llm_until = time.time() + 15.0
+                        _pc = phone_candidate  # capture current value
+                        asyncio.get_running_loop().call_soon(lambda: asyncio.create_task(_run_phone_lookup(agent_instance, _pc)))
                     return False
                 order_id = _normalize_order_id_strict(user_text)
                 if order_id:
                     room_log("LLM_PREVENT_RACE_ORDER", text=user_text)
+                    # FIX: If user_speech_committed didn't fire (e.g. interrupted turn with
+                    # 5s endpointing delay), kick off the order lookup here so the call
+                    # doesn't silently stall with no response to the user.
+                    if not state.lookup_inflight:
+                        state.last_order_number = order_id
+                        state.suppress_llm_until = time.time() + 15.0
+                        _oid = order_id  # capture current value
+                        asyncio.get_running_loop().call_soon(lambda: asyncio.create_task(_run_order_lookup(agent_instance, _oid)))
                     return False
                 if _mentions_no_order_number(user_text) or _mentions_phone_lookup_intent(user_text):
                     room_log("LLM_PREVENT_RACE_PHONE_INTENT", text=user_text)
@@ -1109,13 +1124,17 @@ async def entrypoint(ctx: JobContext):
     conversation_transcript: list[str] = []
 
     async def _safe_say(text: str, delay_s: float = 0.1):
-        """Safely say text after a brief delay to let pipeline interruptions settle and publish to transcript."""
+        """Safely say text after a brief delay to let pipeline interruptions settle.
+
+        NOTE: Do NOT call send_agent_transcript here — agent_speech_committed already
+        handles transcript publication when the TTS finishes. Calling it here too causes
+        the greeting (and other _safe_say messages) to appear twice in the transcript.
+        """
         if delay_s > 0:
             await asyncio.sleep(delay_s)
         # Ensure LLM is in sync with deterministic assistant utterances, avoiding duplicates
         if not chat_ctx.messages or chat_ctx.messages[-1].content != text:
             chat_ctx.append(role="assistant", text=text)
-        asyncio.create_task(send_agent_transcript(text))
         await agent.say(text, allow_interruptions=True)
 
     _current["safe_say"] = _safe_say
