@@ -1,8 +1,8 @@
-"""
+﻿"""
 Meallion Voice AI - Elena English Agent (Patch 8)
 Full version with fixes for double responses, dead states, and transcript formatting.
 And fix for agent not responding after failed phone lookup.
-PATCH 8: Automatic 5-minute cache expiry — cache auto-flushes and re-fetches from DB every 5 min.
+PATCH 8: Automatic 5-minute cache expiry ÔÇö cache auto-flushes and re-fetches from DB every 5 min.
 """
 
 import asyncio
@@ -37,6 +37,7 @@ from src.agents.en.prompts import (
 from src.agents.en import tools as order_lookup
 from src.agents.en import tools as knowledge_base
 from src.agents.en import tools as support_ticket
+from src.agents.en.ticket_flow import TicketFlow
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,7 @@ async def _cache_auto_refresh_loop() -> None:
     while True:
         await asyncio.sleep(60.0)   # check interval: every 1 minute
         if not _agent_cache_is_valid():
-            logger.info("PATCH 8: Cache TTL expired — auto-flushing and refreshing")
+            logger.info("PATCH 8: Cache TTL expired ÔÇö auto-flushing and refreshing")
             flush_agent_cache()
             try:
                 await _refresh_agent_cache(force=True)
@@ -546,8 +547,8 @@ def create_stt(is_sip_call: bool = False):
         # Use the model configured in the DB, defaulting to nova-3 (same as original).
         model = str(get_agent_setting("deepgram_stt_model", "nova-3") or "nova-3").strip()
 
-        # Base config matching elena_original.py — smart_format=True is critical
-        # for reliable digit transcription (e.g. "seven seven three" → "773").
+        # Base config matching elena_original.py ÔÇö smart_format=True is critical
+        # for reliable digit transcription (e.g. "seven seven three" ÔåÆ "773").
         base = {
             "model": model,
             "language": "en-US",
@@ -557,7 +558,7 @@ def create_stt(is_sip_call: bool = False):
         }
 
         # Try with explicit api_key first; fall back without it (some SDK versions
-        # reject api_key as an unknown kwarg — the original does NOT pass it).
+        # reject api_key as an unknown kwarg ÔÇö the original does NOT pass it).
         for kwargs in [
             {**base, "api_key": deepgram_api_key},
             base,
@@ -1045,13 +1046,17 @@ async def entrypoint(ctx: JobContext):
 
             # Ticket escape check
             _ticket_escape = bool(re.search(
-                r"\b(human|representative|call me|callback|support ticket|open ticket|create ticket)\b",
+                r"\b(human|representative|call me|callback|support ticket|open ticket|create.*ticket|raise.*ticket|want.*ticket|need.*ticket|make.*ticket|complaint)\b",
                 user_text.lower()
             ))
             _in_ticket_flow = state.support_state in {
                 "ticket_name", "ticket_phone", "ticket_email",
-                "ticket_issue", "ticket_confirm", "creating_ticket"
+                "ticket_issue", "ticket_confirm", "creating_ticket", "ticket_retry_confirm"
             }
+            # Block LLM entirely when we're in the ticket flow
+            if _in_ticket_flow:
+                room_log("LLM_PREVENT_TICKET_FLOW", text=user_text, state=state.support_state)
+                return False
             if _ticket_escape and not _in_ticket_flow:
                 room_log("LLM_PREVENT_RACE_TICKET", text=user_text)
                 return False
@@ -1113,7 +1118,7 @@ async def entrypoint(ctx: JobContext):
         if delay_s > 0:
             await asyncio.sleep(delay_s)
         # Ensure LLM is in sync with deterministic assistant utterances, avoiding duplicates
-        if not chat_ctx.messages or chat_ctx.messages[-1].text != text:
+        if not chat_ctx.messages or chat_ctx.messages[-1].content != text:
             chat_ctx.append(role="assistant", text=text)
         asyncio.create_task(send_agent_transcript(text))
         await agent.say(text, allow_interruptions=True)
@@ -1124,6 +1129,20 @@ async def entrypoint(ctx: JobContext):
         """Suppress LLM synthesis for the next N seconds (used when handler replies deterministically)."""
         state.suppress_llm_until = time.time() + seconds
         room_log("LLM_SUPPRESS_SET", seconds=seconds)
+
+    # --- TicketFlow delegation ---
+    async def _ticket_say(text: str) -> None:
+        """Wrapper for TicketFlow's say_fn (no delay_s parameter)."""
+        await _safe_say(text, delay_s=0.1)
+
+    ticket_flow = TicketFlow(
+        say_fn=_ticket_say,
+        suppress_llm_fn=suppress_llm,
+        room_log_fn=room_log,
+        set_ui_state_fn=set_ui_state,
+        snooze_silence_fn=snooze_silence,
+        create_ticket_fn=lambda name, phone, email, issue: support_ticket.create_support_ticket(name, phone, email, issue),
+    )
 
     async def send_agent_transcript(text: str):
         cleaned = (text or "").strip()
@@ -1164,7 +1183,7 @@ async def entrypoint(ctx: JobContext):
                 ensure_ascii=False,
             )
             try:
-                # Use reliable=True to match the original — unreliable drops packets,
+                # Use reliable=True to match the original ÔÇö unreliable drops packets,
                 # causing the user's text to not appear until the agent starts speaking.
                 await ctx.room.local_participant.publish_data(payload.encode("utf-8"), reliable=True)
             except Exception:
@@ -1234,6 +1253,17 @@ async def entrypoint(ctx: JobContext):
     @agent.on("user_stopped_speaking")
     def _on_user_stopped_speaking():
         schedule_thinking_state()
+
+    # --- TicketFlow helper coroutines ---
+    async def _start_ticket_flow():
+        """Start the ticket flow via TicketFlow and sync state."""
+        await ticket_flow.start()
+        state.support_state = ticket_flow.state_name
+
+    async def _handle_ticket_input(user_text: str):
+        """Delegate user input to TicketFlow and sync state."""
+        await ticket_flow.handle_input(user_text)
+        state.support_state = ticket_flow.state_name
 
     @agent.on("user_speech_committed")
     def _on_user_speech_committed(msg):
@@ -1316,21 +1346,19 @@ async def entrypoint(ctx: JobContext):
 
         # 1.5) Ticket-creation escape
         _ticket_escape = bool(re.search(
-            r"\b(human|representative|call me|callback|support ticket|open ticket|create ticket)\b",
+            r"\b(human|representative|call me|callback|support ticket|open ticket|create.*ticket|raise.*ticket|want.*ticket|need.*ticket|make.*ticket|complaint)\b",
             user_text.lower()
         ))
         _in_ticket_flow = state.support_state in {
             "ticket_name", "ticket_phone", "ticket_email",
-            "ticket_issue", "ticket_confirm", "creating_ticket"
+            "ticket_issue", "ticket_confirm", "creating_ticket", "ticket_retry_confirm"
         }
         if _ticket_escape and not _in_ticket_flow:
             room_log("FLOW_TRANSITION", from_state=state.support_state, to_state="ticket_name", reason="ticket_escape")
-            state.support_state = "ticket_name"
-            suppress_llm(15.0)
+            state.support_state = "ticket_name"  # Sync state IMMEDIATELY before async task
             agent.interrupt()
-            asyncio.create_task(_safe_say(
-                "I can help you with that. First, could you please tell me your full name?"
-            ))
+            suppress_llm(15.0)
+            asyncio.create_task(_start_ticket_flow())
             return
 
         if state.support_state in {"awaiting_order", "checking_order"}:
@@ -1379,8 +1407,14 @@ async def entrypoint(ctx: JobContext):
 
             return
 
+        # 3b) Support ticket flow ÔÇö delegated to TicketFlow module (MUST be before phone-support flow)
+        if state.support_state.startswith("ticket_") or state.support_state in ("creating_ticket", "ticket_retry_confirm"):
+            suppress_llm(15.0)
+            asyncio.create_task(_handle_ticket_input(user_text))
+            return
+
         # 3) Active phone-support flow
-        if state.support_state in {"awaiting_phone", "checking_phone"} or len(all_digits) >= 10:
+        if (state.support_state in {"awaiting_phone", "checking_phone"} or len(all_digits) >= 10) and not _in_ticket_flow:
             # Check for Order ID first as an escape path, even in phone flow.
             order_id_escape = _normalize_order_id_strict(user_text)
             if order_id_escape:
@@ -1405,86 +1439,20 @@ async def entrypoint(ctx: JobContext):
                 return
 
             # PATCH 4: Detect intent to switch back to order number lookup
-            if _mentions_order_lookup_intent(user_text):
-                state.support_state = "awaiting_order"
-                room_log("FLOW_TRANSITION", from_state="awaiting_phone", to_state="awaiting_order", reason="order_id_intent_given")
-                # Do NOT suppress LLM; let it provide the natural transition message.
-                return
-
-            return
-
-        # 3b) Support ticket flow
-        if state.support_state == "ticket_name":
-            state.ticket_name = user_text
-            state.support_state = "ticket_phone"
-            suppress_llm()
-            agent.interrupt()
-            asyncio.create_task(_safe_say("Thanks. Please share your phone number."))
-            return
-
-        if state.support_state == "ticket_phone":
-            ticket_phone = _normalize_phone_for_lookup(user_text)
-            if not ticket_phone:
-                prompt = "Please share a valid phone number."
+            if _mentions_phone_lookup_intent(user_text):
+                prompt = "Sure. Please provide the full phone number used for the order."
                 if not _should_suppress_clarification(prompt):
                     suppress_llm()
-                    agent.interrupt()
                     asyncio.create_task(_safe_say(prompt))
                 return
-            state.ticket_phone = ticket_phone
-            state.support_state = "ticket_email"
-            suppress_llm()
-            agent.interrupt()
-            asyncio.create_task(_safe_say("Got it. Now please share your email address."))
-            return
 
-        if state.support_state == "ticket_email":
-            if not _looks_like_email(user_text):
-                suppress_llm()
-                agent.interrupt()
-                asyncio.create_task(_safe_say("Please share a valid email address."))
+            if _is_order_relevant(user_text):
+                prompt = "I need the full phone number to check the order. Please share it once."
+                if not _should_suppress_clarification(prompt):
+                    suppress_llm()
+                    asyncio.create_task(_safe_say(prompt))
                 return
-            state.ticket_email = user_text.strip()
-            state.support_state = "ticket_issue"
-            suppress_llm()
-            agent.interrupt()
-            asyncio.create_task(_safe_say("Please describe the issue in one or two sentences."))
-            return
 
-        if state.support_state == "ticket_issue":
-            state.ticket_issue = user_text
-            state.support_state = "ticket_confirm"
-            confirm_text = (
-                f"I have your details as name {state.ticket_name}, phone {state.ticket_phone}, and email {state.ticket_email}. "
-                "Should I create the support ticket now?"
-            )
-            suppress_llm()
-            agent.interrupt()
-            asyncio.create_task(_safe_say(confirm_text))
-            return
-
-        if state.support_state == "ticket_confirm":
-            if _is_yes(user_text):
-                suppress_llm()
-                asyncio.create_task(set_ui_state("thinking"))
-                snooze_silence(10.0)
-                agent.interrupt()
-                asyncio.create_task(_safe_say("Thanks. Creating your support ticket now."))
-                asyncio.create_task(_run_create_ticket(agent))
-                return
-            if _is_no(user_text):
-                state.support_state = "idle"
-                state.ticket_name = ""
-                state.ticket_phone = ""
-                state.ticket_email = ""
-                state.ticket_issue = ""
-                suppress_llm()
-                agent.interrupt()
-                asyncio.create_task(_safe_say("No problem. I have cancelled the ticket request."))
-                return
-            suppress_llm()
-            agent.interrupt()
-            asyncio.create_task(_safe_say("Please say yes to create the ticket, or no to cancel."))
             return
 
         # 4) Detect support intent from any general turn.
@@ -1514,11 +1482,11 @@ async def entrypoint(ctx: JobContext):
                 return
             return
  
-        ticket_intent = bool(re.search(r"(human|representative|call me|callback|support ticket|open ticket|create ticket)", user_text.lower()))
+        ticket_intent = bool(re.search(r"(human|representative|call me|callback|support ticket|open ticket|create.*ticket|raise.*ticket|want.*ticket|need.*ticket|make.*ticket|complaint)", user_text.lower()))
         if ticket_intent:
-            state.support_state = "ticket_name"
+            state.support_state = "ticket_name"  # Sync state IMMEDIATELY
             suppress_llm(15.0)
-            asyncio.create_task(_safe_say("I can help you with that. First, could you please tell me your full name?"))
+            asyncio.create_task(_start_ticket_flow())
             return
 
     # Participant disconnect
