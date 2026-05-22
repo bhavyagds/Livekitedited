@@ -1059,6 +1059,15 @@ async def entrypoint(ctx: JobContext):
                 return False
             if _ticket_escape and not _in_ticket_flow:
                 room_log("LLM_PREVENT_RACE_TICKET", text=user_text)
+                # FIX: if user_speech_committed didn't fire (pipeline race), start the
+                # ticket flow here so the call doesn't go silent.
+                state.support_state = "ticket_name"
+                state.suppress_llm_until = time.time() + 15.0
+                asyncio.get_running_loop().call_soon(
+                    lambda: asyncio.create_task(_safe_say(
+                        "I can help you with that. First, could you please tell me your full name?"
+                    ))
+                )
                 return False
 
             # Order/phone lookup triggers
@@ -1094,10 +1103,22 @@ async def entrypoint(ctx: JobContext):
                 phone_candidate = _normalize_phone_for_lookup(user_text)
                 if phone_candidate:
                     room_log("LLM_PREVENT_RACE_PHONE", text=user_text)
+                    # FIX: rescue if user_speech_committed didn't fire (pipeline race).
+                    # This is the same pattern as the awaiting_order rescue above.
+                    if not state.lookup_inflight:
+                        state.suppress_llm_until = time.time() + 15.0
+                        _pc2 = phone_candidate  # capture
+                        asyncio.get_running_loop().call_soon(lambda: asyncio.create_task(_run_phone_lookup(agent_instance, _pc2)))
                     return False
                 order_id_escape = _normalize_order_id_strict(user_text)
                 if order_id_escape:
                     room_log("LLM_PREVENT_RACE_ORDER_ESCAPE", text=user_text)
+                    # FIX: rescue — user switched back to order number in phone flow.
+                    if not state.lookup_inflight:
+                        state.support_state = "awaiting_order"
+                        state.suppress_llm_until = time.time() + 15.0
+                        _oid2 = order_id_escape
+                        asyncio.get_running_loop().call_soon(lambda: asyncio.create_task(_run_order_lookup(agent_instance, _oid2)))
                     return False
 
         from livekit.agents.pipeline.pipeline_agent import _default_before_llm_cb
