@@ -1052,6 +1052,11 @@ async def entrypoint(ctx: JobContext):
                 "ticket_name", "ticket_phone", "ticket_email",
                 "ticket_issue", "ticket_confirm", "creating_ticket"
             }
+            # Block LLM entirely when inside the ticket flow so it cannot
+            # interrupt the deterministic step-by-step collection.
+            if _in_ticket_flow:
+                room_log("LLM_PREVENT_TICKET_FLOW", text=user_text, state=state.support_state)
+                return False
             if _ticket_escape and not _in_ticket_flow:
                 room_log("LLM_PREVENT_RACE_TICKET", text=user_text)
                 return False
@@ -1126,15 +1131,16 @@ async def entrypoint(ctx: JobContext):
     async def _safe_say(text: str, delay_s: float = 0.1):
         """Safely say text after a brief delay to let pipeline interruptions settle.
 
-        NOTE: Do NOT call send_agent_transcript here — agent_speech_committed already
-        handles transcript publication when the TTS finishes. Calling it here too causes
-        the greeting (and other _safe_say messages) to appear twice in the transcript.
+        Calls send_agent_transcript before agent.say() so the transcript/UI updates
+        immediately (not after TTS finishes playing). The 8s dedup window in
+        send_agent_transcript suppresses the duplicate call from agent_speech_committed.
         """
         if delay_s > 0:
             await asyncio.sleep(delay_s)
         # Ensure LLM is in sync with deterministic assistant utterances, avoiding duplicates
         if not chat_ctx.messages or chat_ctx.messages[-1].content != text:
             chat_ctx.append(role="assistant", text=text)
+        asyncio.create_task(send_agent_transcript(text))
         await agent.say(text, allow_interruptions=True)
 
     _current["safe_say"] = _safe_say
@@ -1149,7 +1155,10 @@ async def entrypoint(ctx: JobContext):
         if not cleaned:
             return
         now_ts = time.time()
-        if cleaned == state.last_agent_transcript_text and (now_ts - state.last_agent_transcript_at) < 2.5:
+        # Dedup window of 8s: _safe_say fires this immediately, then agent_speech_committed
+        # fires again after TTS plays (which can take 3-7s for longer utterances).
+        # 8s ensures the second call is always suppressed without missing legitimate turns.
+        if cleaned == state.last_agent_transcript_text and (now_ts - state.last_agent_transcript_at) < 8.0:
             room_log("AGENT_TEXT_DEDUPED", text=cleaned)
             return
         state.last_agent_transcript_text = cleaned
