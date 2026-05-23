@@ -1277,7 +1277,7 @@ async def entrypoint(ctx: JobContext):
                 return
             return
 
-        # 3) Active phone-support flow
+        # 3) Active phone-order search flow(finding an order by phone)
         if state.support_state in {"awaiting_phone", "checking_phone"} or len(all_digits) >= 10:
             # Check for Order ID first as an escape path, even in phone flow.
             order_id_escape = _normalize_order_id_strict(user_text)
@@ -1327,24 +1327,13 @@ async def entrypoint(ctx: JobContext):
         # 3b) Support ticket flow
         if state.support_state == "ticket_name":
             state.ticket_name = user_text
-            state.support_state = "ticket_phone"
-            suppress_llm()
-            asyncio.create_task(agent.say("Ευχαριστώ. Παρακαλώ πείτε μου τον αριθμό τηλεφώνου σας.", allow_interruptions=True))
-            return
-
-        if state.support_state == "ticket_phone":
-            ticket_phone = _normalize_phone_for_lookup(user_text)
-            if not ticket_phone:
-                prompt = "Παρακαλώ δώστε μου έναν έγκυρο αριθμό τηλεφώνου."
-                if not _should_suppress_clarification(prompt):
-                    suppress_llm()
-                    asyncio.create_task(agent.say(prompt, allow_interruptions=True))
-                return
-            state.ticket_phone = ticket_phone
+            # Skip phone, go directly to email
             state.support_state = "ticket_email"
             suppress_llm()
-            asyncio.create_task(agent.say("Μάλιστα. Τώρα παρακαλώ πείτε μου τη διεύθυνση email σας.", allow_interruptions=True))
+            asyncio.create_task(agent.say("Ευχαριστώ. Τώρα παρακαλώ πείτε μου τη διεύθυνση email σας.", allow_interruptions=True))
             return
+
+        # (The ticket_phone block has been completely removed)
 
         if state.support_state == "ticket_email":
             if not _looks_like_email(user_text):
@@ -1360,8 +1349,9 @@ async def entrypoint(ctx: JobContext):
         if state.support_state == "ticket_issue":
             state.ticket_issue = user_text
             state.support_state = "ticket_confirm"
+            # Removed phone from the confirmation text
             confirm_text = (
-                f"Έχω τα στοιχεία σας: όνομα {state.ticket_name}, τηλέφωνο {state.ticket_phone}, και email {state.ticket_email}. "
+                f"Έχω τα στοιχεία σας: όνομα {state.ticket_name} και email {state.ticket_email}. "
                 "Θέλετε να δημιουργήσω το αίτημα υποστήριξης τώρα;"
             )
             suppress_llm()
@@ -1388,6 +1378,7 @@ async def entrypoint(ctx: JobContext):
             suppress_llm()
             asyncio.create_task(agent.say("Πείτε ναι για δημιουργία ή όχι για ακύρωση.", allow_interruptions=True))
             return
+
 
         # 4) Detect support intent from any general turn.
         support_intent = bool(re.search(r"(πρόβλημα|θέμα|παράπονο|θέμα παραγγελίας|λάθος|αργησμένη|η παραγγελία μου|πρόβλημα|θέμα|λάθος παραγγελία|καθυστερημένη παραγγελία|η παραγγελία μου)", user_text.lower()))
