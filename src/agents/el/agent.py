@@ -1532,9 +1532,7 @@ async def entrypoint(ctx: JobContext):
                 state.should_end = True
                 break
                 
-            text = "Είμαι ακόμα εδώ. Παρακαλώ πείτε μου τον αριθμό παραγγελίας ή το τηλέφωνό σας."
-            if state.support_state == "awaiting_phone":
-                text = "Είμαι ακόμα έτοιμη να βοηθήσω. Παρακαλώ πείτε μου το τηλέφωνο της παραγγελίας όποτε μπορείτε."
+            text = _contextual_silence_prompt()
             
             room_log("SILENCE_PROMPT_TRIGGERED", text=text, count=state.silence_prompt_count)
             state.silence_prompt_count += 1
