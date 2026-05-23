@@ -345,6 +345,7 @@ class SessionState:
     last_clarification_prompt_text: str = ""
     last_clarification_prompt_at: float = 0.0
     suppress_llm_until: float = 0.0
+    deterministic_replied_this_turn: bool = False
 
 
 _current = {
@@ -996,9 +997,27 @@ async def entrypoint(ctx: JobContext):
 
     def _before_llm_cb(agent_instance, chat_ctx):
         """Gate the LLM when the deterministic handler has already replied via agent.say()."""
-        if time.time() < state.suppress_llm_until:
+        suppressed = False
+        if state.deterministic_replied_this_turn:
+            room_log("LLM_SUPPRESSED_TURN")
+            suppressed = True
+        elif state.lookup_inflight or state.ticket_inflight:
+            room_log("LLM_SUPPRESSED_INFLIGHT")
+            suppressed = True
+        elif time.time() < state.suppress_llm_until:
             room_log("LLM_SUPPRESSED", until=state.suppress_llm_until)
+            suppressed = True
+
+        if suppressed:
+            # Silence Monitor Loophole Fix:
+            # If the LLM is suppressed and no database/ticket lookups are active,
+            # the agent will not generate any speech. We must mark the agent
+            # as waiting for the user to keep the silence monitor alive!
+            if not state.lookup_inflight and not state.ticket_inflight:
+                state.waiting_for_user = True
+                asyncio.create_task(set_ui_state("idle"))
             return False
+
         from livekit.agents.pipeline.pipeline_agent import _default_before_llm_cb
         return _default_before_llm_cb(agent_instance, chat_ctx)
 
@@ -1018,6 +1037,11 @@ async def entrypoint(ctx: JobContext):
         before_llm_cb=_before_llm_cb,
     )
 
+    async def _safe_say(text: str, delay_s: float = 0.2):
+        if delay_s > 0:
+            await asyncio.sleep(delay_s)
+        await agent.say(text, allow_interruptions=True)
+
     room_log(
         "TURN_CONFIG",
         configured_endpointing_delay=configured_endpointing_delay,
@@ -1029,6 +1053,7 @@ async def entrypoint(ctx: JobContext):
 
     def suppress_llm(seconds: float = 10.0):
         """Suppress LLM synthesis for the next N seconds (used when handler replies deterministically)."""
+        state.deterministic_replied_this_turn = True
         state.suppress_llm_until = time.time() + seconds
         room_log("LLM_SUPPRESS_SET", seconds=seconds)
 
@@ -1142,6 +1167,7 @@ async def entrypoint(ctx: JobContext):
 
     @agent.on("user_speech_committed")
     def _on_user_speech_committed(msg):
+        state.deterministic_replied_this_turn = False
         user_text = str(getattr(msg, "content", "") or "").strip()
         if not user_text:
             return
@@ -1169,9 +1195,8 @@ async def entrypoint(ctx: JobContext):
             agent.interrupt() # PATCH 4: Kill pending LLM
             suppress_llm(10.0)
             snooze_silence(20.0)
-            asyncio.create_task(agent.say(
-                f"I heard a {len(all_digits)}-digit number. Could you please provide the full 10-digit phone number?",
-                allow_interruptions=True
+            asyncio.create_task(_safe_say(
+                f"I heard a {len(all_digits)}-digit number. Could you please provide the full 10-digit phone number?"
             ))
             return
 
@@ -1234,9 +1259,8 @@ async def entrypoint(ctx: JobContext):
             state.support_state = "ticket_name"
             suppress_llm(15.0)
             agent.interrupt()
-            asyncio.create_task(agent.say(
-                "I can help you with that. First, could you please tell me your full name?",
-                allow_interruptions=True
+            asyncio.create_task(_safe_say(
+                "I can help you with that. First, could you please tell me your full name?"
             ))
             return
 
