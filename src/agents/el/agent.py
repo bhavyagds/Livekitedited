@@ -1222,7 +1222,7 @@ async def entrypoint(ctx: JobContext):
 
         # 1.5) Ticket-creation escape
         _ticket_escape = bool(re.search(
-            r"(άνθρωπο|εκπρόσωπο|υπάλληλο|καλέστε με|αίτημα υποστήριξης|ticket|παράπονο|human|representative|support ticket|create ticket)",
+            r"(άνθρωπο|εκπρόσωπο|υπάλληλο|καλέστε με|αίτημα υποστήριξης|εισιτήριο|παράπονο|ανθρώπινος|εκπρόσωπος|εισιτήριο υποστήριξης|δημιουργία εισιτηρίου)",
             user_text.lower()
         ))
         _in_ticket_flow = state.support_state in {
@@ -1390,7 +1390,7 @@ async def entrypoint(ctx: JobContext):
             return
 
         # 4) Detect support intent from any general turn.
-        support_intent = bool(re.search(r"(πρόβλημα|θέμα|παράπονο|θέμα παραγγελίας|λάθος|αργησμένη|η παραγγελία μου|problem|issue|wrong order|late order|my order)", user_text.lower()))
+        support_intent = bool(re.search(r"(πρόβλημα|θέμα|παράπονο|θέμα παραγγελίας|λάθος|αργησμένη|η παραγγελία μου|πρόβλημα|θέμα|λάθος παραγγελία|καθυστερημένη παραγγελία|η παραγγελία μου)", user_text.lower()))
         if support_intent:
             state.support_state = "awaiting_order"
             room_log("FLOW_TRANSITION", from_state="idle", to_state="awaiting_order", reason="support_intent")
@@ -1415,7 +1415,7 @@ async def entrypoint(ctx: JobContext):
                 asyncio.create_task(_run_order_lookup(agent, order_id))
                 return
 
-        ticket_intent = bool(re.search(r"(άνθρωπο|εκπρόσωπο|υπάλληλο|καλέστε με|αίτημα υποστήριξης|ticket|παράπονο|human|representative|support ticket|create ticket)", user_text.lower()))
+        ticket_intent = bool(re.search(r"(άνθρωπο|εκπρόσωπο|υπάλληλο|καλέστε με|αίτημα υποστήριξης|εισιτήριο|παράπονο|ανθρώπινος|εκπρόσωπος|εισιτήριο υποστήριξης|δημιουργία εισιτηρίου)", user_text.lower()))
         if ticket_intent:
             state.support_state = "ticket_name"
             suppress_llm(15.0)
