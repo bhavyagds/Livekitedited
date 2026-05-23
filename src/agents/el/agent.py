@@ -1223,7 +1223,7 @@ async def entrypoint(ctx: JobContext):
 
         # 1.5) Ticket-creation escape
         _ticket_escape = bool(re.search(
-            r"(άνθρωπο|εκπρόσωπο|υπάλληλο|καλέστε με|αίτημα υποστήριξης|εισιτήριο|παράπονο|ανθρώπινος|εκπρόσωπος|εισιτήριο υποστήριξης|δημιουργία εισιτηρίου)",
+            r"(άνθρωπο|εκπρόσωπο|υπάλληλο|καλέστε με|αίτημα υποστήριξης|ticket|παράπονο|human|representative|support ticket|create ticket)",
             user_text.lower()
         ))
         _in_ticket_flow = state.support_state in {
@@ -1416,7 +1416,7 @@ async def entrypoint(ctx: JobContext):
                 asyncio.create_task(_run_order_lookup(agent, order_id))
                 return
 
-        ticket_intent = bool(re.search(r"(άνθρωπο|εκπρόσωπο|υπάλληλο|καλέστε με|αίτημα υποστήριξης|εισιτήριο|παράπονο|ανθρώπινος|εκπρόσωπος|εισιτήριο υποστήριξης|δημιουργία εισιτηρίου|εισιτήριο)", user_text.lower()))
+        ticket_intent = bool(re.search(r"(άνθρωπο|εκπρόσωπο|υπάλληλο|καλέστε με|αίτημα υποστήριξης|ticket|παράπονο|human|representative|support ticket|create ticket)", user_text.lower()))
         if ticket_intent:
             state.support_state = "ticket_name"
             suppress_llm(15.0)
@@ -1536,7 +1536,9 @@ async def entrypoint(ctx: JobContext):
                 state.should_end = True
                 break
                 
-            text = _contextual_silence_prompt()
+            text = "Είμαι ακόμα εδώ. Παρακαλώ πείτε μου τον αριθμό παραγγελίας ή το τηλέφωνό σας."
+            if state.support_state == "awaiting_phone":
+                text = "Είμαι ακόμα έτοιμη να βοηθήσω. Παρακαλώ πείτε μου το τηλέφωνο της παραγγελίας όποτε μπορείτε."
             
             room_log("SILENCE_PROMPT_TRIGGERED", text=text, count=state.silence_prompt_count)
             state.silence_prompt_count += 1
