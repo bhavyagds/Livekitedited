@@ -798,7 +798,6 @@ async def _run_order_lookup(agent: VoicePipelineAgent, order_number: str):
             snooze_silence(20.0)
         else:
             state.support_state = "idle"
-        state.suppress_llm_until = 0.0
     except asyncio.TimeoutError:
         room_log("ORDER_LOOKUP_TIMEOUT")
         await agent.say("Λυπάμαι, χρειάζεται λίγο περισσότερος χρόνος από το συνηθισμένο για να βρω την παραγγελία σας. Μπορείτε να επαναλάβετε τον αριθμό παραγγελίας;", allow_interruptions=True)
@@ -831,10 +830,10 @@ async def _run_phone_lookup(agent: VoicePipelineAgent, phone_number: str):
         if "δεν βρέθηκε" in (result or "").lower() or "no order" in (result or "").lower() or "could not" in (result or "").lower():
             state.support_state = "awaiting_phone"
             snooze_silence(20.0)
+            # PATCH 5: Clear suppression so agent can respond to next user turn
+            state.suppress_llm_until = 0.0
         else:
             state.support_state = "idle"
-        # PATCH 5: Clear suppression so agent can respond to next user turn
-        state.suppress_llm_until = 0.0
     except asyncio.TimeoutError:
         room_log("PHONE_LOOKUP_TIMEOUT")
         await agent.say("Λυπάμαι, έχω λίγο πρόβλημα με την αναζήτηση. Μπορείτε να επαναλάβετε τον αριθμό τηλεφώνου άλλη μια φορά;", allow_interruptions=True)
@@ -1423,9 +1422,6 @@ async def entrypoint(ctx: JobContext):
             asyncio.create_task(agent.say("Βεβαίως, μπορώ να βοηθήσω. Πρώτα, πείτε μου το πλήρες όνομά σας.", allow_interruptions=True))
             return
 
-        if state.support_state == "idle":
-            state.suppress_llm_until = 0.0
-
     # Participant disconnect
     @ctx.room.on("participant_disconnected")
     def _on_participant_disconnected(participant_info):
@@ -1543,8 +1539,7 @@ async def entrypoint(ctx: JobContext):
             room_log("SILENCE_PROMPT_TRIGGERED", text=text, count=state.silence_prompt_count)
             state.silence_prompt_count += 1
             state.silence_snooze_until = time.time() + 15.0
-            if state.support_state != "idle":
-                suppress_llm(15.0)
+            suppress_llm(15.0)
             await agent.say(text, allow_interruptions=True)
 
     silence_task = asyncio.create_task(_silence_monitor())
