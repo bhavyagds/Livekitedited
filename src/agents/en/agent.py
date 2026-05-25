@@ -1233,10 +1233,15 @@ async def entrypoint(ctx: JobContext):
             state.support_state = "ticket_name"
             suppress_llm(15.0)
             agent.interrupt()
-            asyncio.create_task(agent.say(
-                "I can help you with that. First, could you please tell me your full name?",
-                allow_interruptions=True
-            ))
+
+            async def _say_ticket_greeting():
+                await asyncio.sleep(0.3)
+                await agent.say(
+                    "I can help you with that. First, could you please tell me your full name?",
+                    allow_interruptions=True
+                )
+
+            asyncio.create_task(_say_ticket_greeting())
             return
 
         if state.support_state in {"awaiting_order", "checking_order"}:
@@ -1418,7 +1423,13 @@ async def entrypoint(ctx: JobContext):
         if ticket_intent:
             state.support_state = "ticket_name"
             suppress_llm(15.0)
-            asyncio.create_task(agent.say("I can help you with that. First, could you please tell me your full name?", allow_interruptions=True))
+            agent.interrupt()
+
+            async def _say_ticket_greeting2():
+                await asyncio.sleep(0.3)
+                await agent.say("I can help you with that. First, could you please tell me your full name?", allow_interruptions=True)
+
+            asyncio.create_task(_say_ticket_greeting2())
             return
 
     # Participant disconnect
