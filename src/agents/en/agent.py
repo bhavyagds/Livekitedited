@@ -1,9 +1,13 @@
 """
-Meallion Voice AI - Elena English Agent (Patch 5 + Patch 8 Cache)
-Full version with fixes for double responses, dead states, and transcript formatting.
-And fix for agent not responding after failed phone lookup.
-Integrated with the 5-minute agent cache system (PATCH 8) as a direct drop-in replacement.
+Meallion Voice AI - Elena English Agent (Patch 9 - Ticket Flow Fix)
+- Removed phone from ticket flow (name → email → issue only)
+- Added create_ticket_without_phone
+- Guarded phone lookup against ticket states
+- Early LLM suppression for ticket flow
+- Fixed interrupted speech race condition
 """
+
+AGENT_BUILD = "patch9-ticket-fix-20260525"
 
 import asyncio
 import json
@@ -934,8 +938,8 @@ async def entrypoint(ctx: JobContext):
     _current["room_logger"] = room_logger
     _current["room_name"] = ctx.room.name
     _current["job_id"] = job_id
-    room_log("ROOM_START", call_type="web")
-    logger.info("Per-room log: %s", room_log_path)
+    room_log("ROOM_START", call_type="web", build=AGENT_BUILD)
+    logger.info("Per-room log: %s | BUILD: %s", room_log_path, AGENT_BUILD)
 
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
     participant = await ctx.wait_for_participant()
