@@ -317,7 +317,7 @@ def _create_room_logger(room_name: str, job_id: Optional[str]) -> tuple[logging.
 
 @dataclass
 class SessionState:
-    support_state: str = "idle"  # idle|awaiting_order|checking_order|awaiting_phone|checking_phone|ticket_name|ticket_phone|ticket_email|ticket_issue|ticket_confirm|creating_ticket
+    support_state: str = "idle"  # idle|awaiting_order|checking_order|awaiting_phone|checking_phone|ticket_name|ticket_email|ticket_issue|ticket_confirm|creating_ticket
     ui_state: str = "idle"  # idle|listening|thinking|speaking
     last_issue: str = ""
     last_order_number: str = ""
@@ -851,19 +851,20 @@ async def _run_create_ticket(agent: VoicePipelineAgent):
     state.support_state = "creating_ticket"
     room_log("TICKET_CREATE_STARTED")
     try:
-        result = await support_ticket.create_support_ticket(
-            state.ticket_name or "Customer",
-            state.ticket_phone,
-            state.ticket_email,
-            state.ticket_issue,
+        result = await support_ticket.create_ticket_without_phone(
+            customer_name=state.ticket_name or "Customer",
+            customer_email=state.ticket_email,
+            issue_description=state.ticket_issue,
         )
-        room_log("TICKET_CREATE_RESULT", result=_truncate(result))
-        await agent.say(result, allow_interruptions=True)
+        msg = result.get("message", "Sorry, I couldn't create the support ticket.")
+        room_log("TICKET_CREATE_RESULT", result=_truncate(msg))
+        await agent.say(msg, allow_interruptions=True)
         state.support_state = "idle"
         state.ticket_name = ""
         state.ticket_phone = ""
         state.ticket_email = ""
         state.ticket_issue = ""
+        state.ticket_id = ""
     finally:
         state.ticket_inflight = False
 
@@ -1226,7 +1227,7 @@ async def entrypoint(ctx: JobContext):
             user_text.lower()
         ))
         _in_ticket_flow = state.support_state in {
-            "ticket_name", "ticket_phone", "ticket_email",
+            "ticket_name", "ticket_email",
             "ticket_issue", "ticket_confirm", "creating_ticket"
         }
         if _ticket_escape and not _in_ticket_flow:
@@ -1327,23 +1328,9 @@ async def entrypoint(ctx: JobContext):
         # 3b) Support ticket flow
         if state.support_state == "ticket_name":
             state.ticket_name = user_text
-            state.support_state = "ticket_phone"
-            suppress_llm()
-            asyncio.create_task(agent.say("Thanks. Please share your phone number.", allow_interruptions=True))
-            return
-
-        if state.support_state == "ticket_phone":
-            ticket_phone = _normalize_phone_for_lookup(user_text)
-            if not ticket_phone:
-                prompt = "Please share a valid phone number."
-                if not _should_suppress_clarification(prompt):
-                    suppress_llm()
-                    asyncio.create_task(agent.say(prompt, allow_interruptions=True))
-                return
-            state.ticket_phone = ticket_phone
             state.support_state = "ticket_email"
             suppress_llm()
-            asyncio.create_task(agent.say("Got it. Now please share your email address.", allow_interruptions=True))
+            asyncio.create_task(agent.say("Thanks. Now please share your email address.", allow_interruptions=True))
             return
 
         if state.support_state == "ticket_email":
@@ -1361,7 +1348,7 @@ async def entrypoint(ctx: JobContext):
             state.ticket_issue = user_text
             state.support_state = "ticket_confirm"
             confirm_text = (
-                f"I have your details as name {state.ticket_name}, phone {state.ticket_phone}, and email {state.ticket_email}. "
+                f"I have your details as name {state.ticket_name} and email {state.ticket_email}. "
                 "Should I create the support ticket now?"
             )
             suppress_llm()
@@ -1484,8 +1471,6 @@ async def entrypoint(ctx: JobContext):
             return "I am ready whenever you are. Please repeat the full phone number."
         if support_state == "ticket_name":
             return "Whenever you are ready, please tell me your full name so I can create the support ticket."
-        if support_state == "ticket_phone":
-            return "Please share your phone number when you are ready."
         if support_state == "ticket_email":
             return "Please share your email address when you are ready."
         if support_state == "ticket_issue":
