@@ -7,7 +7,7 @@ Meallion Voice AI - Elena English Agent (Patch 9 - Ticket Flow Fix)
 - Fixed interrupted speech race condition
 """
 
-AGENT_BUILD = "patch9f-30s-suppress-20260525"
+AGENT_BUILD = "patch9g-all-30s-20260525"
 
 import asyncio
 import json
@@ -1172,7 +1172,7 @@ async def entrypoint(ctx: JobContext):
         # a response that will be interrupted by the ticket escape handler
         if state.support_state not in {"ticket_name", "ticket_email", "ticket_issue", "ticket_confirm", "creating_ticket"}:
             if re.search(r"\b(human|representative|call me|callback|support ticket|open\s*(a\s*)?ticket|create\s*(a\s*)?ticket|raise\s*(a\s*)?ticket|make\s*(a\s*)?ticket|want\s*(a\s*)?ticket|need\s*(a\s*)?ticket|complaint)\b", user_text.lower()):
-                suppress_llm(15.0)
+                suppress_llm(30.0)
 
         # PATCH 4: Diagnostic logging
         all_digits = "".join(_extract_digit_parts(user_text))
@@ -1247,7 +1247,7 @@ async def entrypoint(ctx: JobContext):
         if _ticket_escape and not _in_ticket_flow:
             room_log("FLOW_TRANSITION", from_state=state.support_state, to_state="ticket_name", reason="ticket_escape")
             state.support_state = "ticket_name"
-            suppress_llm(15.0)
+            suppress_llm(30.0)
             agent.interrupt()
 
             async def _say_ticket_greeting():
@@ -1438,7 +1438,7 @@ async def entrypoint(ctx: JobContext):
         ticket_intent = bool(re.search(r"(human|representative|call me|callback|support ticket|open\s*(a\s*)?ticket|create\s*(a\s*)?ticket|raise\s*(a\s*)?ticket|make\s*(a\s*)?ticket|want\s*(a\s*)?ticket|need\s*(a\s*)?ticket|complaint)", user_text.lower()))
         if ticket_intent:
             state.support_state = "ticket_name"
-            suppress_llm(15.0)
+            suppress_llm(30.0)
             agent.interrupt()
 
             async def _say_ticket_greeting2():

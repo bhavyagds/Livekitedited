@@ -1169,7 +1169,7 @@ async def entrypoint(ctx: JobContext):
         # a response that will be interrupted by the ticket escape handler
         if state.support_state not in {"ticket_name", "ticket_email", "ticket_issue", "ticket_confirm", "creating_ticket"}:
             if re.search(r"(άνθρωπο|εκπρόσωπο|υπάλληλο|καλέστε με|αίτημα υποστήριξης|εισιτήριο|παράπονο|ανθρώπινος|εκπρόσωπος|εισιτήριο υποστήριξης|δημιουργία εισιτηρίου|support ticket|open ticket|create ticket)", user_text.lower()):
-                suppress_llm(15.0)
+                suppress_llm(30.0)
 
         # PATCH 4: Diagnostic logging
         all_digits = "".join(_extract_digit_parts(user_text))
@@ -1243,7 +1243,7 @@ async def entrypoint(ctx: JobContext):
         if _ticket_escape and not _in_ticket_flow:
             room_log("FLOW_TRANSITION", from_state=state.support_state, to_state="ticket_name", reason="ticket_escape")
             state.support_state = "ticket_name"
-            suppress_llm(15.0)
+            suppress_llm(30.0)
             agent.interrupt()
 
             async def _say_ticket_greeting():
@@ -1434,7 +1434,7 @@ async def entrypoint(ctx: JobContext):
         ticket_intent = bool(re.search(r"(άνθρωπο|εκπρόσωπο|υπάλληλο|καλέστε με|αίτημα υποστήριξης|εισιτήριο|παράπονο|ανθρώπινος|εκπρόσωπος|εισιτήριο υποστήριξης|δημιουργία εισιτηρίου)", user_text.lower()))
         if ticket_intent:
             state.support_state = "ticket_name"
-            suppress_llm(15.0)
+            suppress_llm(30.0)
             agent.interrupt()
 
             async def _say_ticket_greeting2():
