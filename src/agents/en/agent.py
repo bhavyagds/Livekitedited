@@ -828,8 +828,8 @@ async def _run_phone_lookup(agent: VoicePipelineAgent, phone_number: str):
         
         state.last_phone_number = phone_number
         if "no order" in (result or "").lower() or "could not" in (result or "").lower():
-            state.support_state = "awaiting_phone"
-            snooze_silence(20.0)
+            state.support_state = "idle"
+            snooze_silence(10.0)
             # PATCH 5: Clear suppression so agent can respond to next user turn
             state.suppress_llm_until = 0.0
         else:
