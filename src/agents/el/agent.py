@@ -1136,6 +1136,10 @@ async def entrypoint(ctx: JobContext):
         # PATCH 2/3: Immediately snooze silence monitor when user starts speaking
         snooze_silence(5.0)
         asyncio.create_task(set_ui_state("listening"))
+        # If we are in the ticket flow, suppress the LLM immediately so it
+        # cannot start generating before user_speech_committed fires.
+        if state.support_state in {"ticket_name", "ticket_email", "ticket_issue", "ticket_confirm", "creating_ticket"}:
+            suppress_llm(120.0)
 
     @agent.on("user_stopped_speaking")
     def _on_user_stopped_speaking():
@@ -1163,13 +1167,13 @@ async def entrypoint(ctx: JobContext):
         # Early suppression for ticket flow states — prevent LLM from responding
         # while the deterministic state machine handles the turn
         if state.support_state in {"ticket_name", "ticket_email", "ticket_issue", "ticket_confirm"}:
-            suppress_llm(30.0)
+            suppress_llm(120.0)
 
         # Early suppression for ticket intent detection — prevent LLM from starting
         # a response that will be interrupted by the ticket escape handler
         if state.support_state not in {"ticket_name", "ticket_email", "ticket_issue", "ticket_confirm", "creating_ticket"}:
             if re.search(r"(άνθρωπο|εκπρόσωπο|υπάλληλο|καλέστε με|αίτημα υποστήριξης|εισιτήριο|παράπονο|ανθρώπινος|εκπρόσωπος|εισιτήριο υποστήριξης|δημιουργία εισιτηρίου|support ticket|open ticket|create ticket)", user_text.lower()):
-                suppress_llm(30.0)
+                suppress_llm(120.0)
 
         # PATCH 4: Diagnostic logging
         all_digits = "".join(_extract_digit_parts(user_text))
@@ -1243,7 +1247,7 @@ async def entrypoint(ctx: JobContext):
         if _ticket_escape and not _in_ticket_flow:
             room_log("FLOW_TRANSITION", from_state=state.support_state, to_state="ticket_name", reason="ticket_escape")
             state.support_state = "ticket_name"
-            suppress_llm(30.0)
+            suppress_llm(120.0)
             agent.interrupt()
 
             async def _say_ticket_greeting():
@@ -1350,7 +1354,7 @@ async def entrypoint(ctx: JobContext):
         if state.support_state == "ticket_name":
             state.ticket_name = user_text
             state.support_state = "ticket_email"
-            suppress_llm(30.0)
+            suppress_llm(120.0)
             agent.interrupt()
             asyncio.create_task(agent.say("Ευχαριστώ. Τώρα παρακαλώ πείτε μου τη διεύθυνση email σας.", allow_interruptions=True))
             return
@@ -1359,13 +1363,13 @@ async def entrypoint(ctx: JobContext):
             # Try to extract email from surrounding text
             email_match = re.search(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", user_text)
             if not email_match:
-                suppress_llm(30.0)
+                suppress_llm(120.0)
                 agent.interrupt()
                 asyncio.create_task(agent.say("Παρακαλώ δώστε μου μια έγκυρη διεύθυνση email.", allow_interruptions=True))
                 return
             state.ticket_email = email_match.group(0).lower().strip()
             state.support_state = "ticket_issue"
-            suppress_llm(30.0)
+            suppress_llm(120.0)
             agent.interrupt()
             asyncio.create_task(agent.say("Παρακαλώ περιγράψτε το πρόβλημα με μία ή δύο προτάσεις.", allow_interruptions=True))
             return
@@ -1377,14 +1381,14 @@ async def entrypoint(ctx: JobContext):
                 f"Έχω τα στοιχεία σας: όνομα {state.ticket_name} και email {state.ticket_email}. "
                 "Θέλετε να δημιουργήσω το αίτημα υποστήριξης τώρα;"
             )
-            suppress_llm(30.0)
+            suppress_llm(120.0)
             agent.interrupt()
             asyncio.create_task(agent.say(confirm_text, allow_interruptions=True))
             return
 
         if state.support_state == "ticket_confirm":
             if _is_yes(user_text):
-                suppress_llm(30.0)
+                suppress_llm(120.0)
                 agent.interrupt()
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(10.0)
@@ -1396,11 +1400,11 @@ async def entrypoint(ctx: JobContext):
                 state.ticket_name = ""
                 state.ticket_email = ""
                 state.ticket_issue = ""
-                suppress_llm(30.0)
+                suppress_llm(120.0)
                 agent.interrupt()
                 asyncio.create_task(agent.say("Κανένα πρόβλημα. Ακύρωσα το αίτημα.", allow_interruptions=True))
                 return
-            suppress_llm(30.0)
+            suppress_llm(120.0)
             agent.interrupt()
             asyncio.create_task(agent.say("Πείτε ναι για δημιουργία ή όχι για ακύρωση.", allow_interruptions=True))
             return
@@ -1434,7 +1438,7 @@ async def entrypoint(ctx: JobContext):
         ticket_intent = bool(re.search(r"(άνθρωπο|εκπρόσωπο|υπάλληλο|καλέστε με|αίτημα υποστήριξης|εισιτήριο|παράπονο|ανθρώπινος|εκπρόσωπος|εισιτήριο υποστήριξης|δημιουργία εισιτηρίου)", user_text.lower()))
         if ticket_intent:
             state.support_state = "ticket_name"
-            suppress_llm(30.0)
+            suppress_llm(120.0)
             agent.interrupt()
 
             async def _say_ticket_greeting2():
