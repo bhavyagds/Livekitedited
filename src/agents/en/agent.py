@@ -7,7 +7,7 @@ Meallion Voice AI - Elena English Agent (Patch 9 - Ticket Flow Fix)
 - Fixed interrupted speech race condition
 """
 
-AGENT_BUILD = "patch9c-no-intent-block-20260525"
+AGENT_BUILD = "patch9d-suppress-only-20260525"
 
 import asyncio
 import json
@@ -1002,10 +1002,6 @@ async def entrypoint(ctx: JobContext):
         # Block LLM when suppress timer is active
         if time.time() < state.suppress_llm_until:
             room_log("LLM_SUPPRESSED", until=state.suppress_llm_until)
-            return False
-        # Block LLM when in ticket flow — deterministic handler will respond
-        if state.support_state in {"ticket_name", "ticket_email", "ticket_issue", "ticket_confirm", "creating_ticket"}:
-            room_log("LLM_BLOCKED_TICKET_FLOW", state=state.support_state)
             return False
         from livekit.agents.pipeline.pipeline_agent import _default_before_llm_cb
         return _default_before_llm_cb(agent_instance, chat_ctx)
