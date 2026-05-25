@@ -1158,6 +1158,19 @@ async def entrypoint(ctx: JobContext):
             # agent.interrupt() # Removed in PATCH 5 to avoid interfering with pipeline state in phone flow
             room_log("EARLY_DIGIT_SUPPRESSION", digits=len(all_digits))
 
+        # Early suppression for ticket flow states — prevent LLM from responding
+        # while the deterministic state machine handles the turn
+        if state.support_state in {"ticket_name", "ticket_email", "ticket_issue", "ticket_confirm"}:
+            suppress_llm(10.0)
+            agent.interrupt()
+
+        # Early suppression for ticket intent detection — prevent LLM from starting
+        # a response that will be interrupted by the ticket escape handler
+        if state.support_state not in {"ticket_name", "ticket_email", "ticket_issue", "ticket_confirm", "creating_ticket"}:
+            if re.search(r"\b(human|representative|call me|callback|support ticket|open\s*(a\s*)?ticket|create\s*(a\s*)?ticket|raise\s*(a\s*)?ticket|make\s*(a\s*)?ticket|want\s*(a\s*)?ticket|need\s*(a\s*)?ticket|complaint)\b", user_text.lower()):
+                suppress_llm(15.0)
+                agent.interrupt()
+
         # PATCH 4: Diagnostic logging
         all_digits = "".join(_extract_digit_parts(user_text))
         room_log("USER_TURN_DEBUG", state=state.support_state, text=user_text, extracted_digits=all_digits)
