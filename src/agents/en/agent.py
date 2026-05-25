@@ -7,7 +7,7 @@ Meallion Voice AI - Elena English Agent (Patch 9 - Ticket Flow Fix)
 - Fixed interrupted speech race condition
 """
 
-AGENT_BUILD = "patch9e-no-early-interrupt-20260525"
+AGENT_BUILD = "patch9f-30s-suppress-20260525"
 
 import asyncio
 import json
@@ -1166,7 +1166,7 @@ async def entrypoint(ctx: JobContext):
         # Early suppression for ticket flow states — prevent LLM from responding
         # while the deterministic state machine handles the turn
         if state.support_state in {"ticket_name", "ticket_email", "ticket_issue", "ticket_confirm"}:
-            suppress_llm(10.0)
+            suppress_llm(30.0)
 
         # Early suppression for ticket intent detection — prevent LLM from starting
         # a response that will be interrupted by the ticket escape handler
@@ -1354,7 +1354,7 @@ async def entrypoint(ctx: JobContext):
         if state.support_state == "ticket_name":
             state.ticket_name = user_text
             state.support_state = "ticket_email"
-            suppress_llm()
+            suppress_llm(30.0)
             agent.interrupt()
             asyncio.create_task(agent.say("Thanks. Now please share your email address.", allow_interruptions=True))
             return
@@ -1363,13 +1363,13 @@ async def entrypoint(ctx: JobContext):
             # Try to extract email from surrounding text (e.g. "My email is bhavya@gmail.com")
             email_match = re.search(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", user_text)
             if not email_match:
-                suppress_llm()
+                suppress_llm(30.0)
                 agent.interrupt()
                 asyncio.create_task(agent.say("Please share a valid email address.", allow_interruptions=True))
                 return
             state.ticket_email = email_match.group(0).lower().strip()
             state.support_state = "ticket_issue"
-            suppress_llm()
+            suppress_llm(30.0)
             agent.interrupt()
             asyncio.create_task(agent.say("Please describe the issue in one or two sentences.", allow_interruptions=True))
             return
@@ -1381,14 +1381,14 @@ async def entrypoint(ctx: JobContext):
                 f"I have your details as name {state.ticket_name} and email {state.ticket_email}. "
                 "Should I create the support ticket now?"
             )
-            suppress_llm()
+            suppress_llm(30.0)
             agent.interrupt()
             asyncio.create_task(agent.say(confirm_text, allow_interruptions=True))
             return
 
         if state.support_state == "ticket_confirm":
             if _is_yes(user_text):
-                suppress_llm()
+                suppress_llm(30.0)
                 agent.interrupt()
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(10.0)
@@ -1400,11 +1400,11 @@ async def entrypoint(ctx: JobContext):
                 state.ticket_name = ""
                 state.ticket_email = ""
                 state.ticket_issue = ""
-                suppress_llm()
+                suppress_llm(30.0)
                 agent.interrupt()
                 asyncio.create_task(agent.say("No problem. I have cancelled the ticket request.", allow_interruptions=True))
                 return
-            suppress_llm()
+            suppress_llm(30.0)
             agent.interrupt()
             asyncio.create_task(agent.say("Please say yes to create the ticket, or no to cancel.", allow_interruptions=True))
             return
