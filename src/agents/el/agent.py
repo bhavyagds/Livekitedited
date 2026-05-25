@@ -1006,17 +1006,6 @@ async def entrypoint(ctx: JobContext):
         if state.support_state in {"ticket_name", "ticket_email", "ticket_issue", "ticket_confirm", "creating_ticket"}:
             room_log("LLM_BLOCKED_TICKET_FLOW", state=state.support_state)
             return False
-        # Block LLM if the latest user message contains ticket intent keywords
-        try:
-            messages = chat_ctx.messages if hasattr(chat_ctx, 'messages') else []
-            if messages:
-                last_msg = messages[-1]
-                last_text = str(getattr(last_msg, 'content', '') or '').lower()
-                if re.search(r"(άνθρωπο|εκπρόσωπο|υπάλληλο|καλέστε με|αίτημα υποστήριξης|εισιτήριο|παράπονο|ανθρώπινος|εκπρόσωπος|support ticket|open ticket|create ticket|human|representative|complaint)", last_text):
-                    room_log("LLM_BLOCKED_TICKET_INTENT", text=last_text[:60])
-                    return False
-        except Exception:
-            pass
         from livekit.agents.pipeline.pipeline_agent import _default_before_llm_cb
         return _default_before_llm_cb(agent_instance, chat_ctx)
 
