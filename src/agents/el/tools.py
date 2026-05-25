@@ -253,6 +253,56 @@ async def create_support_ticket(
     )
 
 
+async def create_ticket_without_phone(
+    customer_name: str,
+    customer_email: str,
+    issue_description: str,
+    order_number: str = None,
+) -> dict:
+    """
+    Create a support ticket WITHOUT requiring a phone number.
+    Returns a dict with 'success' and 'message' keys.
+    """
+    cleaned_email = clean_email(customer_email)
+
+    errors = []
+    if not customer_name or len(customer_name.strip()) < 2:
+        errors.append("name is too short")
+    if not validate_email(cleaned_email):
+        errors.append("email address is invalid")
+    if not issue_description or len(issue_description.strip()) < 5:
+        errors.append("issue description is too short")
+
+    if errors:
+        return {
+            "success": False,
+            "message": f"Δεν μπορώ να δημιουργήσω αίτημα: {', '.join(errors)}.",
+        }
+
+    result = await clickup_service.create_support_ticket(
+        customer_name=customer_name.strip(),
+        customer_phone="not_provided",
+        customer_email=cleaned_email,
+        issue_description=issue_description.strip(),
+        order_number=order_number,
+    )
+
+    if result.get("success"):
+        return {
+            "success": True,
+            "task_id": result["task_id"],
+            "message": (
+                f"Το αίτημα υποστήριξης δημιουργήθηκε. "
+                f"Ο αριθμός αναφοράς σας είναι {result['task_id']}. "
+                "Ένας συνάδελφός μας θα επικοινωνήσει μαζί σας μέσω email σύντομα."
+            ),
+        }
+    return {
+        "success": False,
+        "message": "Λυπάμαι, δεν μπόρεσα να δημιουργήσω το αίτημα. Παρακαλώ δοκιμάστε ξανά.",
+    }
+
+
 async def log_customer_query(
     customer_question: Annotated[str, "The customer's question or issue that you cannot answer"],
     customer_name: Annotated[Optional[str], "Customer name if known"] = None,

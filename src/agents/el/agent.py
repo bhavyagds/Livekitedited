@@ -326,9 +326,9 @@ class SessionState:
     lookup_inflight: bool = False
     ticket_inflight: bool = False
     ticket_name: str = ""
-    ticket_phone: str = ""
     ticket_email: str = ""
     ticket_issue: str = ""
+    ticket_id: str = ""
     should_end: bool = False
     disconnect_reason: str = "session_end"
     silence_enabled: bool = True
@@ -863,7 +863,6 @@ async def _run_create_ticket(agent: VoicePipelineAgent):
         await agent.say(msg, allow_interruptions=True)
         state.support_state = "idle"
         state.ticket_name = ""
-        state.ticket_phone = ""
         state.ticket_email = ""
         state.ticket_issue = ""
         state.ticket_id = ""
@@ -1278,7 +1277,13 @@ async def entrypoint(ctx: JobContext):
             return
 
         # 3) Active phone-support flow
-        if state.support_state in {"awaiting_phone", "checking_phone"} or len(all_digits) >= 10:
+        # GUARD: Skip phone lookup entirely when user is in the ticket creation flow
+        _in_ticket_creation_flow = state.support_state in {
+            "ticket_name", "ticket_email", "ticket_issue", "ticket_confirm", "creating_ticket"
+        }
+        if not _in_ticket_creation_flow and (
+            state.support_state in {"awaiting_phone", "checking_phone"} or len(all_digits) >= 10
+        ):
             # Check for Order ID first as an escape path, even in phone flow.
             order_id_escape = _normalize_order_id_strict(user_text)
             if order_id_escape:
@@ -1372,7 +1377,6 @@ async def entrypoint(ctx: JobContext):
             if _is_no(user_text):
                 state.support_state = "idle"
                 state.ticket_name = ""
-                state.ticket_phone = ""
                 state.ticket_email = ""
                 state.ticket_issue = ""
                 suppress_llm()
