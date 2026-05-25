@@ -473,20 +473,19 @@ class ElenaFunctionContext(llm.FunctionContext):
     async def create_support_ticket(
         self,
         customer_name: Annotated[str, llm.TypeInfo(description="Customer full name")],
-        customer_phone: Annotated[str, llm.TypeInfo(description="Customer phone")],
         customer_email: Annotated[str, llm.TypeInfo(description="Customer email")],
         issue_description: Annotated[str, llm.TypeInfo(description="Issue")],
     ) -> str:
-        """Create a support ticket when an issue cannot be resolved during the call."""
+        """Create a support ticket when an issue cannot be resolved during the call. Only collect name, email, and issue. Do NOT ask for phone number."""
         room_log("TOOL_CALL", name="create_support_ticket")
-        result = await support_ticket.create_support_ticket(
-            customer_name,
-            customer_phone,
-            customer_email,
-            issue_description,
+        result = await support_ticket.create_ticket_without_phone(
+            customer_name=customer_name,
+            customer_email=customer_email,
+            issue_description=issue_description,
         )
-        room_log("TOOL_RESULT", name="create_support_ticket", result=_truncate(result))
-        return result
+        msg = result.get("message", "Λυπάμαι, δεν μπόρεσα να δημιουργήσω το αίτημα υποστήριξης.")
+        room_log("TOOL_RESULT", name="create_support_ticket", result=_truncate(msg))
+        return msg
 
     @llm.ai_callable()
     async def end_session(self) -> str:
@@ -1330,17 +1329,22 @@ async def entrypoint(ctx: JobContext):
             state.ticket_name = user_text
             state.support_state = "ticket_email"
             suppress_llm()
+            agent.interrupt()
             asyncio.create_task(agent.say("Ευχαριστώ. Τώρα παρακαλώ πείτε μου τη διεύθυνση email σας.", allow_interruptions=True))
             return
 
         if state.support_state == "ticket_email":
-            if not _looks_like_email(user_text):
+            # Try to extract email from surrounding text
+            email_match = re.search(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", user_text)
+            if not email_match:
                 suppress_llm()
+                agent.interrupt()
                 asyncio.create_task(agent.say("Παρακαλώ δώστε μου μια έγκυρη διεύθυνση email.", allow_interruptions=True))
                 return
-            state.ticket_email = user_text.strip()
+            state.ticket_email = email_match.group(0).lower().strip()
             state.support_state = "ticket_issue"
             suppress_llm()
+            agent.interrupt()
             asyncio.create_task(agent.say("Παρακαλώ περιγράψτε το πρόβλημα με μία ή δύο προτάσεις.", allow_interruptions=True))
             return
 
@@ -1352,12 +1356,14 @@ async def entrypoint(ctx: JobContext):
                 "Θέλετε να δημιουργήσω το αίτημα υποστήριξης τώρα;"
             )
             suppress_llm()
+            agent.interrupt()
             asyncio.create_task(agent.say(confirm_text, allow_interruptions=True))
             return
 
         if state.support_state == "ticket_confirm":
             if _is_yes(user_text):
                 suppress_llm()
+                agent.interrupt()
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(10.0)
                 asyncio.create_task(agent.say("Ευχαριστώ. Δημιουργώ το αίτημα υποστήριξης τώρα.", allow_interruptions=True))
@@ -1370,9 +1376,11 @@ async def entrypoint(ctx: JobContext):
                 state.ticket_email = ""
                 state.ticket_issue = ""
                 suppress_llm()
+                agent.interrupt()
                 asyncio.create_task(agent.say("Κανένα πρόβλημα. Ακύρωσα το αίτημα.", allow_interruptions=True))
                 return
             suppress_llm()
+            agent.interrupt()
             asyncio.create_task(agent.say("Πείτε ναι για δημιουργία ή όχι για ακύρωση.", allow_interruptions=True))
             return
 

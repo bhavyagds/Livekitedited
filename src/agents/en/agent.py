@@ -472,20 +472,19 @@ class ElenaFunctionContext(llm.FunctionContext):
     async def create_support_ticket(
         self,
         customer_name: Annotated[str, llm.TypeInfo(description="Customer full name")],
-        customer_phone: Annotated[str, llm.TypeInfo(description="Customer phone")],
         customer_email: Annotated[str, llm.TypeInfo(description="Customer email")],
         issue_description: Annotated[str, llm.TypeInfo(description="Issue")],
     ) -> str:
-        """Create a support ticket when an issue cannot be resolved during the call."""
+        """Create a support ticket when an issue cannot be resolved during the call. Only collect name, email, and issue. Do NOT ask for phone number."""
         room_log("TOOL_CALL", name="create_support_ticket")
-        result = await support_ticket.create_support_ticket(
-            customer_name,
-            customer_phone,
-            customer_email,
-            issue_description,
+        result = await support_ticket.create_ticket_without_phone(
+            customer_name=customer_name,
+            customer_email=customer_email,
+            issue_description=issue_description,
         )
-        room_log("TOOL_RESULT", name="create_support_ticket", result=_truncate(result))
-        return result
+        msg = result.get("message", "Sorry, I couldn't create the support ticket.")
+        room_log("TOOL_RESULT", name="create_support_ticket", result=_truncate(msg))
+        return msg
 
     @llm.ai_callable()
     async def end_session(self) -> str:
@@ -1223,7 +1222,7 @@ async def entrypoint(ctx: JobContext):
 
         # 1.5) Ticket-creation escape
         _ticket_escape = bool(re.search(
-            r"\b(human|representative|call me|callback|support ticket|open ticket|create ticket)\b",
+            r"\b(human|representative|call me|callback|support ticket|open\s*(a\s*)?ticket|create\s*(a\s*)?ticket|raise\s*(a\s*)?ticket|make\s*(a\s*)?ticket|want\s*(a\s*)?ticket|need\s*(a\s*)?ticket|complaint)\b",
             user_text.lower()
         ))
         _in_ticket_flow = state.support_state in {
@@ -1330,17 +1329,22 @@ async def entrypoint(ctx: JobContext):
             state.ticket_name = user_text
             state.support_state = "ticket_email"
             suppress_llm()
+            agent.interrupt()
             asyncio.create_task(agent.say("Thanks. Now please share your email address.", allow_interruptions=True))
             return
 
         if state.support_state == "ticket_email":
-            if not _looks_like_email(user_text):
+            # Try to extract email from surrounding text (e.g. "My email is bhavya@gmail.com")
+            email_match = re.search(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", user_text)
+            if not email_match:
                 suppress_llm()
+                agent.interrupt()
                 asyncio.create_task(agent.say("Please share a valid email address.", allow_interruptions=True))
                 return
-            state.ticket_email = user_text.strip()
+            state.ticket_email = email_match.group(0).lower().strip()
             state.support_state = "ticket_issue"
             suppress_llm()
+            agent.interrupt()
             asyncio.create_task(agent.say("Please describe the issue in one or two sentences.", allow_interruptions=True))
             return
 
@@ -1352,12 +1356,14 @@ async def entrypoint(ctx: JobContext):
                 "Should I create the support ticket now?"
             )
             suppress_llm()
+            agent.interrupt()
             asyncio.create_task(agent.say(confirm_text, allow_interruptions=True))
             return
 
         if state.support_state == "ticket_confirm":
             if _is_yes(user_text):
                 suppress_llm()
+                agent.interrupt()
                 asyncio.create_task(set_ui_state("thinking"))
                 snooze_silence(10.0)
                 asyncio.create_task(agent.say("Thanks. Creating your support ticket now.", allow_interruptions=True))
@@ -1370,9 +1376,11 @@ async def entrypoint(ctx: JobContext):
                 state.ticket_email = ""
                 state.ticket_issue = ""
                 suppress_llm()
+                agent.interrupt()
                 asyncio.create_task(agent.say("No problem. I have cancelled the ticket request.", allow_interruptions=True))
                 return
             suppress_llm()
+            agent.interrupt()
             asyncio.create_task(agent.say("Please say yes to create the ticket, or no to cancel.", allow_interruptions=True))
             return
 
@@ -1402,7 +1410,7 @@ async def entrypoint(ctx: JobContext):
                 asyncio.create_task(_run_order_lookup(agent, order_id))
                 return
 
-        ticket_intent = bool(re.search(r"(human|representative|call me|callback|support ticket|open ticket|create ticket)", user_text.lower()))
+        ticket_intent = bool(re.search(r"(human|representative|call me|callback|support ticket|open\s*(a\s*)?ticket|create\s*(a\s*)?ticket|raise\s*(a\s*)?ticket|make\s*(a\s*)?ticket|want\s*(a\s*)?ticket|need\s*(a\s*)?ticket|complaint)", user_text.lower()))
         if ticket_intent:
             state.support_state = "ticket_name"
             suppress_llm(15.0)
