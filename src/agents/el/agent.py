@@ -1164,14 +1164,12 @@ async def entrypoint(ctx: JobContext):
         # while the deterministic state machine handles the turn
         if state.support_state in {"ticket_name", "ticket_email", "ticket_issue", "ticket_confirm"}:
             suppress_llm(10.0)
-            agent.interrupt()
 
         # Early suppression for ticket intent detection — prevent LLM from starting
         # a response that will be interrupted by the ticket escape handler
         if state.support_state not in {"ticket_name", "ticket_email", "ticket_issue", "ticket_confirm", "creating_ticket"}:
             if re.search(r"(άνθρωπο|εκπρόσωπο|υπάλληλο|καλέστε με|αίτημα υποστήριξης|εισιτήριο|παράπονο|ανθρώπινος|εκπρόσωπος|εισιτήριο υποστήριξης|δημιουργία εισιτηρίου|support ticket|open ticket|create ticket)", user_text.lower()):
                 suppress_llm(15.0)
-                agent.interrupt()
 
         # PATCH 4: Diagnostic logging
         all_digits = "".join(_extract_digit_parts(user_text))

@@ -7,7 +7,7 @@ Meallion Voice AI - Elena English Agent (Patch 9 - Ticket Flow Fix)
 - Fixed interrupted speech race condition
 """
 
-AGENT_BUILD = "patch9d-suppress-only-20260525"
+AGENT_BUILD = "patch9e-no-early-interrupt-20260525"
 
 import asyncio
 import json
@@ -1167,14 +1167,12 @@ async def entrypoint(ctx: JobContext):
         # while the deterministic state machine handles the turn
         if state.support_state in {"ticket_name", "ticket_email", "ticket_issue", "ticket_confirm"}:
             suppress_llm(10.0)
-            agent.interrupt()
 
         # Early suppression for ticket intent detection — prevent LLM from starting
         # a response that will be interrupted by the ticket escape handler
         if state.support_state not in {"ticket_name", "ticket_email", "ticket_issue", "ticket_confirm", "creating_ticket"}:
             if re.search(r"\b(human|representative|call me|callback|support ticket|open\s*(a\s*)?ticket|create\s*(a\s*)?ticket|raise\s*(a\s*)?ticket|make\s*(a\s*)?ticket|want\s*(a\s*)?ticket|need\s*(a\s*)?ticket|complaint)\b", user_text.lower()):
                 suppress_llm(15.0)
-                agent.interrupt()
 
         # PATCH 4: Diagnostic logging
         all_digits = "".join(_extract_digit_parts(user_text))
