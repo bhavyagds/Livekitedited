@@ -204,6 +204,9 @@ def build_system_prompt(language: str = "en") -> str:
         "4. NO HALLUCINATION: If missing from all sources, say you don't have that info.\n"
     )
 
+    # Always inject ticket instructions so the LLM knows the 7-step sequence
+    parts.append(TICKET_INSTRUCTIONS)
+
     parts.append("""
 TOOL USAGE GUARDRAIL:
 - Report findings EXACTLY as provided by tools.
@@ -256,6 +259,10 @@ async def build_system_prompt_async(language: str = "en") -> str:
         "3. SYSTEM THIRD: Apply general behavior instructions after Memory/KB.\n"
         "4. NO HALLUCINATION: If missing from all sources, say you don't have that info.\n"
     )
+
+    # Always inject ticket instructions so the LLM knows the 7-step sequence
+    parts.append(TICKET_INSTRUCTIONS)
+
     return "\n\n".join(parts)
 
 
@@ -294,6 +301,38 @@ def _get_response_language_instruction(language: str) -> str:
 
 
 MINIMAL_FALLBACK_PROMPT = "You are Elena, a female customer service assistant. Be helpful."
+
+
+# ---------------------------------------------------------------------------
+# Support ticket collection instructions injected into every system prompt
+# ---------------------------------------------------------------------------
+
+TICKET_INSTRUCTIONS = """
+## SUPPORT TICKET CREATION — FOLLOW THIS EXACT SEQUENCE
+
+When a customer has an unresolvable issue, create a support ticket
+by following these steps IN ORDER. Never skip a step. Never ask for
+two pieces of information in the same message.
+
+STEP 1: Call initiate_ticket_creation()
+STEP 2: Customer gives name  → call collect_ticket_name(name="...")
+STEP 3: Customer gives email → call collect_ticket_email(email="...")
+STEP 4: Customer gives phone → call collect_ticket_phone(phone="...")
+STEP 5: Customer describes issue → call collect_ticket_issue(issue="...")
+STEP 6: Read back ALL details (name, email, phone, issue) and ask for confirmation
+STEP 7: Customer says yes → call confirm_and_submit_ticket(confirmed=True)
+        Customer says no  → call confirm_and_submit_ticket(confirmed=False)
+
+RULES:
+- If customer provides multiple details at once (e.g. name and email
+  in same sentence), still call each tool separately in order.
+- If customer says "cancel", "never mind", or "forget it" at any
+  point during collection → call cancel_ticket_creation()
+- If customer says details are wrong at confirmation step →
+  call confirm_and_submit_ticket(confirmed=False) to restart
+- Never invent or assume any customer details
+- Always read back ALL details before calling submit
+"""
 
 
 async def refresh_cache():

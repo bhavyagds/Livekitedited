@@ -13,7 +13,12 @@ from contextvars import ContextVar
 from livekit.agents import llm
 
 from src.services.shopify import get_shopify_service, ShopifyService
-from src.services.clickup import clickup_service
+from src.services.n8n import (
+    create_draft_ticket,
+    update_ticket_field,
+    submit_ticket,
+    abandon_ticket,
+)
 from src.agents.en.prompts import get_agent_language, get_agent_setting
 
 logger = logging.getLogger(__name__)
@@ -180,8 +185,12 @@ def get_last_order_snapshot() -> dict | None:
 
 
 # =============================================================================
-# SUPPORT TICKET STUFF
+# SUPPORT TICKET STUFF  (n8n progressive collection)
 # =============================================================================
+
+# ---------------------------------------------------------------------------
+# Helpers shared by ticket tools
+# ---------------------------------------------------------------------------
 
 def clean_phone_number(phone: str) -> str:
     return re.sub(r'[^0-9+]', '', phone)
@@ -205,51 +214,246 @@ def validate_phone(phone: str) -> bool:
     return len(cleaned) >= 10
 
 
-async def create_support_ticket(
-    customer_name: Annotated[str, "The customer's full name"],
-    customer_phone: Annotated[str, "The customer's phone number"],
-    customer_email: Annotated[str, "The customer's email address"],
-    issue_description: Annotated[str, "A clear description of the customer's issue or complaint"],
-    order_number: Annotated[Optional[str], "Related order number if applicable"] = None,
+# ── Lightweight state container used by the session ─────────────────────────
+
+from dataclasses import dataclass, field as dc_field
+
+
+@dataclass
+class TicketData:
+    name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    issue: Optional[str] = None
+    ticket_id: Optional[str] = None  # n8n/ClickUp draft ID
+
+
+# ── TOOL 1 ──────────────────────────────────────────────────────────────────
+
+async def initiate_ticket_creation(call_id: str, ticket_data: TicketData) -> str:
+    """
+    Call this when a customer has an issue that needs a support ticket.
+    This starts the ticket creation flow. Do NOT call any other ticket
+    tool before this one.
+    """
+    # Reset to a fresh TicketData object (in-place so callers retain their reference)
+    ticket_data.name = None
+    ticket_data.email = None
+    ticket_data.phone = None
+    ticket_data.issue = None
+    ticket_data.ticket_id = None
+
+    return (
+        "I'll create a support ticket for you right away. "
+        "Could I get your full name please?"
+    )
+
+
+# ── TOOL 2 ──────────────────────────────────────────────────────────────────
+
+async def collect_ticket_name(
+    call_id: str,
+    name: str,
+    ticket_data: TicketData,
 ) -> str:
     """
-    Create a support ticket in ClickUp.
-    All fields MUST have been collected and verified ONE BY ONE first.
+    Call this when the customer provides their name during ticket creation.
+    Args:
+        name: The customer's full name as spoken
     """
-    cleaned_phone = clean_phone_number(customer_phone)
-    cleaned_email = clean_email(customer_email)
-    
-    errors = []
-    if not customer_name or len(customer_name.strip()) < 2:
-        errors.append("Invalid name")
-    if not validate_phone(cleaned_phone):
-        errors.append("Invalid phone number")
-    if not validate_email(cleaned_email):
-        errors.append("Invalid email address")
-    if not issue_description or len(issue_description.strip()) < 10:
-        errors.append("Issue description too short")
-    
-    if errors:
-        return f"Cannot create ticket: {', '.join(errors)}. Please correct the information."
-    
-    result = await clickup_service.create_support_ticket(
-        customer_name=customer_name.strip(),
-        customer_phone=cleaned_phone,
-        customer_email=cleaned_email,
-        issue_description=issue_description.strip(),
-        order_number=order_number,
-    )
-    
-    if not result["success"]:
-        return "Sorry, I couldn't create the support ticket. Please try again or contact us directly via email."
-    
+    ticket_data.name = name
+
+    try:
+        ticket_id = await create_draft_ticket(
+            call_id=call_id,
+            name=name,
+            language="en",
+        )
+        ticket_data.ticket_id = ticket_id
+        logger.info(f"Draft ticket created: {ticket_id}")
+    except Exception as e:
+        logger.error(f"n8n create_draft_ticket failed: {e}")
+        # Continue conversation even if n8n fails
+
+    return f"Thank you {name}. What's the best email address to reach you at?"
+
+
+# ── TOOL 3 ──────────────────────────────────────────────────────────────────
+
+async def collect_ticket_email(
+    email: str,
+    ticket_data: TicketData,
+) -> str:
+    """
+    Call this when the customer provides their email address.
+    Args:
+        email: The customer's email address
+    """
+    cleaned = clean_email(email)
+    if not validate_email(cleaned):
+        return (
+            "That doesn't quite look like a valid email address. "
+            "Could you spell it out for me?"
+        )
+
+    ticket_data.email = cleaned
+
+    if ticket_data.ticket_id:
+        try:
+            await update_ticket_field(
+                ticket_id=ticket_data.ticket_id,
+                field="email",
+                value=cleaned,
+            )
+        except Exception as e:
+            logger.error(f"n8n update email failed: {e}")
+
+    return "Got it. And your phone number please?"
+
+
+# ── TOOL 4 ──────────────────────────────────────────────────────────────────
+
+async def collect_ticket_phone(
+    phone: str,
+    ticket_data: TicketData,
+) -> str:
+    """
+    Call this when the customer provides their phone number.
+    Args:
+        phone: The customer's phone number
+    """
+    ticket_data.phone = phone
+
+    if ticket_data.ticket_id:
+        try:
+            await update_ticket_field(
+                ticket_id=ticket_data.ticket_id,
+                field="phone",
+                value=phone,
+            )
+        except Exception as e:
+            logger.error(f"n8n update phone failed: {e}")
+
     return (
-        f"Your support ticket has been created successfully. "
-        f"Your reference number is {result['task_id']}. "
-        "Our support team will contact you soon at the provided phone or email."
+        "Perfect. Now please describe your issue "
+        "in as much detail as you can."
     )
 
 
+# ── TOOL 5 ──────────────────────────────────────────────────────────────────
+
+async def collect_ticket_issue(
+    issue: str,
+    ticket_data: TicketData,
+) -> str:
+    """
+    Call this when the customer describes their issue or problem.
+    Args:
+        issue: Full description of the customer's issue
+    """
+    ticket_data.issue = issue
+
+    if ticket_data.ticket_id:
+        try:
+            await update_ticket_field(
+                ticket_id=ticket_data.ticket_id,
+                field="issue",
+                value=issue,
+            )
+        except Exception as e:
+            logger.error(f"n8n update issue failed: {e}")
+
+    return (
+        f"Let me confirm your details before I submit. "
+        f"Name: {ticket_data.name}. "
+        f"Email: {ticket_data.email}. "
+        f"Phone: {ticket_data.phone}. "
+        f"Issue: {issue}. "
+        f"Is all of that correct?"
+    )
+
+
+# ── TOOL 6 ──────────────────────────────────────────────────────────────────
+
+async def confirm_and_submit_ticket(
+    confirmed: bool,
+    ticket_data: TicketData,
+) -> str:
+    """
+    Call this when the customer confirms or rejects their ticket details.
+    Args:
+        confirmed: True if customer said yes/correct, False if they want changes
+    """
+    if not confirmed:
+        # Restart collection — keep same ticket_id, just re-collect fields
+        ticket_data.name = None
+        ticket_data.email = None
+        ticket_data.phone = None
+        ticket_data.issue = None
+        return (
+            "No problem, let's go through it again. "
+            "What's your full name?"
+        )
+
+    try:
+        if ticket_data.ticket_id:
+            await submit_ticket(ticket_id=ticket_data.ticket_id)
+        ticket_id = ticket_data.ticket_id
+        email = ticket_data.email
+
+        # Clear out data so the session is clean
+        ticket_data.name = None
+        ticket_data.email = None
+        ticket_data.phone = None
+        ticket_data.issue = None
+        ticket_data.ticket_id = None
+
+        return (
+            f"Your support ticket has been submitted successfully. "
+            f"Your reference number is {ticket_id}. "
+            f"Our team will get back to you at {email} within 24 hours. "
+            f"Is there anything else I can help you with?"
+        )
+
+    except Exception as e:
+        logger.error(f"n8n submit_ticket failed: {e}")
+        ticket_data.name = None
+        ticket_data.email = None
+        ticket_data.phone = None
+        ticket_data.issue = None
+        ticket_data.ticket_id = None
+        return (
+            "I'm sorry, I had a technical issue submitting your ticket. "
+            "Please call us back or email support at hello@meallion.com "
+            "and we'll take care of it."
+        )
+
+
+# ── TOOL 7 ──────────────────────────────────────────────────────────────────
+
+async def cancel_ticket_creation(ticket_data: TicketData) -> str:
+    """
+    Call this if the customer wants to cancel the ticket creation process.
+    """
+    if ticket_data.ticket_id:
+        try:
+            await abandon_ticket(ticket_id=ticket_data.ticket_id)
+        except Exception as e:
+            logger.error(f"n8n abandon failed: {e}")
+
+    ticket_data.name = None
+    ticket_data.email = None
+    ticket_data.phone = None
+    ticket_data.issue = None
+    ticket_data.ticket_id = None
+
+    return (
+        "No problem, I've cancelled the ticket. "
+        "Is there anything else I can help you with?"
+    )
+
+
+# Legacy thin wrapper kept so agent.py's _run_create_ticket still works
 async def create_ticket_without_phone(
     customer_name: str,
     customer_email: str,
@@ -257,106 +461,35 @@ async def create_ticket_without_phone(
     order_number: str = None,
 ) -> dict:
     """
-    Create a support ticket WITHOUT requiring a phone number.
-    Returns a dict with 'success' and 'message' keys.
+    Legacy wrapper — used by the old deterministic ticket handler in agent.py.
+    Calls n8n in a single shot: create draft → update email/issue → submit.
     """
-    cleaned_email = clean_email(customer_email)
-
-    errors = []
-    if not customer_name or len(customer_name.strip()) < 2:
-        errors.append("name is too short")
-    if not validate_email(cleaned_email):
-        errors.append("email address is invalid")
-    if not issue_description or len(issue_description.strip()) < 5:
-        errors.append("issue description is too short")
-
-    if errors:
-        return {
-            "success": False,
-            "message": f"Cannot create ticket: {', '.join(errors)}. Please correct the information.",
-        }
-
-    result = await clickup_service.create_support_ticket(
-        customer_name=customer_name.strip(),
-        customer_phone="not_provided",
-        customer_email=cleaned_email,
-        issue_description=issue_description.strip(),
-        order_number=order_number,
-    )
-
-    if result.get("success"):
+    try:
+        ticket_id = await create_draft_ticket(
+            call_id="legacy",
+            name=customer_name,
+            language="en",
+        )
+        if ticket_id:
+            cleaned_email = clean_email(customer_email)
+            await update_ticket_field(ticket_id=ticket_id, field="email", value=cleaned_email)
+            await update_ticket_field(ticket_id=ticket_id, field="issue", value=issue_description)
+            await submit_ticket(ticket_id=ticket_id)
         return {
             "success": True,
-            "task_id": result["task_id"],
+            "task_id": ticket_id or "n/a",
             "message": (
                 f"Your support ticket has been created. "
-                f"Your reference number is {result['task_id']}. "
+                f"Your reference number is {ticket_id or 'pending'}. "
                 "One of our colleagues will contact you via email soon."
             ),
         }
-    return {
-        "success": False,
-        "message": "Sorry, I couldn't create the support ticket. Please try again.",
-    }
-
-
-async def log_customer_query(
-    customer_question: Annotated[str, "The customer's question or issue that you cannot answer"],
-    customer_name: Annotated[Optional[str], "Customer name if known"] = None,
-    customer_phone: Annotated[Optional[str], "Customer phone if known"] = None,
-) -> str:
-    """
-    Log a customer query that you cannot answer for follow-up by the team.
-    """
-    logger.info(f"Logging customer query: {customer_question[:100]}")
-    result = await clickup_service.create_support_ticket(
-        customer_name=customer_name or "Unknown Caller",
-        customer_phone=customer_phone or "Not provided",
-        customer_email="callback-needed@meallion.gr",
-        issue_description=f"[CALLBACK NEEDED] Customer asked: {customer_question}",
-        order_number=None,
-        tags=["callback-needed", "ai-escalation"],
-    )
-    if result["success"]:
-        return "Got it! I've noted your question and someone from our team will get back to you shortly."
-    return "I've made a note - our team will follow up with you soon."
-
-
-async def validate_ticket_field(
-    field_name: Annotated[str, "The field being validated: 'name', 'phone', 'email', or 'issue'"],
-    field_value: Annotated[str, "The value provided by the customer"],
-) -> str:
-    """
-    Validate and format a support ticket field before final submission.
-    """
-    field_name = field_name.lower()
-    
-    if field_name == "name":
-        cleaned = field_value.strip()
-        if len(cleaned) < 2:
-            return "The name is too short. Can you give me your full name?"
-        return f"I have: {cleaned}. Is that correct?"
-    
-    elif field_name == "phone":
-        cleaned = clean_phone_number(field_value)
-        if not validate_phone(cleaned):
-            return "The phone number doesn't seem correct. Can you repeat it?"
-        return f"I have phone number: {cleaned}. Is that correct?"
-    
-    elif field_name == "email":
-        cleaned = clean_email(field_value)
-        if not validate_email(cleaned):
-            return "The email address doesn't seem correct. Can you spell it out?"
-        return f"I have email: {cleaned}. Is that correct?"
-    
-    elif field_name == "issue":
-        cleaned = field_value.strip()
-        if len(cleaned) < 10:
-            return "Can you give me more details about your issue?"
-        summary = cleaned[:100] + "..." if len(cleaned) > 100 else cleaned
-        return f"I understand your issue is: {summary}. Is that correct?"
-    
-    return f"Unknown field: {field_name}"
+    except Exception as e:
+        logger.error(f"create_ticket_without_phone (legacy n8n) failed: {e}")
+        return {
+            "success": False,
+            "message": "Sorry, I couldn't create the support ticket. Please try again.",
+        }
 
 
 # =============================================================================

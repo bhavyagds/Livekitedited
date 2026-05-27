@@ -135,6 +135,16 @@ class Settings(BaseSettings):
         description="ClickUp list ID for support tickets"
     )
 
+    # n8n Integration (for progressive ticket collection)
+    n8n_webhook_url: str = Field(
+        default="",
+        description="n8n webhook URL for ticket operations"
+    )
+    n8n_webhook_secret: str = Field(
+        default="",
+        description="n8n webhook secret/bearer token"
+    )
+
     # Database Configuration
     database_url: str = Field(
         default="sqlite+aiosqlite:///./data/conversations.db",

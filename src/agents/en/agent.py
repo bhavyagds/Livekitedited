@@ -41,6 +41,7 @@ from src.agents.en.prompts import (
 from src.agents.en import tools as order_lookup
 from src.agents.en import tools as knowledge_base
 from src.agents.en import tools as support_ticket
+from src.services.n8n import abandon_ticket as _n8n_abandon_ticket
 
 logger = logging.getLogger(__name__)
 
@@ -321,7 +322,7 @@ def _create_room_logger(room_name: str, job_id: Optional[str]) -> tuple[logging.
 
 @dataclass
 class SessionState:
-    support_state: str = "idle"  # idle|awaiting_order|checking_order|awaiting_phone|checking_phone|ticket_name|ticket_email|ticket_issue|ticket_confirm|creating_ticket
+    support_state: str = "idle"  # idle|awaiting_order|checking_order|awaiting_phone|checking_phone|ticket_name|ticket_email|ticket_phone|ticket_issue|ticket_confirm|creating_ticket
     ui_state: str = "idle"  # idle|listening|thinking|speaking
     last_issue: str = ""
     last_order_number: str = ""
@@ -330,6 +331,7 @@ class SessionState:
     ticket_inflight: bool = False
     ticket_name: str = ""
     ticket_email: str = ""
+    ticket_phone: str = ""
     ticket_issue: str = ""
     ticket_id: str = ""
     should_end: bool = False
@@ -1141,7 +1143,7 @@ async def entrypoint(ctx: JobContext):
         asyncio.create_task(set_ui_state("listening"))
         # If we are in the ticket flow, suppress the LLM immediately so it
         # cannot start generating before user_speech_committed fires.
-        if state.support_state in {"ticket_name", "ticket_email", "ticket_issue", "ticket_confirm", "creating_ticket"}:
+        if state.support_state in {"ticket_name", "ticket_email", "ticket_phone", "ticket_issue", "ticket_confirm", "creating_ticket"}:
             suppress_llm(120.0)
 
     @agent.on("user_stopped_speaking")
@@ -1169,12 +1171,12 @@ async def entrypoint(ctx: JobContext):
 
         # Early suppression for ticket flow states — prevent LLM from responding
         # while the deterministic state machine handles the turn
-        if state.support_state in {"ticket_name", "ticket_email", "ticket_issue", "ticket_confirm"}:
+        if state.support_state in {"ticket_name", "ticket_email", "ticket_phone", "ticket_issue", "ticket_confirm"}:
             suppress_llm(120.0)
 
         # Early suppression for ticket intent detection — prevent LLM from starting
         # a response that will be interrupted by the ticket escape handler
-        if state.support_state not in {"ticket_name", "ticket_email", "ticket_issue", "ticket_confirm", "creating_ticket"}:
+        if state.support_state not in {"ticket_name", "ticket_email", "ticket_phone", "ticket_issue", "ticket_confirm", "creating_ticket"}:
             if re.search(r"\b(human|representative|call me|callback|support ticket|open\s*(a\s*)?ticket|create\s*(a\s*)?ticket|raise\s*(a\s*)?ticket|make\s*(a\s*)?ticket|want\s*(a\s*)?ticket|need\s*(a\s*)?ticket|complaint)\b", user_text.lower()):
                 suppress_llm(120.0)
 
@@ -1245,7 +1247,7 @@ async def entrypoint(ctx: JobContext):
             user_text.lower()
         ))
         _in_ticket_flow = state.support_state in {
-            "ticket_name", "ticket_email",
+            "ticket_name", "ticket_email", "ticket_phone",
             "ticket_issue", "ticket_confirm", "creating_ticket"
         }
         if _ticket_escape and not _in_ticket_flow:
@@ -1304,7 +1306,7 @@ async def entrypoint(ctx: JobContext):
         # 3) Active phone-support flow
         # GUARD: Skip phone lookup entirely when user is in the ticket creation flow
         _in_ticket_creation_flow = state.support_state in {
-            "ticket_name", "ticket_email", "ticket_issue", "ticket_confirm", "creating_ticket"
+            "ticket_name", "ticket_email", "ticket_phone", "ticket_issue", "ticket_confirm", "creating_ticket"
         }
         if not _in_ticket_creation_flow and (
             state.support_state in {"awaiting_phone", "checking_phone"} or len(all_digits) >= 10
@@ -1372,17 +1374,38 @@ async def entrypoint(ctx: JobContext):
                 asyncio.create_task(agent.say("Please share a valid email address.", allow_interruptions=True))
                 return
             state.ticket_email = email_match.group(0).lower().strip()
+            state.support_state = "ticket_phone"
+            suppress_llm(120.0)
+            agent.interrupt()
+            asyncio.create_task(agent.say("Got it. And your phone number please?", allow_interruptions=True))
+            return
+
+        if state.support_state == "ticket_phone":
+            # Accept anything — store raw digits if possible, else store as-is
+            phone_digits = re.sub(r"[^0-9+]", "", user_text)
+            state.ticket_phone = phone_digits if phone_digits else user_text
+            # Fire n8n update asynchronously (best-effort)
+            if state.ticket_id:
+                async def _update_phone():
+                    try:
+                        from src.services.n8n import update_ticket_field as _n8n_update
+                        await _n8n_update(ticket_id=state.ticket_id, field="phone", value=state.ticket_phone)
+                    except Exception as e:
+                        logger.error("n8n update phone (agent.py) failed: %s", e)
+                asyncio.create_task(_update_phone())
             state.support_state = "ticket_issue"
             suppress_llm(120.0)
             agent.interrupt()
-            asyncio.create_task(agent.say("Please describe the issue in one or two sentences.", allow_interruptions=True))
+            asyncio.create_task(agent.say("Perfect. Now please describe the issue you are having.", allow_interruptions=True))
             return
 
         if state.support_state == "ticket_issue":
             state.ticket_issue = user_text
             state.support_state = "ticket_confirm"
             confirm_text = (
-                f"I have your details as name {state.ticket_name} and email {state.ticket_email}. "
+                f"I have your details as name {state.ticket_name}, "
+                f"email {state.ticket_email}, "
+                f"and phone {state.ticket_phone}. "
                 "Should I create the support ticket now?"
             )
             suppress_llm(120.0)
@@ -1403,6 +1426,7 @@ async def entrypoint(ctx: JobContext):
                 state.support_state = "idle"
                 state.ticket_name = ""
                 state.ticket_email = ""
+                state.ticket_phone = ""
                 state.ticket_issue = ""
                 suppress_llm(120.0)
                 agent.interrupt()
@@ -1516,6 +1540,8 @@ async def entrypoint(ctx: JobContext):
             return "Whenever you are ready, please tell me your full name so I can create the support ticket."
         if support_state == "ticket_email":
             return "Please share your email address when you are ready."
+        if support_state == "ticket_phone":
+            return "Please share your phone number when you are ready."
         if support_state == "ticket_issue":
             return "Please describe the issue in one or two sentences when you are ready."
         if support_state == "ticket_confirm":
@@ -1577,6 +1603,19 @@ async def entrypoint(ctx: JobContext):
     await asyncio.sleep(3.0)
     silence_task.cancel()
     cache_refresh_task.cancel()  # PATCH 8: Stop the background cache refresh loop
+
+    # Abandon any draft ticket if the call ends mid-flow
+    ticket_in_progress = (
+        state.ticket_id
+        and state.support_state not in ("idle", "creating_ticket")
+    )
+    if ticket_in_progress:
+        try:
+            await _n8n_abandon_ticket(state.ticket_id)
+            logger.info("Abandoned draft ticket %s on call end", state.ticket_id)
+        except Exception as _e:
+            logger.error("Failed to abandon ticket on call end: %s", _e)
+
     transcript_text = "\n".join(conversation_transcript)
     await end_call_in_db(
         call_id=call_id,
