@@ -36,7 +36,6 @@ from livekit.agents import (
     BuiltinAudioClip,
     JobContext,
     JobProcess,
-    JobRequest,
     TurnHandlingOptions,
     cli,
     mcp,
@@ -57,6 +56,7 @@ try:
 except ImportError:
     HAS_AI_COUSTICS = False
 
+from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 # ── Local src imports ─────────────────────────────────────────────────────────
 load_dotenv(".env")  # Load .env from project root
@@ -571,7 +571,14 @@ class DefaultAgent(Agent):
             ],
         )
 
-
+    async def on_enter(self):
+        """Send greeting when session starts."""
+        greeting = get_greeting("en")
+        room_log("GREETING_SENT", text=_truncate(greeting))
+        await self.session.generate_reply(
+            instructions=greeting,
+            allow_interruptions=False,
+        )
 
 
 # =============================================================================
@@ -591,35 +598,11 @@ def prewarm(proc: JobProcess):
 server.setup_fnc = prewarm
 
 
-async def request_fnc(req: JobRequest) -> None:
-    """Determine if the English agent should accept this job request based on DB language setting."""
-    try:
-        from src.services.database import get_database_service
-        db = get_database_service()
-        settings_dict = await db.get_all_settings()
-        lang = settings_dict.get("agent_language", "en")
-        logger.info("English agent: request received. Active DB language: %s", lang)
-        if lang == "en":
-            logger.info("English agent: accepting job request")
-            await req.accept()
-        else:
-            logger.info("English agent: rejecting job request because active language is Greek (%s)", lang)
-            await req.reject()
-    except Exception as e:
-        logger.warning("English agent: failed to check language in request_fnc, accepting anyway: %s", e)
-        try:
-            await req.accept()
-        except Exception:
-            pass
-
-server.request_fnc = request_fnc
-
-
 # =============================================================================
 # ENTRYPOINT
 # =============================================================================
 
-@server.rtc_session()
+@server.rtc_session(agent_name="Elena")
 async def entrypoint(ctx: JobContext):
     # ------------------------------------------------------------------
     # 1. Start memory/prompt cache warm in the background
@@ -717,6 +700,7 @@ async def entrypoint(ctx: JobContext):
         stt=create_stt(),
         llm=create_llm(),
         tts=create_tts(),
+        turn_handling=TurnHandlingOptions(turn_detection=MultilingualModel()),
         vad=vad,
         preemptive_generation=True,
     )
@@ -739,7 +723,7 @@ async def entrypoint(ctx: JobContext):
     # ------------------------------------------------------------------
     async def send_agent_transcript(text: str):
         nonlocal _last_agent_text, _last_agent_text_at
-        cleaned = (text or "").strip().replace("\r\n", " ").replace("\n", " ")
+        cleaned = (text or "").strip()
         if not cleaned:
             return
         now_ts = time.time()
@@ -765,9 +749,7 @@ async def entrypoint(ctx: JobContext):
     async def send_user_transcript(text: str, *, interim: bool = False):
         nonlocal _last_user_text, _last_user_text_at
         nonlocal _last_user_interim, _last_user_interim_at
-        cleaned = (text or "").strip().replace("\r\n", " ").replace("\n", " ")
-        # Normalize US-style formatted phone numbers like (773) 739-5770 to raw digits 7737395770
-        cleaned = re.sub(r'\(?(\d{3})\)?[-. ]*(\d{3})[-. ]*(\d{4})', r'\1\2\3', cleaned)
+        cleaned = (text or "").strip()
         if not cleaned:
             return
         now_ts = time.time()
@@ -815,48 +797,43 @@ async def entrypoint(ctx: JobContext):
     # ------------------------------------------------------------------
     # 11. Wire session events — state + transcript (feature 4)
     # ------------------------------------------------------------------
-    # ── Unified UI State Tracker ──────────────────────────────────────
-    _current_agent_state = "idle"
-    _current_user_state = "idle"
+    @session.on("agent_started_speaking")
+    def _on_agent_started_speaking():
+        asyncio.create_task(_publish_state(ctx, "speaking"))
+        room_log("UI_STATE", state="speaking")
 
-    def publish_unified_ui_state():
-        if _current_agent_state == "speaking":
-            ui_state = "speaking"
-        elif _current_agent_state == "thinking":
-            ui_state = "thinking"
-        elif _current_user_state == "speaking":
-            ui_state = "listening"
-        else:
-            ui_state = "idle"
-        asyncio.create_task(_publish_state(ctx, ui_state))
-        room_log("UI_STATE", state=ui_state)
+    @session.on("agent_stopped_speaking")
+    def _on_agent_stopped_speaking():
+        asyncio.create_task(_publish_state(ctx, "idle"))
+        room_log("UI_STATE", state="idle")
 
-    @session.on("agent_state_changed")
-    def _on_agent_state_changed(ev):
-        nonlocal _current_agent_state
-        _current_agent_state = getattr(ev, "new_state", "idle")
-        publish_unified_ui_state()
-
-    @session.on("user_state_changed")
-    def _on_user_state_changed(ev):
-        nonlocal _current_user_state
-        _current_user_state = getattr(ev, "new_state", "idle")
-        publish_unified_ui_state()
-
-    @session.on("user_input_transcribed")
-    def _on_user_input_transcribed(ev):
-        if ev.is_final and ev.transcript:
-            asyncio.create_task(send_user_transcript(ev.transcript))
-
-    @session.on("conversation_item_added")
-    def _on_conversation_item_added(ev):
-        item = ev.item
-        role = getattr(item, "role", None)
-        text = getattr(item, "text_content", None)
-        logger.info("CONVERSATION_ITEM_ADDED: role=%s, text=%s, type=%s", role, text, type(item).__name__)
-        if role == "assistant" and text:
+    @session.on("agent_speech_committed")
+    def _on_agent_speech_committed(msg):
+        text = getattr(msg, "content", None)
+        if text:
             asyncio.create_task(send_agent_transcript(text))
-        elif role == "user" and text:
+
+    @session.on("agent_speech_interrupted")
+    def _on_agent_speech_interrupted(msg):
+        text = getattr(msg, "content", None)
+        if text:
+            room_log("AGENT_TEXT_INTERRUPTED", text=_truncate(text))
+            asyncio.create_task(send_agent_transcript(text))
+
+    @session.on("user_started_speaking")
+    def _on_user_started_speaking():
+        asyncio.create_task(_publish_state(ctx, "listening"))
+        room_log("UI_STATE", state="listening")
+
+    @session.on("user_stopped_speaking")
+    def _on_user_stopped_speaking():
+        asyncio.create_task(_publish_state(ctx, "thinking"))
+        room_log("UI_STATE", state="thinking")
+
+    @session.on("user_speech_committed")
+    def _on_user_speech_committed(msg):
+        text = str(getattr(msg, "content", "") or "").strip()
+        if text:
             asyncio.create_task(send_user_transcript(text))
 
     # ------------------------------------------------------------------
@@ -869,11 +846,6 @@ async def entrypoint(ctx: JobContext):
             audio_input=audio_input_opts,
         ),
     )
-
-    # Explicitly speak the initial greeting upon joining
-    greeting = get_greeting("en")
-    room_log("GREETING_SENT", text=_truncate(greeting))
-    await session.say(greeting, allow_interruptions=False)
 
     # ------------------------------------------------------------------
     # 13. Wire interim transcript via human_input (feature 7)
@@ -940,10 +912,7 @@ async def entrypoint(ctx: JobContext):
             disconnect_reason = "participant_disconnected"
             room_log("PARTICIPANT_DISCONNECTED", identity=participant_info.identity)
 
-    # Keep session alive until room is disconnected or participant leaves
-    while ctx.room.isconnected() and participant.identity in ctx.room.remote_participants:
-        await asyncio.sleep(0.5)
-
+    await session.wait()
 
     # ------------------------------------------------------------------
     # 19. Teardown

@@ -64,11 +64,6 @@ services:
     container_name: meallion-agent-en
     command: ["python", "-m", "src.agents.en.agent", "start"]
     # Limit CPU to prevent crash loop from consuming all resources
-    deploy:
-      resources:
-        limits:
-          cpus: '0.8'
-          memory: 1G
     environment:
       # Increase initialization timeout significantly for slow VPS
       - LIVEKIT_AGENTS_INITIALIZE_TIMEOUT=120
@@ -122,11 +117,6 @@ services:
     container_name: meallion-agent-el
     command: ["python", "-m", "src.agents.el.agent", "start"]
     # Limit CPU to prevent crash loop from consuming all resources
-    deploy:
-      resources:
-        limits:
-          cpus: '0.8'
-          memory: 1G
     environment:
       # Increase initialization timeout significantly for slow VPS
       - LIVEKIT_AGENTS_INITIALIZE_TIMEOUT=120
