@@ -631,6 +631,30 @@ server.request_fnc = request_fnc
 @server.rtc_session()
 async def entrypoint(ctx: JobContext):
     # ------------------------------------------------------------------
+    # LANGUAGE GUARD — exit immediately if this is the wrong agent.
+    # AgentServer does not honour request_fnc, so both agents accept
+    # every job. We check the DB here, before ctx.connect(), so the
+    # wrong-language agent drops out gracefully.
+    # ------------------------------------------------------------------
+    try:
+        from src.services.database import get_database_service as _get_db
+        _db = _get_db()
+        _settings = await _db.get_all_settings()
+        _lang = (_settings.get("agent_language") or "en").strip().lower()
+    except Exception as _e:
+        logger.warning("English agent: language guard DB check failed (%s) — proceeding anyway", _e)
+        _lang = "en"  # default to English on error
+
+    if _lang != "en":
+        logger.info(
+            "English agent: active language is '%s', not 'en' — exiting entrypoint without connecting",
+            _lang,
+        )
+        return  # Let the Greek agent handle this call
+
+    logger.info("English agent: language='en' confirmed — starting session")
+
+    # ------------------------------------------------------------------
     # 1. Start memory/prompt cache warm in the background
     # ------------------------------------------------------------------
     cache_task = asyncio.create_task(_refresh_agent_cache(force=True))
