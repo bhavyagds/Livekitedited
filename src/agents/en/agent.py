@@ -13,7 +13,7 @@ New-SDK style (Agent / AgentSession / AgentServer) with production features:
 Run: python agent_elena.py dev
 """
 
-AGENT_BUILD = "elena-v1-local-20260529"
+AGENT_BUILD = "elena-v1-local-20260530-mcp-fix"
 
 import asyncio
 import json
@@ -507,14 +507,14 @@ def create_tts():
     )
 
     try:
-        voice = elevenlabs.Voice(
-            id=voice_id,
-            name="Elena",
-            category="premade",
-            settings=elevenlabs.VoiceSettings(stability=stability, similarity_boost=similarity),
-        )
+        voice_settings = elevenlabs.VoiceSettings(stability=stability, similarity_boost=similarity)
         logger.info("TTS: ElevenLabs model=%s voice_id=%s", model, voice_id)
-        return elevenlabs.TTS(voice=voice, model=model)
+        return elevenlabs.TTS(
+            voice_id=voice_id,
+            voice_settings=voice_settings,
+            model=model,
+            api_key=eleven_api_key,
+        )
     except TypeError as e:
         logger.warning("ElevenLabs TTS init failed (%s), falling back to OpenAI TTS", e)
         return openai.TTS(
@@ -551,9 +551,14 @@ class DefaultAgent(Agent):
     """Elena — Meallion English voice agent (new-SDK style, DB-driven prompt)."""
 
     def __init__(self, instructions: str) -> None:
+        mcp_server = mcp.MCPServerHTTP(
+            url="https://voiceagent.app.n8n.cloud/mcp/meallion-agent-phone",
+        )
+        mcp_toolset = mcp.MCPToolset(id="n8n-mcp", mcp_server=mcp_server)
         super().__init__(
             instructions=instructions,
             tools=[
+                mcp_toolset,
                 EndCallTool(
                     extra_description="",
                     end_instructions=(
@@ -563,11 +568,6 @@ class DefaultAgent(Agent):
                     ),
                     delete_room=False,
                 )
-            ],
-            mcp_servers=[
-                mcp.MCPServerHTTP(
-                    url="https://voiceagent.app.n8n.cloud/mcp/meallion-agent-phone",
-                ),
             ],
         )
 

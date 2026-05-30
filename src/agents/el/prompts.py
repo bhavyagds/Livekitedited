@@ -204,6 +204,9 @@ def build_system_prompt(language: str = "el") -> str:
         "4. NO HALLUCINATION: If missing from all sources, say you don't have that info.\n"
     )
 
+    # Always inject ticket instructions so the LLM knows the sequence
+    parts.append(TICKET_INSTRUCTIONS)
+
     parts.append("""
 TOOL USAGE GUARDRAIL:
 - Report findings EXACTLY as provided by tools.
@@ -256,6 +259,9 @@ async def build_system_prompt_async(language: str = "el") -> str:
         "3. SYSTEM THIRD: Apply general behavior instructions after Memory/KB.\n"
         "4. NO HALLUCINATION: If missing from all sources, say you don't have that info.\n"
     )
+
+    parts.append(TICKET_INSTRUCTIONS)
+
     return "\n\n".join(parts)
 
 
@@ -294,6 +300,27 @@ def _get_response_language_instruction(language: str) -> str:
 
 
 MINIMAL_FALLBACK_PROMPT = "Είστε η Έλενα, μια γυναίκα βοηθός εξυπηρέτησης πελατών. Να είστε βοηθητική."
+
+
+# ---------------------------------------------------------------------------
+# Support ticket collection instructions injected into every system prompt
+# ---------------------------------------------------------------------------
+
+TICKET_INSTRUCTIONS = """
+## ΔΗΜΙΟΥΡΓΙΑ ΑΙΤΗΜΑΤΟΣ ΥΠΟΣΤΗΡΙΞΗΣ — ΑΚΟΛΟΥΘΗΣΤΕ ΑΥΤΗ ΤΗΝ ΑΚΡΙΒΗ ΣΕΙΡΑ
+
+Όταν ένας πελάτης έχει ένα πρόβλημα, δημιουργήστε ένα αίτημα υποστήριξης ακολουθώντας αυτά τα βήματα.
+
+ΚΑΝΟΝΑΣ:
+Πρέπει να συλλέξετε όλα τα απαραίτητα στοιχεία από τον πελάτη ένα προς ένα.
+ΜΗΝ καλέσετε το εργαλείο support_ticket πρόωρα.
+1. Ζητήστε το πλήρες όνομα του πελάτη.
+2. Ζητήστε τη διεύθυνση email του πελάτη.
+3. Ζητήστε τον αριθμό τηλεφώνου του πελάτη.
+4. Ζητήστε από τον πελάτη να περιγράψει το πρόβλημά του με λεπτομέρεια.
+
+Μόλις συλλέξετε και τα τέσσερα στοιχεία (Όνομα, Email, Τηλέφωνο και Περιγραφή Προβλήματος), καλέστε το εργαλείο `support_ticket` στην ίδια σειρά.
+"""
 
 
 async def refresh_cache():
