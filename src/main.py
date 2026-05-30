@@ -179,8 +179,9 @@ async def create_token(request: TokenRequest):
     """
     Generate a LiveKit access token for web clients.
     
-    This endpoint is called by the web frontend to get a token
-    for connecting to the LiveKit room.
+    Reads the active agent_language from the database and includes an
+    agentDispatch claim so LiveKit routes the call to the correct named
+    agent worker (meallion-agent-en or meallion-agent-el).
     """
     if not settings.livekit_api_key or not settings.livekit_api_secret:
         raise HTTPException(
@@ -188,10 +189,51 @@ async def create_token(request: TokenRequest):
             detail="LiveKit credentials not configured",
         )
     
-    token = generate_livekit_token(
-        room_name=request.room,
-        participant_identity=request.identity,
-        participant_name=request.name,
+    # Determine which agent to dispatch to based on DB language setting
+    agent_name = "meallion-agent-en"  # safe default
+    try:
+        db = get_database_service()
+        db_settings = await db.get_all_settings()
+        lang = (db_settings.get("agent_language") or "en").strip().lower()
+        agent_name = "meallion-agent-el" if lang == "el" else "meallion-agent-en"
+        logger.info("Token: dispatching to agent '%s' (language=%s)", agent_name, lang)
+    except Exception as e:
+        logger.warning("Token: could not read language from DB, defaulting to EN: %s", e)
+    
+    now = datetime.utcnow()
+    exp = now + timedelta(hours=2)
+    
+    claims = {
+        "iss": settings.livekit_api_key,
+        "sub": request.identity,
+        "iat": int(now.timestamp()),
+        "exp": int(exp.timestamp()),
+        "nbf": int(now.timestamp()),
+        "video": {
+            "room": request.room,
+            "roomJoin": True,
+            "canPublish": True,
+            "canSubscribe": True,
+            "canPublishData": True,
+            # Backward-compatible dispatch property inside video grants
+            "agentDispatch": [{"agent_name": agent_name}],
+        },
+        # Standard LiveKit RoomConfiguration top-level claim in camelCase
+        "roomConfig": {
+            "agents": [
+                {
+                    "agentName": agent_name,
+                }
+            ]
+        },
+        "metadata": "",
+        "name": request.name or request.identity,
+    }
+    
+    token = jwt.encode(
+        claims,
+        settings.livekit_api_secret,
+        algorithm="HS256",
     )
     
     return TokenResponse(
@@ -199,6 +241,7 @@ async def create_token(request: TokenRequest):
         url=settings.livekit_public_url,
         room=request.room,
     )
+
 
 
 @app.get("/api/config")

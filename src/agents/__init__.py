@@ -1,8 +1,8 @@
 """
 Meallion Voice AI - Agent Modules
-"""
 
-# Note: prompts live inside each language sub-package (en/ and el/),
-# not at this top-level. Each agent imports directly from its own sub-package.
+Prompts live in language-specific sub-packages (en/ and el/).
+The src.agents.prompts module provides a unified language-aware facade for the API.
+"""
 
 __all__ = []

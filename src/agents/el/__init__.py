@@ -1,6 +1,8 @@
 """
 Meallion Voice AI - Greek Agent Package
 """
-from .agent import entrypoint, prewarm
+# agent.py imports livekit.agents which is not available in the API container.
+# Do NOT import from agent here — prompts.py is imported directly.
 
-__all__ = ["entrypoint", "prewarm"]
+__all__ = []
+

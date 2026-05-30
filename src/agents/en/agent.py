@@ -621,14 +621,13 @@ async def request_fnc(req: JobRequest) -> None:
         except Exception:
             pass
 
-server.request_fnc = request_fnc
 
 
 # =============================================================================
 # ENTRYPOINT
 # =============================================================================
 
-@server.rtc_session()
+@server.rtc_session(agent_name="meallion-agent-en", on_request=request_fnc)
 async def entrypoint(ctx: JobContext):
     # ------------------------------------------------------------------
     # LANGUAGE GUARD — exit immediately if this is the wrong agent.
@@ -647,10 +646,11 @@ async def entrypoint(ctx: JobContext):
 
     if _lang != "en":
         logger.info(
-            "English agent: active language is '%s', not 'en' — exiting entrypoint without connecting",
+            "English agent: active language is '%s', not 'en' — calling shutdown to release job",
             _lang,
         )
-        return  # Let the Greek agent handle this call
+        await ctx.shutdown()  # Properly release the job back to LiveKit
+        return
 
     logger.info("English agent: language='en' confirmed — starting session")
 
