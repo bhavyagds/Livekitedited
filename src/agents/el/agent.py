@@ -590,23 +590,32 @@ server.setup_fnc = prewarm
 
 
 async def request_fnc(req: JobRequest) -> None:
-    """Determine if the Greek agent should accept this job request based on DB language setting."""
+    """Determine if the Greek agent should accept this job request based on DB language setting.
+    
+    Always fetches fresh from DB — never relies on the prompt cache which may
+    be empty/stale at prewarm time and would fall back to the hardcoded default 'el'.
+    """
     try:
         from src.services.database import get_database_service
         db = get_database_service()
+        # Direct DB fetch — bypass any local cache so we always get the true admin setting
         settings_dict = await db.get_all_settings()
-        lang = settings_dict.get("agent_language", "el")
-        logger.info("Greek agent: request received. Active DB language: %s", lang)
+        lang = (settings_dict.get("agent_language") or "").strip().lower()
+        logger.info("Greek agent: request received. Active DB language: '%s'", lang)
         if lang == "el":
-            logger.info("Greek agent: accepting job request")
+            logger.info("Greek agent: accepting job request (language=el)")
             await req.accept()
+        elif lang == "en":
+            logger.info("Greek agent: rejecting job request (language is English)")
+            await req.reject()
         else:
-            logger.info("Greek agent: rejecting job request because active language is English (%s)", lang)
+            # Unknown or empty language setting — default Greek agent rejects to avoid conflict
+            logger.warning("Greek agent: unknown language '%s', rejecting to let EN agent handle it", lang)
             await req.reject()
     except Exception as e:
-        logger.warning("Greek agent: failed to check language in request_fnc, accepting anyway: %s", e)
+        logger.warning("Greek agent: DB check failed in request_fnc, rejecting to be safe: %s", e)
         try:
-            await req.accept()
+            await req.reject()
         except Exception:
             pass
 

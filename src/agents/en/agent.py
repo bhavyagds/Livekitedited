@@ -592,21 +592,30 @@ server.setup_fnc = prewarm
 
 
 async def request_fnc(req: JobRequest) -> None:
-    """Determine if the English agent should accept this job request based on DB language setting."""
+    """Determine if the English agent should accept this job request based on DB language setting.
+    
+    Always fetches fresh from DB — never relies on the prompt cache which may
+    be empty/stale at prewarm time and would fall back to the hardcoded default 'en'.
+    """
     try:
         from src.services.database import get_database_service
         db = get_database_service()
+        # Direct DB fetch — bypass any local cache so we always get the true admin setting
         settings_dict = await db.get_all_settings()
-        lang = settings_dict.get("agent_language", "en")
-        logger.info("English agent: request received. Active DB language: %s", lang)
+        lang = (settings_dict.get("agent_language") or "").strip().lower()
+        logger.info("English agent: request received. Active DB language: '%s'", lang)
         if lang == "en":
-            logger.info("English agent: accepting job request")
+            logger.info("English agent: accepting job request (language=en)")
             await req.accept()
-        else:
-            logger.info("English agent: rejecting job request because active language is Greek (%s)", lang)
+        elif lang == "el":
+            logger.info("English agent: rejecting job request (language is Greek)")
             await req.reject()
+        else:
+            # Unknown or empty language — default to English agent accepting
+            logger.warning("English agent: unknown language '%s', accepting as default", lang)
+            await req.accept()
     except Exception as e:
-        logger.warning("English agent: failed to check language in request_fnc, accepting anyway: %s", e)
+        logger.warning("English agent: DB check failed in request_fnc, accepting as default: %s", e)
         try:
             await req.accept()
         except Exception:

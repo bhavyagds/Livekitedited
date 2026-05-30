@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { Phone, Loader2, AlertCircle } from 'lucide-react';
+import { Phone, Loader2, AlertCircle, Package, Headphones, HelpCircle } from 'lucide-react';
 import { Logo } from './Logo';
 import { BackgroundPattern } from './BackgroundPattern';
 
@@ -22,11 +22,24 @@ export function LandingPage({ onConnect, isConnecting, error }: LandingPageProps
       >
         <Logo />
         
+        {/* Premium Central Glowing Orb */}
+        <motion.div 
+          className="central-orb-wrapper"
+          initial={{ scale: 0.8, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          transition={{ delay: 0.2, duration: 1, ease: 'easeOut' }}
+        >
+          <div className="orb-nebula" />
+          <div className="orb-ring ring-outer" />
+          <div className="orb-ring ring-inner" />
+          <div className="orb-core" />
+        </motion.div>
+
         <motion.div
           className="hero-section"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          transition={{ delay: 0.3, duration: 0.8 }}
+          transition={{ delay: 0.4, duration: 0.8 }}
         >
           <h2 className="hero-title">Speak with Elena</h2>
           <p className="hero-subtitle">
@@ -74,20 +87,26 @@ export function LandingPage({ onConnect, isConnecting, error }: LandingPageProps
 
         <motion.div
           className="features-section"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: 0.9, duration: 0.8 }}
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.8, duration: 0.8 }}
         >
-          <div className="feature">
-            <span className="feature-icon">📦</span>
+          <div className="feature-capsule">
+            <div className="feature-icon-wrapper">
+              <Package size={18} />
+            </div>
             <span className="feature-text">Track Orders</span>
           </div>
-          <div className="feature">
-            <span className="feature-icon">🎫</span>
+          <div className="feature-capsule">
+            <div className="feature-icon-wrapper">
+              <Headphones size={18} />
+            </div>
             <span className="feature-text">Get Support</span>
           </div>
-          <div className="feature">
-            <span className="feature-icon">❓</span>
+          <div className="feature-capsule">
+            <div className="feature-icon-wrapper">
+              <HelpCircle size={18} />
+            </div>
             <span className="feature-text">Ask Questions</span>
           </div>
         </motion.div>
@@ -99,3 +118,4 @@ export function LandingPage({ onConnect, isConnecting, error }: LandingPageProps
     </div>
   );
 }
+

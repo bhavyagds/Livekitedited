@@ -6,7 +6,7 @@ import {
 } from '@livekit/components-react';
 import { Track, RoomEvent } from 'livekit-client';
 import {
-  PhoneOff,
+  Phone,
   Mic,
   MicOff,
   Volume2,
@@ -251,7 +251,66 @@ export function VoiceAgent({ onDisconnect }: VoiceAgentProps) {
               <div className="avatar-ring ring-2" />
               <div className="avatar-ring ring-3" />
               <div className="avatar">
-                <span className="avatar-icon">{AGENT_AVATAR}</span>
+                <div className="metallic-head-wrapper">
+                  <svg viewBox="0 0 100 100" className="metallic-head">
+                    <defs>
+                      <linearGradient id="silver-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                        <stop offset="0%" stopColor="#ffffff" />
+                        <stop offset="25%" stopColor="#cbd5e1" />
+                        <stop offset="60%" stopColor="#94a3b8" />
+                        <stop offset="85%" stopColor="#475569" />
+                        <stop offset="100%" stopColor="#1e293b" />
+                      </linearGradient>
+                      <linearGradient id="gold-grad-accent" x1="0%" y1="0%" x2="0%" y2="100%">
+                        <stop offset="0%" stopColor="#f4d03f" />
+                        <stop offset="100%" stopColor="#d4af37" />
+                      </linearGradient>
+                      <radialGradient id="glow-grad" cx="50%" cy="50%" r="50%">
+                        <stop offset="0%" stopColor={agentState === 'speaking' ? '#d4af37' : agentState === 'listening' ? '#e94560' : '#d4af37'} stopOpacity="0.45" />
+                        <stop offset="100%" stopColor="#d4af37" stopOpacity="0" />
+                      </radialGradient>
+                    </defs>
+                    {/* Glowing background aura */}
+                    <circle cx="50" cy="48" r="32" fill="url(#glow-grad)" className="aura-glow" />
+                    
+                    {/* Cybernetic Shoulders/Chest */}
+                    <path
+                      d="M 22 84 C 22 72, 34 68, 50 68 C 66 68, 78 72, 78 84 L 78 95 L 22 95 Z"
+                      fill="url(#silver-grad)"
+                      opacity="0.85"
+                    />
+                    
+                    {/* Cybernetic Neck */}
+                    <path
+                      d="M 43 56 L 43 72 C 43 75, 57 75, 57 72 L 57 56 Z"
+                      fill="url(#silver-grad)"
+                    />
+                    <path d="M 43 62 H 57" stroke="#1e293b" strokeWidth="1.5" opacity="0.4" />
+                    
+                    {/* Head/Face silhouette */}
+                    <path
+                      d="M 50 16 C 35 16, 32 30, 32 46 C 32 60, 36 62, 50 62 C 64 62, 68 60, 68 46 C 68 30, 65 16, 50 16 Z"
+                      fill="url(#silver-grad)"
+                    />
+                    
+                    {/* 3D cheekbone and face panel shading */}
+                    <path
+                      d="M 50 16 C 35 16, 32 30, 32 46 C 32 54, 50 48, 50 16 Z"
+                      fill="#ffffff"
+                      opacity="0.18"
+                    />
+                    
+                    {/* Futuristic visor/eyes (glowing) */}
+                    <ellipse cx="42" cy="42" rx="4" ry="1.5" fill="#ffffff" className="head-eye" />
+                    <ellipse cx="58" cy="42" rx="4" ry="1.5" fill="#ffffff" className="head-eye" />
+                    
+                    {/* Forehead gold structural panel */}
+                    <polygon points="50,18 53,24 47,24" fill="url(#gold-grad-accent)" />
+                    
+                    {/* Glowing status module in chest */}
+                    <circle cx="50" cy="54" r="1.5" fill={agentState === 'listening' ? '#e94560' : '#d4af37'} className="head-dot" />
+                  </svg>
+                </div>
               </div>
               <div className={`status-indicator ${agentState}`} />
             </div>
@@ -277,7 +336,7 @@ export function VoiceAgent({ onDisconnect }: VoiceAgentProps) {
                 onClick={handleMuteToggle}
                 title={isMuted ? 'Unmute' : 'Mute'}
               >
-                {isMuted ? <MicOff size={24} /> : <Mic size={24} />}
+                {isMuted ? <MicOff size={20} /> : <Mic size={20} />}
               </button>
 
               <button
@@ -285,7 +344,7 @@ export function VoiceAgent({ onDisconnect }: VoiceAgentProps) {
                 onClick={onDisconnect}
                 title="End Call"
               >
-                <PhoneOff size={28} />
+                <Phone size={20} style={{ transform: 'rotate(135deg)' }} />
               </button>
 
               <button
@@ -293,7 +352,7 @@ export function VoiceAgent({ onDisconnect }: VoiceAgentProps) {
                 onClick={handleSpeakerToggle}
                 title={isSpeakerMuted ? 'Unmute Speaker' : 'Mute Speaker'}
               >
-                {isSpeakerMuted ? <VolumeX size={24} /> : <Volume2 size={24} />}
+                {isSpeakerMuted ? <VolumeX size={20} /> : <Volume2 size={20} />}
               </button>
             </div>
           </div>

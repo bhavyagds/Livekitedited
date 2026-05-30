@@ -2,6 +2,7 @@
 Meallion Voice AI - Agent Modules
 """
 
-from .prompts import get_system_prompt, get_greeting, get_closing
+# Note: prompts live inside each language sub-package (en/ and el/),
+# not at this top-level. Each agent imports directly from its own sub-package.
 
-__all__ = ["get_system_prompt", "get_greeting", "get_closing"]
+__all__ = []

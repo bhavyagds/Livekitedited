@@ -5,7 +5,7 @@ interface AudioVisualizerProps {
 }
 
 export function AudioVisualizer({ isActive }: AudioVisualizerProps) {
-  const bars = Array.from({ length: 5 }, (_, i) => i);
+  const bars = Array.from({ length: 15 }, (_, i) => i);
 
   return (
     <div className={`audio-visualizer ${isActive ? 'active' : ''}`}>
@@ -16,15 +16,21 @@ export function AudioVisualizer({ isActive }: AudioVisualizerProps) {
           animate={
             isActive
               ? {
-                  height: ['8px', '32px', '16px', '28px', '8px'],
+                  height: [
+                    '8px',
+                    `${12 + Math.sin(i * 0.5) * 20}px`,
+                    `${10 + Math.cos(i * 0.3) * 14}px`,
+                    `${14 + Math.sin(i * 0.8) * 18}px`,
+                    '8px'
+                  ],
                 }
               : { height: '8px' }
           }
           transition={{
-            duration: 0.8,
+            duration: 1.0,
             repeat: Infinity,
             repeatType: 'reverse',
-            delay: i * 0.1,
+            delay: i * 0.05,
             ease: 'easeInOut',
           }}
         />
@@ -32,3 +38,4 @@ export function AudioVisualizer({ isActive }: AudioVisualizerProps) {
     </div>
   );
 }
+
