@@ -490,8 +490,8 @@ def create_tts():
         )
 
     voice_id = str(
-        get_agent_setting("agent_voice_id", getattr(settings, "elevenlabs_voice_id", "21m00Tcm4TlvDq8ikWAM"))
-        or getattr(settings, "elevenlabs_voice_id", "21m00Tcm4TlvDq8ikWAM")
+        get_agent_setting("agent_voice_id_el", getattr(settings, "elevenlabs_voice_id", "aTP4J5SJLQl74WTSRXKW"))
+        or getattr(settings, "elevenlabs_voice_id", "aTP4J5SJLQl74WTSRXKW")
     )
     similarity = _as_float(
         get_agent_setting("agent_voice_similarity", getattr(settings, "elevenlabs_voice_similarity", 0.9)),

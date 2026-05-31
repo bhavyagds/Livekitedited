@@ -984,6 +984,7 @@ class DatabaseService:
 
             # Other core defaults used by the agent
             "agent_voice_id": {"value": "aTP4J5SJLQl74WTSRXKW", "description": "ElevenLabs voice ID"},
+            "agent_voice_id_el": {"value": "aTP4J5SJLQl74WTSRXKW", "description": "ElevenLabs Greek voice ID"},
         }
         
         for key, data in defaults.items():
