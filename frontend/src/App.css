@@ -531,12 +531,12 @@ body {
 }
 
 .landing-footer {
-  position: fixed;
-  bottom: var(--space-lg);
+  margin-top: var(--space-2xl);
   text-align: center;
   color: var(--color-text-muted);
   font-size: 0.85rem;
   z-index: 1;
+  padding-bottom: var(--space-md);
 }
 
 

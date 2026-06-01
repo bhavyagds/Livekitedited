@@ -323,6 +323,8 @@ TOOL_USAGE_GUARDRAIL = """
 - Report findings EXACTLY as provided by tools.
 - Never use emojis.
 - Be precise and concise.
+- ALWAYS speak order numbers digit-by-digit (e.g., read order number '1234' or '2345' as 'one two three four' or 'two three four five', and NEVER as 'one thousand...' or 'two thousand...').
+- ΠΑΝΤΑ να εκφωνείτε τους αριθμούς παραγγελίας ψηφίο προς ψηφίο (π.χ. εκφωνήστε το '1234' ή '2345' ως 'ένα δύο τρία τέσσερα' ή 'δύο τρία τέσσερα πέντε', και ΠΟΤΕ ως 'χίλια...' ή 'δύο χιλιάδες...').
 - ΠΟΤΕ μην εκφωνείτε, μην εμφανίζετε και μην μοιράζεστε συνδέσμους ιστού, διευθύνσεις URL ή κλειδιά ελέγχου ταυτότητας (όπως συνδέσμους κατάστασης παραγγελίας, check out, ή διακριτικά authenticate?key=... tokens) στις απαντήσεις σας. Αυτά περιέχουν μυστικά ασφαλείας και ακούγονται εξαιρετικά άβολα όταν εκφωνούνται στο τηλέφωνο. Απλώς συνοψίστε τις λεπτομέρειες προφορικά (π.χ. 'Η παραγγελία σας ετοιμάζεται').
 - NEVER speak, output, or share web links, URLs, or authentication keys (such as order status links, checkout URLs, or authenticate?key=... tokens) in your responses. These contain security secrets and sound extremely awkward when spoken over the phone. Just summarize the details verbally.
 """

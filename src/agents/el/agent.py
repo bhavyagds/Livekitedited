@@ -883,10 +883,37 @@ async def entrypoint(ctx: JobContext):
         _current_user_state = getattr(ev, "new_state", "idle")
         publish_unified_ui_state()
 
+    _end_call_task: Optional[asyncio.Task] = None
+
+    async def end_call_delayed(delay: float = 2.0):
+        await asyncio.sleep(delay)
+        logger.info("Ending call automatically as requested by call end intent")
+        try:
+            if ctx.room and ctx.room.isconnected():
+                await ctx.room.disconnect()
+        except Exception as e:
+            logger.warning("Error disconnecting call: %s", e)
+
     @session.on("user_input_transcribed")
     def _on_user_input_transcribed(ev):
         if ev.is_final and ev.transcript:
             asyncio.create_task(send_user_transcript(ev.transcript))
+            
+            # Check for call end intent
+            cleaned_text = ev.transcript.strip()
+            cleaned = re.sub(r'[^\w\s]', '', cleaned_text.lower()).strip()
+            end_phrases = [
+                "αντίο", "γεια", "γεια σας", "ευχαριστώ", "ευχαριστούμε", "ευχαριστω", "ευχαριστουμε",
+                "όχι ευχαριστώ", "όχι ευχαριστω", "οχι ευχαριστω",
+                "τίποτα άλλο", "τιποτα αλλο", "αυτό είναι όλο", "αυτο ειναι ολο",
+                "τελειώσαμε", "τελειωσαμε"
+            ]
+            words = cleaned.split()
+            if len(words) <= 4 and any(phrase in cleaned for phrase in end_phrases):
+                nonlocal _end_call_task
+                if not _end_call_task:
+                    logger.info("Call end intent detected: '%s'. Scheduling automatic call end in 2 seconds.", cleaned_text)
+                    _end_call_task = asyncio.create_task(end_call_delayed(2.0))
 
     @session.on("conversation_item_added")
     def _on_conversation_item_added(ev):

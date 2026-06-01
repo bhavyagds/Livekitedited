@@ -110,11 +110,11 @@ export function LandingPage({ onConnect, isConnecting, error }: LandingPageProps
             <span className="feature-text">Ask Questions</span>
           </div>
         </motion.div>
-      </motion.div>
 
-      <footer className="landing-footer">
-        <p>Powered by Meallion • Chef Lambros Vakiaros</p>
-      </footer>
+        <footer className="landing-footer">
+          <p>Powered by Meallion • Chef Lambros Vakiaros</p>
+        </footer>
+      </motion.div>
     </div>
   );
 }
