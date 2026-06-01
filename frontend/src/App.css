@@ -308,9 +308,9 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
   padding: var(--space-xl);
   position: relative;
+  overflow-y: auto; /* Allow scrolling if screen is too small */
 }
 
 .landing-content {
@@ -320,6 +320,8 @@ body {
   z-index: 1;
   max-width: 600px;
   text-align: center;
+  margin: auto 0; /* Vertically center if screen height is larger than content, but scrollable if smaller */
+  width: 100%;
 }
 
 /* Premium Central Glowing Orb */
@@ -327,7 +329,7 @@ body {
   position: relative;
   width: 260px;
   height: 260px;
-  margin: var(--space-xl) 0 var(--space-2xl);
+  margin: var(--space-md) 0 var(--space-xl);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -401,7 +403,7 @@ body {
 }
 
 .hero-section {
-  margin-bottom: var(--space-xl);
+  margin-bottom: var(--space-lg);
 }
 
 .hero-title {
@@ -424,7 +426,7 @@ body {
   flex-direction: column;
   align-items: center;
   gap: var(--space-md);
-  margin-bottom: var(--space-xl);
+  margin-bottom: var(--space-lg);
 }
 
 .connect-button {
@@ -487,7 +489,7 @@ body {
 .features-section {
   display: flex;
   gap: var(--space-md);
-  margin-top: var(--space-2xl);
+  margin-top: var(--space-lg);
   flex-wrap: wrap;
   justify-content: center;
 }
@@ -531,12 +533,69 @@ body {
 }
 
 .landing-footer {
-  margin-top: var(--space-2xl);
+  margin-top: var(--space-xl);
   text-align: center;
   color: var(--color-text-muted);
   font-size: 0.85rem;
   z-index: 1;
   padding-bottom: var(--space-md);
+}
+
+/* Responsive adjustments for extremely tight/short screens and mobile devices */
+@media (max-height: 820px), (max-width: 768px) {
+  .landing-page {
+    padding: var(--space-md);
+  }
+  .central-orb-wrapper {
+    width: 200px;
+    height: 200px;
+    margin: var(--space-sm) 0 var(--space-md);
+  }
+  .orb-nebula {
+    width: 160px;
+    height: 160px;
+  }
+  .ring-outer {
+    width: 150px;
+    height: 150px;
+  }
+  .ring-inner {
+    width: 100px;
+    height: 100px;
+  }
+  .orb-core {
+    width: 70px;
+    height: 70px;
+  }
+  .hero-title {
+    font-size: 2.2rem;
+  }
+  .hero-subtitle {
+    font-size: 1rem;
+    line-height: 1.6;
+  }
+  .connect-button {
+    padding: 12px 30px;
+    font-size: 1.05rem;
+  }
+  .features-section {
+    margin-top: var(--space-md);
+    gap: var(--space-xs);
+  }
+  .feature-capsule {
+    padding: 8px 16px;
+  }
+  .feature-icon-wrapper {
+    width: 24px;
+    height: 24px;
+  }
+  .feature-text {
+    font-size: 0.85rem;
+  }
+  .landing-footer {
+    margin-top: var(--space-md);
+    font-size: 0.8rem;
+  }
 }
 
 
@@ -588,9 +647,9 @@ body {
     rgba(20, 20, 35, 0.25) 100%
   );
   backdrop-filter: blur(40px);
-  border: 1px solid rgba(212, 175, 55, 0.35); /* Crisp golden mockup border */
+  border: 1px solid rgba(212, 175, 55, 0.35);
   border-radius: 28px;
-  padding: var(--space-2xl) var(--space-xl) var(--space-xl);
+  padding: var(--space-xl) var(--space-xl) var(--space-xl);
   position: sticky;
   top: 100px;
   height: fit-content;
@@ -599,7 +658,8 @@ body {
   box-shadow: 
     0 25px 50px rgba(0, 0, 0, 0.5),
     inset 0 1px 0 rgba(255, 255, 255, 0.1);
-  overflow: visible !important;
+  /* Clip rings at card boundary */
+  overflow: hidden;
 }
 
 .agent-panel-content {
@@ -817,12 +877,22 @@ body {
   background: rgba(212, 175, 55, 0.1);
 }
 
+/* Avatar clip zone — gives rings room inside the panel */
+.avatar-clip-zone {
+  /* Extra breathing room so rings don't hit the card edge */
+  padding: 40px;
+  margin: -20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 /* Avatar Container */
 .avatar-container {
   position: relative;
   width: 200px;
   height: 200px;
-  overflow: visible !important;
+  overflow: visible;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -868,83 +938,130 @@ body {
 }
 
 @keyframes pulse-ring-listening {
-  0% { transform: scale(1); opacity: 0.4; }
-  100% { transform: scale(1.4); opacity: 0; }
+  0%   { transform: scale(1);    opacity: 0.45; }
+  100% { transform: scale(1.28); opacity: 0; }
 }
 
 @keyframes pulse-ring-speaking {
-  0% { transform: scale(1); opacity: 0.5; }
-  100% { transform: scale(1.6); opacity: 0; }
+  0%   { transform: scale(1);    opacity: 0.55; }
+  100% { transform: scale(1.35); opacity: 0; }
 }
 
 .avatar {
   width: 100%;
   height: 100%;
   border-radius: 50%;
-  background: radial-gradient(circle at 35% 35%, rgba(255, 255, 255, 0.15) 0%, rgba(0, 0, 0, 0.35) 45%, rgba(0, 0, 0, 0.85) 90%);
-  border: 1.5px solid rgba(255, 255, 255, 0.25);
+  /*
+   * Matches the app's --gradient-bg theme:
+   * #0f0f1a → #1a1a2e → #16213e
+   * Lighter center so the 3D character sits naturally on the dark stage
+   */
+  background: radial-gradient(
+    circle at 50% 35%,
+    #1e1e35 0%,
+    #16213e 40%,
+    #1a1a2e 70%,
+    #0f0f1a 100%
+  );
+  border: 1.5px solid rgba(212, 175, 55, 0.4);
   display: flex;
   align-items: center;
   justify-content: center;
   position: relative;
-  box-shadow: 
-    0 15px 35px rgba(0, 0, 0, 0.6),
-    inset -8px -8px 20px rgba(0, 0, 0, 0.8),
-    inset 8px 8px 20px rgba(255, 255, 255, 0.18);
+  box-shadow:
+    0 15px 35px rgba(0, 0, 0, 0.7),
+    inset 0 -10px 30px rgba(0, 0, 0, 0.5),
+    inset 0 6px 20px rgba(212, 175, 55, 0.06);
   transition: all var(--transition-normal);
-  overflow: hidden; /* Hide bust bottom cleanly inside sphere */
+  overflow: hidden;
 }
 
 .avatar-container.speaking .avatar {
   box-shadow: 
-    0 15px 35px rgba(0, 0, 0, 0.6),
-    0 0 30px rgba(212, 175, 55, 0.3),
-    inset -8px -8px 20px rgba(0, 0, 0, 0.8),
-    inset 8px 8px 20px rgba(255, 255, 255, 0.18);
-  transform: scale(1.01);
-  border-color: rgba(212, 175, 55, 0.4);
+    0 15px 35px rgba(0, 0, 0, 0.7),
+    0 0 35px rgba(212, 175, 55, 0.4),
+    0 0 60px rgba(167, 139, 250, 0.15),
+    inset -6px -6px 20px rgba(0, 0, 0, 0.85),
+    inset 6px 6px 20px rgba(212, 175, 55, 0.12);
+  transform: scale(1.015);
+  border-color: rgba(212, 175, 55, 0.5);
 }
 
 .avatar-container.listening .avatar {
   box-shadow: 
-    0 15px 35px rgba(0, 0, 0, 0.6),
-    0 0 30px rgba(233, 69, 96, 0.3),
-    inset -8px -8px 20px rgba(0, 0, 0, 0.8),
-    inset 8px 8px 20px rgba(255, 255, 255, 0.18);
-  border-color: rgba(233, 69, 96, 0.4);
+    0 15px 35px rgba(0, 0, 0, 0.7),
+    0 0 35px rgba(233, 69, 96, 0.35),
+    0 0 60px rgba(167, 139, 250, 0.1),
+    inset -6px -6px 20px rgba(0, 0, 0, 0.85),
+    inset 6px 6px 20px rgba(233, 69, 96, 0.08);
+  border-color: rgba(233, 69, 96, 0.45);
 }
 
-.metallic-head-wrapper {
-  width: 80%;
-  height: 80%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.metallic-head {
+/* === AI Photo Avatar === */
+.ai-photo-wrapper {
   width: 100%;
   height: 100%;
-  filter: drop-shadow(0 6px 12px rgba(0,0,0,0.4));
-  transition: all var(--transition-slow);
+  border-radius: 50%;
+  position: relative;
+  overflow: hidden;
 }
 
-.head-eye {
-  animation: eye-pulse 2s ease-in-out infinite alternate;
+.ai-avatar-photo {
+  width: 100%;
+  height: 100%;
+  /* cover so the new dark-navy-background avatar fills the circle perfectly */
+  object-fit: cover;
+  object-position: center;
+  display: block;
+  /* Gentle breathing scale */
+  animation: avatar-breathe 4s ease-in-out infinite alternate;
+  /* Slight scale up to fill the circle better */
+  transform-origin: center center;
 }
 
-@keyframes eye-pulse {
-  0% { opacity: 0.7; filter: drop-shadow(0 0 1px #fff); }
-  100% { opacity: 1; filter: drop-shadow(0 0 3px #fff); }
+@keyframes avatar-breathe {
+  0%   { transform: scale(1); }
+  100% { transform: scale(1.04); }
 }
 
-.head-dot {
-  animation: dot-pulse 1s ease-in-out infinite alternate;
+/* Colour overlay for state tinting */
+.ai-state-overlay {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  transition: background 0.6s ease;
+  background: rgba(167, 139, 250, 0.08); /* idle: faint violet */
 }
 
-@keyframes dot-pulse {
-  0% { opacity: 0.6; }
-  100% { opacity: 1; }
+.ai-photo-wrapper.speaking .ai-state-overlay {
+  background: rgba(212, 175, 55, 0.18); /* gold pulse */
+  animation: overlay-speaking 0.8s ease-in-out infinite alternate;
+}
+
+.ai-photo-wrapper.listening .ai-state-overlay {
+  background: rgba(233, 69, 96, 0.15); /* red-pink */
+  animation: overlay-listening 1.2s ease-in-out infinite alternate;
+}
+
+.ai-photo-wrapper.thinking .ai-state-overlay {
+  background: rgba(167, 139, 250, 0.2); /* purple */
+  animation: overlay-thinking 1.5s ease-in-out infinite alternate;
+}
+
+@keyframes overlay-speaking {
+  0%   { background: rgba(212, 175, 55, 0.1); }
+  100% { background: rgba(212, 175, 55, 0.28); }
+}
+
+@keyframes overlay-listening {
+  0%   { background: rgba(233, 69, 96, 0.08); }
+  100% { background: rgba(233, 69, 96, 0.22); }
+}
+
+@keyframes overlay-thinking {
+  0%   { background: rgba(167, 139, 250, 0.1); }
+  100% { background: rgba(167, 139, 250, 0.28); }
 }
 
 .avatar-ring {
