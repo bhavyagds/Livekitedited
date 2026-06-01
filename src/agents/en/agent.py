@@ -842,8 +842,6 @@ async def entrypoint(ctx: JobContext):
         logger.info("CONVERSATION_ITEM_ADDED: role=%s, text=%s, type=%s", role, text, type(item).__name__)
         if role == "assistant" and text:
             asyncio.create_task(send_agent_transcript(text))
-        elif role == "user" and text:
-            asyncio.create_task(send_user_transcript(text))
 
     # ------------------------------------------------------------------
     # 12. Start the session
