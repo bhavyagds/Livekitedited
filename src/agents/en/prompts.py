@@ -207,12 +207,7 @@ def build_system_prompt(language: str = "en") -> str:
     # Always inject ticket instructions so the LLM knows the 7-step sequence
     parts.append(TICKET_INSTRUCTIONS)
 
-    parts.append("""
-TOOL USAGE GUARDRAIL:
-- Report findings EXACTLY as provided by tools.
-- Never use emojis.
-- Be precise and concise.
-""")
+    parts.append(TOOL_USAGE_GUARDRAIL)
     return "\n\n".join(parts)
 
 
@@ -263,6 +258,7 @@ async def build_system_prompt_async(language: str = "en") -> str:
     # Always inject ticket instructions so the LLM knows the 7-step sequence
     parts.append(TICKET_INSTRUCTIONS)
 
+    parts.append(TOOL_USAGE_GUARDRAIL)
     return "\n\n".join(parts)
 
 
@@ -332,6 +328,14 @@ RULES:
   call confirm_and_submit_ticket(confirmed=False) to restart
 - Never invent or assume any customer details
 - Always read back ALL details before calling submit
+"""
+
+TOOL_USAGE_GUARDRAIL = """
+## TOOL USAGE GUARDRAIL (CRITICAL)
+- Report findings EXACTLY as provided by tools.
+- Never use emojis.
+- Be precise and concise.
+- NEVER speak, output, or share web links, URLs, or authentication keys (such as order status links, checkout URLs, or authenticate?key=... tokens) in your responses. These contain security secrets and sound extremely awkward when spoken over the phone. Just summarize the details verbally (e.g., 'Your order is unfulfilled.').
 """
 
 

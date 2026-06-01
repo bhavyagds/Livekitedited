@@ -207,12 +207,7 @@ def build_system_prompt(language: str = "el") -> str:
     # Always inject ticket instructions so the LLM knows the sequence
     parts.append(TICKET_INSTRUCTIONS)
 
-    parts.append("""
-TOOL USAGE GUARDRAIL:
-- Report findings EXACTLY as provided by tools.
-- Never use emojis.
-- Be precise and concise.
-""")
+    parts.append(TOOL_USAGE_GUARDRAIL)
     return "\n\n".join(parts)
 
 
@@ -262,6 +257,7 @@ async def build_system_prompt_async(language: str = "el") -> str:
 
     parts.append(TICKET_INSTRUCTIONS)
 
+    parts.append(TOOL_USAGE_GUARDRAIL)
     return "\n\n".join(parts)
 
 
@@ -320,6 +316,15 @@ TICKET_INSTRUCTIONS = """
 4. Ζητήστε από τον πελάτη να περιγράψει το πρόβλημά του με λεπτομέρεια.
 
 Μόλις συλλέξετε και τα τέσσερα στοιχεία (Όνομα, Email, Τηλέφωνο και Περιγραφή Προβλήματος), καλέστε το εργαλείο `support_ticket` στην ίδια σειρά.
+"""
+
+TOOL_USAGE_GUARDRAIL = """
+## TOOL USAGE GUARDRAIL (CRITICAL / ΚΡΙΣΙΜΟ)
+- Report findings EXACTLY as provided by tools.
+- Never use emojis.
+- Be precise and concise.
+- ΠΟΤΕ μην εκφωνείτε, μην εμφανίζετε και μην μοιράζεστε συνδέσμους ιστού, διευθύνσεις URL ή κλειδιά ελέγχου ταυτότητας (όπως συνδέσμους κατάστασης παραγγελίας, check out, ή διακριτικά authenticate?key=... tokens) στις απαντήσεις σας. Αυτά περιέχουν μυστικά ασφαλείας και ακούγονται εξαιρετικά άβολα όταν εκφωνούνται στο τηλέφωνο. Απλώς συνοψίστε τις λεπτομέρειες προφορικά (π.χ. 'Η παραγγελία σας ετοιμάζεται').
+- NEVER speak, output, or share web links, URLs, or authentication keys (such as order status links, checkout URLs, or authenticate?key=... tokens) in your responses. These contain security secrets and sound extremely awkward when spoken over the phone. Just summarize the details verbally.
 """
 
 
