@@ -885,7 +885,7 @@ async def entrypoint(ctx: JobContext):
 
     _end_call_task: Optional[asyncio.Task] = None
 
-    async def end_call_delayed(delay: float = 2.0):
+    async def end_call_delayed(delay: float = 7.0):
         await asyncio.sleep(delay)
         logger.info("Ending call automatically as requested by call end intent")
         try:
@@ -912,8 +912,8 @@ async def entrypoint(ctx: JobContext):
             if len(words) <= 4 and any(phrase in cleaned for phrase in end_phrases):
                 nonlocal _end_call_task
                 if not _end_call_task:
-                    logger.info("Call end intent detected: '%s'. Scheduling automatic call end in 2 seconds.", cleaned_text)
-                    _end_call_task = asyncio.create_task(end_call_delayed(2.0))
+                    logger.info("Call end intent detected: '%s'. Scheduling automatic call end in 7 seconds.", cleaned_text)
+                    _end_call_task = asyncio.create_task(end_call_delayed(7.0))
 
     @session.on("conversation_item_added")
     def _on_conversation_item_added(ev):
