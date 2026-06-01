@@ -74,75 +74,9 @@ logger = logging.getLogger("agent-elena-el")
 
 
 # =============================================================================
-# LONG-TERM MEMORY — 5-minute cache (from agent.py patch 8)
+# LONG-TERM MEMORY (Memory items are fetched fresh from the database per session)
 # =============================================================================
 
-_CACHE_TTL_SECONDS: float = 300.0  # 5 minutes
-
-_agent_cache: dict = {
-    "memory_items": None,   # list | None
-    "last_refresh": 0.0,    # epoch float
-}
-_agent_cache_lock = threading.Lock()
-
-
-def _agent_cache_is_valid() -> bool:
-    """Return True if the cache was refreshed within the last 5 minutes."""
-    return (time.time() - _agent_cache["last_refresh"]) < _CACHE_TTL_SECONDS
-
-
-def flush_agent_cache() -> None:
-    """Manually flush all agent cache entries (thread-safe)."""
-    with _agent_cache_lock:
-        _agent_cache["memory_items"] = None
-        _agent_cache["last_refresh"] = 0.0
-    logger.info("Agent cache flushed")
-
-
-async def _refresh_agent_cache(force: bool = False) -> None:
-    """Populate _agent_cache from DB if stale or if force=True."""
-    if not force and _agent_cache_is_valid():
-        return
-
-    logger.info("Refreshing agent cache (TTL=5min, force=%s)...", force)
-    # Force prompts.py to re-fetch KB/settings/memory from DB
-    try:
-        await _fetch_from_db(force=True)
-    except Exception as e:
-        logger.warning("prompts re-fetch error: %s", e)
-
-    # Re-load memory items
-    memory_items: list = []
-    try:
-        from src.services.database import get_database_service
-        db = get_database_service()
-        memory_items = await db.get_memory_items(active_only=True)
-    except Exception as e:
-        logger.warning("memory_items refresh error: %s", e)
-        memory_items = _agent_cache.get("memory_items") or []
-
-    with _agent_cache_lock:
-        _agent_cache["memory_items"] = memory_items
-        _agent_cache["last_refresh"] = time.time()
-
-    logger.info(
-        "Agent cache refreshed at %s UTC | memory_items=%d | next refresh in 5 min",
-        datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-        len(memory_items),
-    )
-
-
-async def _cache_auto_refresh_loop() -> None:
-    """Background task: wake every 60 s, refresh cache when 5-min TTL has expired."""
-    while True:
-        await asyncio.sleep(60.0)
-        if not _agent_cache_is_valid():
-            logger.info("Cache TTL expired — auto-flushing and refreshing")
-            flush_agent_cache()
-            try:
-                await _refresh_agent_cache(force=True)
-            except Exception as e:
-                logger.warning("Auto-refresh error: %s", e)
 
 
 # =============================================================================
@@ -660,11 +594,6 @@ async def entrypoint(ctx: JobContext):
 
     logger.info("Greek agent: language='el' confirmed — starting session")
 
-    # ------------------------------------------------------------------
-    # 1. Start memory/prompt cache warm in the background
-    # ------------------------------------------------------------------
-    cache_task = asyncio.create_task(_refresh_agent_cache(force=True))
-
 
     # ------------------------------------------------------------------
     # 2. Set up room-level logger
@@ -697,26 +626,14 @@ async def entrypoint(ctx: JobContext):
     room_log("CALL_RECORDED", call_id=call_id)
 
     # ------------------------------------------------------------------
-    # 5. Wait for cache warm (max 8 s), then pull memory_items
+    # 5. Pull fresh memory_items directly from database
     # ------------------------------------------------------------------
-    try:
-        await asyncio.wait_for(cache_task, timeout=8.0)
-    except Exception as e:
-        logger.warning("Initial cache warmup did not complete in time: %s", e)
-
     memory_items: list[dict] = []
     try:
-        cached_mi = _agent_cache.get("memory_items")
-        if cached_mi is not None:
-            memory_items = cached_mi
-            room_log("MEMORY_ITEMS_FROM_CACHE", count=len(memory_items))
-        else:
-            from src.services.database import get_database_service
-            db = get_database_service()
-            memory_items = await db.get_memory_items(active_only=True)
-            with _agent_cache_lock:
-                _agent_cache["memory_items"] = memory_items
-            room_log("MEMORY_ITEMS_LOADED", count=len(memory_items))
+        from src.services.database import get_database_service
+        db = get_database_service()
+        memory_items = await db.get_memory_items(active_only=True)
+        room_log("MEMORY_ITEMS_LOADED", count=len(memory_items))
     except Exception as e:
         logger.warning("Failed loading memory items: %s", e)
         room_log("MEMORY_ITEMS_LOAD_FAILED", error=str(e))
@@ -985,12 +902,6 @@ async def entrypoint(ctx: JobContext):
     asyncio.create_task(_start_custom_background_audio())
 
     # ------------------------------------------------------------------
-    # 16. Start 5-min cache auto-refresh loop (long-term memory stays fresh)
-    # ------------------------------------------------------------------
-    cache_refresh_task = asyncio.create_task(_cache_auto_refresh_loop())
-    room_log("CACHE_REFRESH_LOOP_STARTED")
-
-    # ------------------------------------------------------------------
     # 17. Publish initial idle state to frontend
     # ------------------------------------------------------------------
     await _publish_state(ctx, "idle")
@@ -1015,7 +926,6 @@ async def entrypoint(ctx: JobContext):
     # ------------------------------------------------------------------
     # 19. Teardown
     # ------------------------------------------------------------------
-    cache_refresh_task.cancel()
 
     transcript_text = "\n".join(conversation_transcript)
     room_log("SESSION_ENDED", disconnect_reason=disconnect_reason, transcript_lines=len(conversation_transcript))
