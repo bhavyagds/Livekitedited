@@ -501,14 +501,22 @@ def create_tts():
         get_agent_setting("agent_voice_stability", getattr(settings, "elevenlabs_voice_stability", 0.65)),
         0.65, min_value=0.0, max_value=1.0,
     )
+    speed = _as_float(
+        get_agent_setting("agent_voice_speed", getattr(settings, "elevenlabs_voice_speed", 1.0)),
+        1.0, min_value=0.7, max_value=1.2,
+    )
     model = str(
         get_agent_setting("elevenlabs_model", getattr(settings, "elevenlabs_model", "eleven_turbo_v2_5"))
         or "eleven_turbo_v2_5"
     )
 
     try:
-        voice_settings = elevenlabs.VoiceSettings(stability=stability, similarity_boost=similarity)
-        logger.info("TTS: ElevenLabs model=%s voice_id=%s", model, voice_id)
+        voice_settings = elevenlabs.VoiceSettings(
+            stability=stability,
+            similarity_boost=similarity,
+            speed=speed,
+        )
+        logger.info("TTS: ElevenLabs model=%s voice_id=%s speed=%.2f", model, voice_id, speed)
         return elevenlabs.TTS(
             voice_id=voice_id,
             voice_settings=voice_settings,
