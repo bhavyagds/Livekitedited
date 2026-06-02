@@ -196,12 +196,15 @@ def build_system_prompt(language: str = "el") -> str:
     else:
         parts.append(MINIMAL_FALLBACK_PROMPT)
     
+    parts.append(SERVICE_BOUNDARIES_GUARDRAIL)
+    
     parts.append(
         "FACT VS BEHAVIOR PRECEDENCE (CRITICAL):\n"
         "1. MEMORY FIRST: Matching long-term memory scenario overrides generic phrasing.\n"
         "2. KB SECOND: If no memory scenario matches, answer from knowledge base facts.\n"
         "3. SYSTEM THIRD: Apply general behavior instructions after Memory/KB.\n"
         "4. NO HALLUCINATION: If missing from all sources, say you don't have that info.\n"
+        "5. STRICT SERVICE BOUNDARY: If user query is unrelated to Meallion, do not answer it. Decline respectfully.\n"
     )
 
     # Always inject ticket instructions so the LLM knows the sequence
@@ -247,12 +250,15 @@ async def build_system_prompt_async(language: str = "el") -> str:
     else:
         parts.append(MINIMAL_FALLBACK_PROMPT)
     
+    parts.append(SERVICE_BOUNDARIES_GUARDRAIL)
+    
     parts.append(
         "FACT VS BEHAVIOR PRECEDENCE (CRITICAL):\n"
         "1. MEMORY FIRST: Matching long-term memory scenario overrides generic phrasing.\n"
         "2. KB SECOND: If no memory scenario matches, answer from knowledge base facts.\n"
         "3. SYSTEM THIRD: Apply general behavior instructions after Memory/KB.\n"
         "4. NO HALLUCINATION: If missing from all sources, say you don't have that info.\n"
+        "5. STRICT SERVICE BOUNDARY: If user query is unrelated to Meallion, do not answer it. Decline respectfully.\n"
     )
 
     parts.append(TICKET_INSTRUCTIONS)
@@ -345,6 +351,19 @@ TOOL_USAGE_GUARDRAIL = """
 - Πριν καλέσετε οποιοδήποτε εργαλείο αναζήτησης ή εύρεσης παραγγελίας (ειδικά κατά την αναζήτηση στοιχείων μέσω τηλεφώνου), ΠΑΝΤΑ να εκφωνείτε πρώτα μια ζεστή, φυσική φράση αναμονής στον χρήστη (π.χ. 'Μισό λεπτό να ελέγξω τα στοιχεία σας...', ή 'Βεβαίως, δώστε μου ένα δευτερόλεπτο να αναζητήσω την παραγγελία σας...'). Αυτό διατηρεί τη συνομιλία φυσική και αποτρέπει τη νεκρή σιωπή κατά τη διάρκεια της αναζήτησης.
 - ΠΟΤΕ μην εκφωνείτε, μην εμφανίζετε και μην μοιράζεστε συνδέσμους ιστού, διευθύνσεις URL ή κλειδιά ελέγχου ταυτότητας (όπως συνδέσμους κατάστασης παραγγελίας, check out, ή διακριτικά authenticate?key=... tokens) στις απαντήσεις σας. Αυτά περιέχουν μυστικά ασφαλείας και ακούγονται εξαιρετικά άβολα όταν εκφωνούνται στο τηλέφωνο. Απλώς συνοψίστε τις λεπτομέρειες προφορικά (π.χ. 'Η παραγγελία σας ετοιμάζεται').
 - NEVER speak, output, or share web links, URLs, or authentication keys (such as order status links, checkout URLs, or authenticate?key=... tokens) in your responses. These contain security secrets and sound extremely awkward when spoken over the phone. Just summarize the details verbally.
+"""
+
+# ---------------------------------------------------------------------------
+# Strict boundary guardrail for keeping responses domain-specific (Greek)
+# ---------------------------------------------------------------------------
+SERVICE_BOUNDARIES_GUARDRAIL = """
+## SERVICE BOUNDARY & SCOPE (CRITICAL / ABSOLUTE RULE / ΚΡΙΣΙΜΟ)
+- Είστε αποκλειστικά φωνητικός βοηθός εξυπηρέτησης πελατών για τη Meallion (μια υπηρεσία προετοιμασίας και παράδοσης έτοιμων γευμάτων).
+- ΠΡΕΠΕΙ να απαντάτε ΜΟΝΟ σε ερωτήσεις που σχετίζονται άμεσα με τις υπηρεσίες, τα προϊόντα, τα γεύματα, τις παραγγελίες, τη διανομή, τα στοιχεία επικοινωνίας ή τη δημιουργία αιτήματος υποστήριξης της Meallion, βασιζόμενοι αυστηρά στη γνωσιακή βάση, τη μακροπρόθεσμη μνήμη και τις οδηγίες που σας παρέχονται.
+- Εάν ο χρήστης ρωτήσει για ΟΠΟΙΟΔΗΠΟΤΕ άλλο θέμα που δεν σχετίζεται με τη Meallion (π.χ. γενικές γνώσεις, συνταγές όπως πώς να φτιάξει πίτσα/ζυμαρικά, καιρό, αθλητικά, γενική συζήτηση, μαθηματικά, προγραμματισμό κ.λπ.), ΠΡΕΠΕΙ να αρνηθείτε ευγενικά να απαντήσετε.
+- Κρατήστε την άρνησή σας ευγενική, σύντομη και επαγγελματική, και κατευθύνετε τον χρήστη πίσω στις υπηρεσίες της Meallion.
+  - Παράδειγμα: "Λυπάμαι, αλλά μπορώ να σας βοηθήσω μόνο με ερωτήσεις σχετικά με τις υπηρεσίες γευμάτων της Meallion. Πώς μπορώ να σας βοηθήσω με την παραγγελία σας σήμερα;"
+- ΠΟΤΕ μην ικανοποιείτε άσχετα αιτήματα ή απαντάτε σε ερωτήσεις εκτός του επιχειρηματικού τομέα της Meallion υπό οποιεσδήποτε συνθήκες.
 """
 
 
