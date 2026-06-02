@@ -469,7 +469,7 @@ def create_tts():
 
 def create_vad():
     min_speech = _as_float(get_agent_setting("vad_min_speech_duration", 0.15), 0.15, min_value=0.05, max_value=1.0)
-    min_silence = _as_float(get_agent_setting("vad_min_silence_duration", 1.0), 1.0, min_value=0.1, max_value=3.0)
+    min_silence = _as_float(get_agent_setting("vad_min_silence_duration", 1.5), 1.5, min_value=0.1, max_value=3.0)
     logger.info("VAD: min_speech=%.2fs min_silence=%.2fs threshold=0.6", min_speech, min_silence)
     return silero.VAD.load(
         min_speech_duration=min_speech,
