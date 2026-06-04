@@ -338,7 +338,8 @@ RULES:
 
 TOOL_USAGE_GUARDRAIL = """
 ## TOOL USAGE GUARDRAIL (CRITICAL)
-- Report findings EXACTLY as provided by tools.
+- Report findings EXACTLY as provided by tools (except for translating Greek meal/item names into English).
+- When listing or presenting order items/meals to the customer, you MUST translate any Greek item/meal names into clear, natural English (for example, translate 'Μοσχαράκι Κοκκινιστό με Ρύζι Κουρκουμά' to 'Braised Beef with Turmeric Rice', 'Σολομός Teriyaki' to 'Teriyaki Salmon', 'Μπιφτέκια Κοτόπουλου με Πουρέ Γλυκοπατάτας' to 'Chicken Patties with Sweet Potato Puree', etc.) so that the English-speaking customer can understand them. Never leave meal/item names in Greek.
 - Never use emojis.
 - Be precise and concise.
 - ALWAYS speak order numbers digit-by-digit (e.g., read order number '1234' or '2345' as 'one two three four' or 'two three four five', and NEVER as 'one thousand...' or 'two thousand...').
