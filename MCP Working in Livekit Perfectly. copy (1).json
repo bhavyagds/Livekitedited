@@ -1,0 +1,145 @@
+{
+  "name": "MCP Working in Livekit Perfectly. copy",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "meallion-agent-phone"
+      },
+      "type": "@n8n/n8n-nodes-langchain.mcpTrigger",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "155de3c5-8693-4211-885b-42a8c1721a37",
+      "name": "meallion_mcp",
+      "webhookId": "753b3378-c4cc-446d-81a4-9c17c7f932c5"
+    },
+    {
+      "parameters": {
+        "toolDescription": "Retrieve Shopify order details using the customer-facing order number.\n\nInput:\n- order_number (example: 12752)\n\nReturns:\n- order details\n- shipping status\n- fulfillment status\n- customer info",
+        "url": "=https://ameallion.myshopify.com/admin/api/2024-01/orders.json?status=any&name=%23{{ $fromAI('order_number', 'The Shopify order number provided by the customer') }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "shopifyAccessTokenApi",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        48,
+        224
+      ],
+      "id": "a15d624e-e199-4ded-b553-9ee48511b0f9",
+      "name": "order_lookup",
+      "credentials": {
+        "shopifyAccessTokenApi": {
+          "id": "W0sn0QhYevK5jtI1",
+          "name": "Shopify Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "team": "90152190925",
+        "space": "90159207937",
+        "folderless": true,
+        "list": "901519562598",
+        "name": "={{ $fromAI('task_name', 'The title of the support ticket') }}",
+        "additionalFields": {
+          "content": "=Customer Name: {{ $fromAI('customer_name', 'The full name of the customer') }}\nPhone: {{ $fromAI('customer_phone', 'The phone number of the customer') }}\nEmail: {{ $fromAI('customer_email', 'The email address of the customer') }}\n\nIssue: {{ $fromAI('description', 'Detailed summary of the customer issue') }}",
+          "markdownContent": true
+        }
+      },
+      "type": "n8n-nodes-base.clickUpTool",
+      "typeVersion": 1,
+      "position": [
+        192,
+        304
+      ],
+      "id": "e0693549-bd7a-438b-ac48-e0b49474724f",
+      "name": "support_ticket",
+      "credentials": {
+        "clickUpApi": {
+          "id": "Fc95kgvJ17C0l9tn",
+          "name": "ClickUp account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toolDescription": "Fetches the 3 most recent Shopify orders for a customer using their phone number. Use this ONLY if the customer does not have their order number.",
+        "method": "POST",
+        "url": "=https://ameallion.myshopify.com/admin/api/2024-01/graphql.json",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "shopifyAccessTokenApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"query\": \"{ customers(first: 1, query: \\\"phone:{{ $fromAI('phone_number', 'The customer phone number including country code') }}\\\") { edges { node { displayName orders(first: 3, sortKey: CREATED_AT, reverse: true) { edges { node { name displayFulfillmentStatus displayFinancialStatus } } } } } } }\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        352,
+        304
+      ],
+      "id": "0d9e5bf5-df56-4b9a-b4d6-ae0e74b6c55a",
+      "name": "order_lookup_by_phone",
+      "credentials": {
+        "shopifyAccessTokenApi": {
+          "id": "W0sn0QhYevK5jtI1",
+          "name": "Shopify Access Token account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "order_lookup": {
+      "ai_tool": [
+        [
+          {
+            "node": "meallion_mcp",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "support_ticket": {
+      "ai_tool": [
+        [
+          {
+            "node": "meallion_mcp",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "order_lookup_by_phone": {
+      "ai_tool": [
+        [
+          {
+            "node": "meallion_mcp",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "4815cc36-61b3-4c07-bd9b-c3ce07b487f0",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "144918c413502defe5d2e18b1b29fc571f5fd8cfaeda9fc68853d77375414cde"
+  },
+  "id": "opgcvxbrRGCA1Xpu",
+  "tags": []
+}

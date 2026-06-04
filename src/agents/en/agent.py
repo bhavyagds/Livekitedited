@@ -493,10 +493,11 @@ class DefaultAgent(Agent):
     """Elena — Meallion English voice agent (new-SDK style, DB-driven prompt)."""
 
     def __init__(self, instructions: str) -> None:
-        mcp_server = mcp.MCPServerHTTP(
+        self.mcp_server = mcp.MCPServerHTTP(
             url="https://voiceagent.app.n8n.cloud/mcp/meallion-agent-phone",
+            client_session_timeout_seconds=3600,
         )
-        mcp_toolset = mcp.MCPToolset(id="n8n-mcp", mcp_server=mcp_server)
+        mcp_toolset = mcp.MCPToolset(id="n8n-mcp", mcp_server=self.mcp_server)
         super().__init__(
             instructions=instructions,
             tools=[
@@ -846,13 +847,35 @@ async def entrypoint(ctx: JobContext):
     # ------------------------------------------------------------------
     # 12. Start the session
     # ------------------------------------------------------------------
+    agent = DefaultAgent(instructions=system_prompt)
     await session.start(
-        agent=DefaultAgent(instructions=system_prompt),
+        agent=agent,
         room=ctx.room,
         room_options=room_io.RoomOptions(
             audio_input=audio_input_opts,
         ),
     )
+
+    # Start the MCP keep-alive task to prevent idle timeouts (ClosedResourceError)
+    async def mcp_keep_alive_loop(mcp_server):
+        logger.info("Starting MCP keep-alive loop for server: %s", mcp_server.url)
+        while ctx.room.isconnected():
+            try:
+                await asyncio.sleep(15.0)
+                if not ctx.room.isconnected():
+                    break
+                
+                if not mcp_server.initialized:
+                    logger.info("MCP server not initialized, attempting connection...")
+                    await mcp_server.initialize()
+                else:
+                    mcp_server.invalidate_cache()
+                    await mcp_server.list_tools()
+                    logger.debug("MCP keep-alive ping successful")
+            except Exception as ke:
+                logger.warning("MCP keep-alive ping failed: %s", ke)
+
+    agent.keep_alive_task = asyncio.create_task(mcp_keep_alive_loop(agent.mcp_server))
 
     # Explicitly speak the initial greeting upon joining
     greeting = get_greeting("en")
