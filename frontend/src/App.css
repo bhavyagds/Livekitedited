@@ -95,6 +95,7 @@ body {
   overflow: hidden;
   z-index: 0;
   background: radial-gradient(circle at 50% 50%, #0c0d1c 0%, #04050d 100%);
+  isolation: isolate;
 }
 
 /* Premium Celestial Nebula Clouds */
@@ -105,6 +106,8 @@ body {
   opacity: 0.15;
   pointer-events: none;
   mix-blend-mode: screen;
+  will-change: transform, filter;
+  transform: translate3d(0, 0, 0);
 }
 
 .nebula-blue {
@@ -167,6 +170,8 @@ body {
   border-radius: 50%;
   filter: blur(100px);
   opacity: 0.25;
+  will-change: transform, filter;
+  transform: translate3d(0, 0, 0);
 }
 
 .orb-1 {
@@ -343,6 +348,8 @@ body {
   background: radial-gradient(circle, rgba(52, 152, 219, 0.4) 0%, rgba(212, 175, 55, 0.25) 50%, transparent 70%);
   filter: blur(25px);
   animation: orbit-glow 8s ease-in-out infinite alternate;
+  will-change: transform, filter;
+  transform: translate3d(0, 0, 0);
 }
 
 .orb-ring {
@@ -374,6 +381,7 @@ body {
   height: 100px;
   border-radius: 50%;
   background: linear-gradient(135deg, rgba(26, 188, 156, 0.2) 0%, rgba(212, 175, 55, 0.15) 100%);
+  -webkit-backdrop-filter: blur(12px);
   backdrop-filter: blur(12px);
   border: 1px solid rgba(255, 255, 255, 0.15);
   box-shadow: 
@@ -502,6 +510,7 @@ body {
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 50px;
+  -webkit-backdrop-filter: blur(12px);
   backdrop-filter: blur(12px);
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
   transition: all var(--transition-normal);
@@ -646,6 +655,7 @@ body {
     rgba(15, 15, 26, 0.45) 0%,
     rgba(20, 20, 35, 0.25) 100%
   );
+  -webkit-backdrop-filter: blur(40px);
   backdrop-filter: blur(40px);
   border: 1px solid rgba(212, 175, 55, 0.35);
   border-radius: 28px;
@@ -692,6 +702,7 @@ body {
     rgba(255, 255, 255, 0.03) 0%,
     rgba(255, 255, 255, 0.01) 100%
   );
+  -webkit-backdrop-filter: blur(20px);
   backdrop-filter: blur(20px);
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: var(--radius-lg);
@@ -1148,6 +1159,7 @@ body {
   border-radius: 50px;
   margin-top: 4px;
   letter-spacing: 0.02em;
+  -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
 }
 
@@ -1460,6 +1472,7 @@ body {
   box-shadow: 
     0 15px 35px rgba(0, 0, 0, 0.6),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  -webkit-backdrop-filter: blur(20px);
   backdrop-filter: blur(20px);
 }
 
