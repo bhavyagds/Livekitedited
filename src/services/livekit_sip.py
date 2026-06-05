@@ -206,25 +206,34 @@ class LiveKitSIPService:
     async def create_dispatch_rule(
         self,
         name: str,
-        room_name_template: str = "sip-${caller.number}",
+        room_prefix: str = "sip-call-",
         trunk_ids: Optional[List[str]] = None,
         metadata: Optional[str] = None,
     ) -> Optional[Dict]:
-        """Create a SIP dispatch rule to route calls to rooms."""
+        """Create a SIP dispatch rule to route calls to rooms.
+        
+        Uses SIPDispatchRuleIndividual which creates a NEW unique room per inbound
+        call (with the given prefix). This is correct for voice bot use cases.
+        
+        NOTE: SIPDispatchRuleDirect uses a static room name and does NOT support
+        template variables like ${caller.number} — they are stored literally and
+        will never be substituted. Always use Individual for per-call rooms.
+        """
         try:
             from livekit import api
             
             lk_api = await self._get_api()
             
-            # Create the dispatch rule wrapper with direct rule inside
+            # SIPDispatchRuleIndividual: each inbound call gets its own unique room.
+            # LiveKit names the room as: <room_prefix><random_suffix>
+            # e.g. "sip-call-AbCdEfGh"
             dispatch_rule = api.SIPDispatchRule(
-                dispatch_rule_direct=api.SIPDispatchRuleDirect(
-                    room_name=room_name_template,
+                dispatch_rule_individual=api.SIPDispatchRuleIndividual(
+                    room_prefix=room_prefix,
                     pin="",  # No PIN required
                 )
             )
             
-            # Create request directly with fields (not using SIPDispatchRuleInfo wrapper)
             request = api.CreateSIPDispatchRuleRequest(
                 rule=dispatch_rule,
                 trunk_ids=trunk_ids or [],
@@ -407,7 +416,7 @@ class LiveKitSIPService:
             # Create dispatch rule
             rule = await self.create_dispatch_rule(
                 name=f"{provider_name} Dispatch",
-                room_name_template="sip-call-${caller.number}",
+                room_prefix="sip-call-",
                 trunk_ids=[trunk["id"]],
                 metadata=f'{{"provider": "{provider_name}", "source": "phone"}}',
             )
