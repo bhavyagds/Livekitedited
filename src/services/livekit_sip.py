@@ -431,38 +431,93 @@ class LiveKitSIPService:
             return {"success": False, "error": str(e)}
 
 
-    async def sync_providers_from_db(self) -> Dict:
+    async def purge_all_trunks_and_rules(self) -> Dict:
+        """
+        Delete ALL existing SIP inbound trunks and dispatch rules from LiveKit.
+
+        Use this when trunks were created with bad config (e.g. wildcard
+        allowed_addresses) and need a clean slate before re-syncing.
+        Returns counts of deleted items and any errors.
+        """
+        deleted_trunks = 0
+        deleted_rules = 0
+        errors = []
+
+        # Delete all dispatch rules first (they reference trunks)
+        rules = await self.list_dispatch_rules()
+        for rule in rules:
+            ok = await self.delete_dispatch_rule(rule["id"])
+            if ok:
+                deleted_rules += 1
+                logger.info(f"Purged dispatch rule: {rule['name']} ({rule['id']})")
+            else:
+                errors.append(f"Could not delete rule {rule['id']}")
+
+        # Delete all inbound trunks
+        trunks = await self.list_inbound_trunks()
+        for trunk in trunks:
+            ok = await self.delete_inbound_trunk(trunk["id"])
+            if ok:
+                deleted_trunks += 1
+                logger.info(f"Purged trunk: {trunk['name']} ({trunk['id']})")
+            else:
+                errors.append(f"Could not delete trunk {trunk['id']}")
+
+        logger.info(
+            f"Purge complete: {deleted_trunks} trunks deleted, "
+            f"{deleted_rules} rules deleted, {len(errors)} errors"
+        )
+        return {
+            "deleted_trunks": deleted_trunks,
+            "deleted_rules": deleted_rules,
+            "errors": errors,
+        }
+
+    async def sync_providers_from_db(self, force_resync: bool = False) -> Dict:
         """
         Sync all SIP providers from database to LiveKit.
         Called on API startup to restore configuration after restarts.
+
+        Args:
+            force_resync: If True, delete ALL existing trunks and dispatch rules
+                          before recreating them.  Use this after a config fix
+                          (e.g. bad wildcard allowed_addresses) so stale trunks
+                          are replaced rather than silently skipped.
         """
         from src.services.database import get_database_service
         db = get_database_service()
-        
+
         results = {
             "synced": 0,
             "failed": 0,
             "errors": [],
         }
-        
+
         try:
             # Get all active providers from database
             providers = await db.get_all_sip_providers_with_credentials()
             logger.info(f"Found {len(providers)} SIP providers to sync")
-            
+
             if not providers:
                 return results
-            
-            # Get existing trunks to avoid duplicates
-            existing_trunks = await self.list_inbound_trunks()
-            existing_trunk_names = {t["name"] for t in existing_trunks}
-            
+
+            if force_resync:
+                logger.warning("force_resync=True — purging ALL existing trunks and rules first")
+                purge = await self.purge_all_trunks_and_rules()
+                if purge["errors"]:
+                    results["errors"].extend(purge["errors"])
+                existing_trunk_names: set = set()  # all gone
+            else:
+                # Get existing trunks to avoid duplicates
+                existing_trunks = await self.list_inbound_trunks()
+                existing_trunk_names = {t["name"] for t in existing_trunks}
+
             for provider in providers:
                 provider_name = provider["name"]
                 trunk_name = f"{provider_name} Trunk"
-                
+
                 try:
-                    # Check if trunk already exists
+                    # Check if trunk already exists (only relevant when not force-resyncing)
                     if trunk_name in existing_trunk_names:
                         logger.info(f"Trunk '{trunk_name}' already exists, skipping")
                         await db.update_sip_provider_sync(
@@ -472,7 +527,7 @@ class LiveKitSIPService:
                         )
                         results["synced"] += 1
                         continue
-                    
+
                     # Create trunk and rule
                     result = await self.configure_provider(
                         provider_name=provider_name,
@@ -483,7 +538,7 @@ class LiveKitSIPService:
                         allowed_ips=provider.get("allowed_ips", []),
                         skip_validation=True,  # Skip validation since it was validated on creation
                     )
-                    
+
                     if result.get("success"):
                         await db.update_sip_provider_sync(
                             provider["id"],
@@ -504,7 +559,7 @@ class LiveKitSIPService:
                         results["failed"] += 1
                         results["errors"].append(f"{provider_name}: {error}")
                         logger.error(f"Failed to sync SIP provider {provider_name}: {error}")
-                        
+
                 except Exception as e:
                     error = str(e)
                     await db.update_sip_provider_sync(
@@ -515,10 +570,10 @@ class LiveKitSIPService:
                     results["failed"] += 1
                     results["errors"].append(f"{provider_name}: {error}")
                     logger.error(f"Error syncing SIP provider {provider_name}: {e}")
-            
+
             logger.info(f"SIP sync complete: {results['synced']} synced, {results['failed']} failed")
             return results
-            
+
         except Exception as e:
             logger.error(f"Error during SIP provider sync: {e}")
             results["errors"].append(str(e))
@@ -547,4 +602,21 @@ async def sync_sip_providers_on_startup() -> Dict:
         return result
     except Exception as e:
         logger.error(f"Failed to sync SIP providers on startup: {e}")
+        return {"synced": 0, "failed": 0, "errors": [str(e)]}
+
+
+async def force_resync_sip_providers() -> Dict:
+    """
+    Purge ALL existing LiveKit SIP trunks/rules and recreate from DB.
+
+    Call this once after fixing a bad SIP config (e.g. wildcard
+    allowed_addresses).  Safe to call at any time — it does a full
+    delete-and-recreate cycle.
+    """
+    try:
+        sip_service = get_sip_service()
+        result = await sip_service.sync_providers_from_db(force_resync=True)
+        return result
+    except Exception as e:
+        logger.error(f"Failed to force-resync SIP providers: {e}")
         return {"synced": 0, "failed": 0, "errors": [str(e)]}

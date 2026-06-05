@@ -8,7 +8,7 @@ load_dotenv(override=True)
 from src.models.admin import SIPProvider
 from src.services.database import get_database_service
 from src.config import settings
-from src.services.livekit_sip import sync_sip_providers_on_startup
+from src.services.livekit_sip import force_resync_sip_providers
 
 def _parse_allowed_ips(raw: str) -> list[str]:
     if not raw:
@@ -59,9 +59,9 @@ async def main():
             session.add(new_provider)
             await session.commit()
             
-    print("Running SIP sync...")
-    result = await sync_sip_providers_on_startup()
-    print(f"Sync result: {result}")
+    print("Running SIP force-resync (purges old trunks, recreates clean ones)...")
+    result = await force_resync_sip_providers()
+    print(f"Resync result: {result}")
 
 if __name__ == "__main__":
     asyncio.run(main())

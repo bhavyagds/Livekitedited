@@ -605,26 +605,39 @@ async def entrypoint(ctx: JobContext):
     _current["room_logger"] = room_logger
     _current["room_name"] = ctx.room.name
     _current["job_id"] = job_id
-    room_log("ROOM_START", call_type="web", build=AGENT_BUILD)
     logger.info("Per-room log: %s | BUILD: %s", room_log_path, AGENT_BUILD)
 
     # ------------------------------------------------------------------
-    # 3. Connect and wait for participant
+    # 3. Detect call type: SIP rooms are named "sip-call-+30XXXXXXXXXX"
     # ------------------------------------------------------------------
+    room_name = ctx.room.name
+    is_sip_call = room_name.startswith("sip-")
+    call_type = "phone" if is_sip_call else "web"
+    # Extract caller number from room name for SIP calls (e.g. "sip-call-+302810209931" → "+302810209931")
+    caller_number: Optional[str] = None
+    if is_sip_call:
+        parts = room_name.split("-", 2)  # ["sip", "call", "+302810209931"]
+        if len(parts) == 3 and parts[2].startswith("+"):
+            caller_number = parts[2]
+        elif len(parts) >= 2:
+            caller_number = parts[-1] or None
+    logger.info("Call type detected: %s | caller_number: %s", call_type, caller_number)
+    room_log("ROOM_START", call_type=call_type, build=AGENT_BUILD)
     await ctx.connect()
     participant = await ctx.wait_for_participant()
-    room_log("PARTICIPANT_CONNECTED", identity=participant.identity)
+    room_log("PARTICIPANT_CONNECTED", identity=participant.identity, call_type=call_type)
 
     # ------------------------------------------------------------------
-    # 4. Record call to DB
+    # 5. Record call to DB
     # ------------------------------------------------------------------
     call_id = await record_call_to_db(
         ctx.room.name,
-        call_type="web",
+        call_type=call_type,
+        caller_number=caller_number,
         caller_identity=participant.identity,
     )
     _current["call_id"] = call_id
-    room_log("CALL_RECORDED", call_id=call_id)
+    room_log("CALL_RECORDED", call_id=call_id, call_type=call_type, caller_number=caller_number)
 
     # ------------------------------------------------------------------
     # 5. Pull fresh memory_items directly from database
