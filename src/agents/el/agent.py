@@ -608,19 +608,28 @@ async def entrypoint(ctx: JobContext):
     logger.info("Per-room log: %s | BUILD: %s", room_log_path, AGENT_BUILD)
 
     # ------------------------------------------------------------------
-    # 3. Detect call type: SIP rooms are named "sip-call-+30XXXXXXXXXX"
+    # 3. Detect call type: SIP rooms are named "sip-call-_<number>_<suffix>"
     # ------------------------------------------------------------------
     room_name = ctx.room.name
     is_sip_call = room_name.startswith("sip-")
-    call_type = "phone" if is_sip_call else "web"
-    # Extract caller number from room name for SIP calls (e.g. "sip-call-+302810209931" → "+302810209931")
+    # DB check_call_type constraint: 'inbound' | 'outbound' | 'web'
+    call_type = "inbound" if is_sip_call else "web"
+    # Extract caller number from room name.
+    # SIPDispatchRuleIndividual format: sip-call-_00919521426456_9sxuWeauwnh3
+    # Direct format: sip-call-+302810209931
     caller_number: Optional[str] = None
     if is_sip_call:
-        parts = room_name.split("-", 2)  # ["sip", "call", "+302810209931"]
-        if len(parts) == 3 and parts[2].startswith("+"):
-            caller_number = parts[2]
-        elif len(parts) >= 2:
-            caller_number = parts[-1] or None
+        # Remove "sip-call-" prefix, then strip leading underscores
+        remainder = room_name[len("sip-call-"):].lstrip("_")
+        # Remove random suffix: everything after the second underscore group
+        # Format: <digits>_<randomsuffix>  — keep only <digits> part
+        if "_" in remainder:
+            caller_number = remainder.split("_")[0]
+        else:
+            caller_number = remainder or None
+        # Normalise: add + if purely numeric (international number without prefix)
+        if caller_number and caller_number.isdigit():
+            caller_number = "+" + caller_number
     logger.info("Call type detected: %s | caller_number: %s", call_type, caller_number)
     room_log("ROOM_START", call_type=call_type, build=AGENT_BUILD)
     await ctx.connect()
