@@ -570,7 +570,7 @@ async def request_fnc(req: JobRequest) -> None:
 # ENTRYPOINT
 # =============================================================================
 
-@server.rtc_session(agent_name="meallion-agent-en", on_request=request_fnc)
+@server.rtc_session(on_request=request_fnc)
 async def entrypoint(ctx: JobContext):
     # ------------------------------------------------------------------
     # LANGUAGE GUARD — exit immediately if this is the wrong agent.
