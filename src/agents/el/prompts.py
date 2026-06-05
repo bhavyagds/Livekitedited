@@ -279,8 +279,8 @@ def get_greeting(language: str = "el") -> str:
     prompts_content = get_prompts_content(language)
     if prompts_content:
         import re
-        match = re.search(r'##\s*Greeting\s*\n(.+?)(?:\n##|\Z)', prompts_content, re.DOTALL | re.IGNORECASE)
-        if match: return match.group(1).strip()
+        match = re.search(r'##\s*(Greeting|Χαιρετισμός)\s*\n(.+?)(?:\n##|\Z)', prompts_content, re.DOTALL | re.IGNORECASE)
+        if match: return match.group(2).strip()
     return "Γεια σας! Πώς μπορώ να σας βοηθήσω σήμερα;"
 
 
@@ -288,8 +288,8 @@ def get_closing(language: str = "el") -> str:
     prompts_content = get_prompts_content(language)
     if prompts_content:
         import re
-        match = re.search(r'##\s*Closing\s*\n(.+?)(?:\n##|\Z)', prompts_content, re.DOTALL | re.IGNORECASE)
-        if match: return match.group(1).strip()
+        match = re.search(r'##\s*(Closing|Κλείσιμο)\s*\n(.+?)(?:\n##|\Z)', prompts_content, re.DOTALL | re.IGNORECASE)
+        if match: return match.group(2).strip()
     return "Ευχαριστούμε! Αντίο σας!"
 
 
