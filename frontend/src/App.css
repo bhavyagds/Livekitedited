@@ -73,6 +73,10 @@ html,
 body,
 #root {
   height: 100%;
+  height: 100dvh;
+  overflow: hidden;
+  position: fixed;
+  width: 100%;
 }
 
 body {
@@ -82,7 +86,6 @@ body {
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  overflow: hidden;
 }
 
 /* ===========================================
@@ -553,57 +556,126 @@ body {
 /* Responsive adjustments for extremely tight/short screens and mobile devices */
 @media (max-height: 820px), (max-width: 768px) {
   .landing-page {
-    padding: var(--space-md);
+    padding: var(--space-sm) var(--space-md);
+    min-height: 100vh;
+    min-height: 100dvh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    overflow-y: auto;
+  }
+  .landing-content {
+    margin: 0;
+    padding: var(--space-sm) 0;
+  }
+  .logo-container {
+    margin-bottom: var(--space-md) !important;
+  }
+  .logo-text {
+    font-size: 2.8rem !important;
   }
   .central-orb-wrapper {
-    width: 200px;
-    height: 200px;
-    margin: var(--space-sm) 0 var(--space-md);
-  }
-  .orb-nebula {
     width: 160px;
     height: 160px;
+    margin: var(--space-xs) 0 var(--space-md);
+  }
+  .orb-nebula {
+    width: 140px;
+    height: 140px;
+    filter: blur(15px);
   }
   .ring-outer {
-    width: 150px;
-    height: 150px;
+    width: 120px;
+    height: 120px;
   }
   .ring-inner {
-    width: 100px;
-    height: 100px;
+    width: 80px;
+    height: 80px;
   }
   .orb-core {
-    width: 70px;
-    height: 70px;
+    width: 50px;
+    height: 50px;
+  }
+  .hero-section {
+    margin-bottom: var(--space-sm);
   }
   .hero-title {
-    font-size: 2.2rem;
+    font-size: 1.8rem;
   }
   .hero-subtitle {
-    font-size: 1rem;
-    line-height: 1.6;
+    font-size: 0.95rem;
+    line-height: 1.5;
   }
   .connect-button {
-    padding: 12px 30px;
-    font-size: 1.05rem;
+    padding: 10px 24px;
+    font-size: 1rem;
   }
   .features-section {
-    margin-top: var(--space-md);
+    margin-top: var(--space-sm);
     gap: var(--space-xs);
   }
   .feature-capsule {
-    padding: 8px 16px;
+    padding: 6px 12px;
   }
   .feature-icon-wrapper {
-    width: 24px;
-    height: 24px;
+    width: 20px;
+    height: 20px;
   }
   .feature-text {
-    font-size: 0.85rem;
+    font-size: 0.8rem;
   }
   .landing-footer {
     margin-top: var(--space-md);
-    font-size: 0.8rem;
+    font-size: 0.75rem;
+  }
+}
+
+/* Extra Tight/Short Screens (e.g. iPhone SE, low viewport heights) */
+@media (max-height: 670px) {
+  .logo-text {
+    font-size: 2.2rem !important;
+  }
+  .logo-tagline {
+    font-size: 0.75rem;
+    letter-spacing: 0.3em;
+  }
+  .central-orb-wrapper {
+    width: 110px;
+    height: 110px;
+    margin: var(--space-xs) 0 var(--space-sm);
+  }
+  .orb-nebula {
+    width: 90px;
+    height: 90px;
+  }
+  .ring-outer {
+    width: 80px;
+    height: 80px;
+  }
+  .ring-inner {
+    width: 55px;
+    height: 55px;
+  }
+  .orb-core {
+    width: 35px;
+    height: 35px;
+  }
+  .hero-title {
+    font-size: 1.5rem;
+  }
+  .hero-subtitle {
+    font-size: 0.85rem;
+  }
+  .connect-button {
+    padding: 8px 20px;
+    font-size: 0.9rem;
+  }
+  .features-section {
+    display: none; /* Hide feature capsules on extremely short viewports to avoid any scroll */
+  }
+  .landing-footer {
+    margin-top: var(--space-xs);
+    font-size: 0.7rem;
   }
 }
 
