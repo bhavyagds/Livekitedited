@@ -376,17 +376,14 @@ class LiveKitSIPService:
                 server = validation["validated_server"] or server
             
             # Build allowed addresses from provided list or use defaults
+            # NOTE: LiveKit SIP only supports exact IPs (CIDR) or exact hostnames — no wildcards
             allowed_addresses = [server]
-            server_parts = server.split('.')
-            if len(server_parts) >= 2:
-                # Add wildcard for subdomain matching
-                allowed_addresses.append(f"*.{server_parts[-2]}.{server_parts[-1]}")
             
             # Use provided allowed_ips if available
             if allowed_ips and len(allowed_ips) > 0:
                 allowed_addresses.extend(allowed_ips)
             else:
-                # Default: allow all IPs
+                # Default: allow all IPs (least restrictive, safest fallback)
                 allowed_addresses.append("0.0.0.0/0")
             
             # Create inbound trunk

@@ -2,8 +2,9 @@
 # Production setup with host networking
 
 # LiveKit Server Connection (localhost because host networking)
-api_key: devkey
-api_secret: secret
+# IMPORTANT: Must match LIVEKIT_API_KEY/SECRET in .env and livekit.prod.yaml
+api_key: meallion-livekit
+api_secret: a2791c552f996723181b1c5d756aea0697f2ef57b202170e80840bf6adabc1a6
 ws_url: ws://127.0.0.1:7880
 
 # Redis Configuration (localhost because host networking)

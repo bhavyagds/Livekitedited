@@ -115,11 +115,22 @@ async def create_yuboto_trunk():
     )
     
     # Yuboto SIP trunk configuration
+    # NOTE: LiveKit does NOT support wildcard domains (e.g. *.yuboto.com) in allowed_addresses.
+    # Use explicit IPs (CIDR notation) or exact hostnames only.
+    allowed = []
+    if YUBOTO_SIP_SERVER:
+        allowed.append(YUBOTO_SIP_SERVER)
+    explicit_ips = _parse_allowed_ips(YUBOTO_ALLOWED_IPS)
+    if explicit_ips:
+        allowed.extend(explicit_ips)
+    else:
+        # Fallback: accept from all IPs — less secure but avoids silent drops
+        allowed.append("0.0.0.0/0")
+
     inbound_trunk = api.SIPInboundTrunkInfo(
         name="Yuboto Greece",
         numbers=[YUBOTO_PHONE_NUMBER],
-        # Allow traffic from Yuboto's SIP servers
-        allowed_addresses=[YUBOTO_SIP_SERVER, "*.yuboto.com"] + _parse_allowed_ips(YUBOTO_ALLOWED_IPS),
+        allowed_addresses=allowed,
         auth_username=YUBOTO_SIP_USERNAME,
         auth_password=YUBOTO_SIP_PASSWORD,
     )
