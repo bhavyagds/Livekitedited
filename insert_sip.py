@@ -59,8 +59,19 @@ async def main():
             session.add(new_provider)
             await session.commit()
             
+    # Determine which agent to dispatch SIP calls to (must match registered worker name)
+    try:
+        settings_dict = await db.get_all_settings()
+        lang = (settings_dict.get("agent_language") or "el").strip().lower()
+    except Exception:
+        lang = "el"
+    agent_name = "meallion-agent-el" if lang == "el" else "meallion-agent-en"
+    print(f"Active language: {lang!r} → dispatching SIP calls to agent: {agent_name!r}")
+
     print("Running SIP force-resync (purges old trunks, recreates clean ones)...")
-    result = await force_resync_sip_providers()
+    from src.services.livekit_sip import get_sip_service
+    sip_service = get_sip_service()
+    result = await sip_service.sync_providers_from_db(force_resync=True, agent_name=agent_name)
     print(f"Resync result: {result}")
 
 if __name__ == "__main__":

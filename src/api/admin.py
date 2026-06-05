@@ -3,6 +3,7 @@ Meallion Admin Dashboard - Admin API Endpoints
 Handles authentication, knowledge base, prompts, calls, and system management.
 """
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta
@@ -877,6 +878,18 @@ async def update_language(
                 description="Default agent language (synced from Languages)",
                 updated_by=current_user["email"],
             )
+            # Also resync SIP dispatch rule to the newly active language's agent
+            new_agent = "meallion-agent-el" if language_code == "el" else "meallion-agent-en"
+            logger.info(f"Default language set to '{language_code}' — resyncing SIP dispatch rule to '{new_agent}'")
+            try:
+                import asyncio
+                from src.services.livekit_sip import get_sip_service
+                sip_service = get_sip_service()
+                asyncio.create_task(
+                    sip_service.sync_providers_from_db(force_resync=True, agent_name=new_agent)
+                )
+            except Exception as sip_e:
+                logger.warning(f"SIP resync after language change failed (non-critical): {sip_e}")
     
     return {"success": True, "message": "Language updated"}
 
@@ -1238,7 +1251,22 @@ async def update_setting(
         await refresh_cache()
     except Exception as e:
         logger.debug(f"Could not refresh agent cache: {e}")
-    
+
+    # If agent_language changed, update the SIP dispatch rule to target the new agent.
+    # The dispatch rule must point to the correct registered LiveKit worker name.
+    if key == "agent_language":
+        new_lang = str(data.value or "").strip().lower()
+        new_agent = "meallion-agent-el" if new_lang == "el" else "meallion-agent-en"
+        logger.info(f"agent_language changed to '{new_lang}' — resyncing SIP dispatch rule to target '{new_agent}'")
+        try:
+            from src.services.livekit_sip import get_sip_service
+            sip_service = get_sip_service()
+            asyncio.create_task(
+                sip_service.sync_providers_from_db(force_resync=True, agent_name=new_agent)
+            )
+        except Exception as sip_e:
+            logger.warning(f"SIP resync after language change failed (non-critical): {sip_e}")
+
     return {"success": True, "key": key, "value": data.value}
 
 

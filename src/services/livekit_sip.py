@@ -209,15 +209,16 @@ class LiveKitSIPService:
         room_prefix: str = "sip-call-",
         trunk_ids: Optional[List[str]] = None,
         metadata: Optional[str] = None,
+        agent_name: Optional[str] = None,
     ) -> Optional[Dict]:
         """Create a SIP dispatch rule to route calls to rooms.
         
         Uses SIPDispatchRuleIndividual which creates a NEW unique room per inbound
         call (with the given prefix). This is correct for voice bot use cases.
         
-        NOTE: SIPDispatchRuleDirect uses a static room name and does NOT support
-        template variables like ${caller.number} — they are stored literally and
-        will never be substituted. Always use Individual for per-call rooms.
+        IMPORTANT: agent_name MUST match the registered LiveKit worker name
+        (e.g. "meallion-agent-el"). If empty, LiveKit dispatches to agentName=""
+        which matches NO workers and the call drops with 'no response from servers'.
         """
         try:
             from livekit import api
@@ -239,6 +240,7 @@ class LiveKitSIPService:
                 trunk_ids=trunk_ids or [],
                 name=name,
                 metadata=metadata or '{"source": "phone", "type": "sip"}',
+                agent_name=agent_name or "",
             )
             result = await lk_api.sip.create_sip_dispatch_rule(request)
             
@@ -364,8 +366,14 @@ class LiveKitSIPService:
         phone_numbers: List[str],
         allowed_ips: List[str] = None,
         skip_validation: bool = False,
+        agent_name: Optional[str] = None,
     ) -> Dict:
-        """Configure a SIP provider (creates trunk and dispatch rule)."""
+        """Configure a SIP provider (creates trunk and dispatch rule).
+        
+        agent_name: The LiveKit worker name that should handle inbound calls
+                    (e.g. 'meallion-agent-el'). MUST be set — if empty, LiveKit
+                    dispatches to agentName='' which matches no workers.
+        """
         try:
             # Validate configuration first
             if not skip_validation:
@@ -413,11 +421,12 @@ class LiveKitSIPService:
             if not trunk:
                 return {"success": False, "error": "Failed to create trunk"}
             
-            # Create dispatch rule
+            # Create dispatch rule — agent_name MUST match the registered worker name
             rule = await self.create_dispatch_rule(
                 name=f"{provider_name} Dispatch",
                 room_prefix="sip-call-",
                 trunk_ids=[trunk["id"]],
+                agent_name=agent_name or "meallion-agent-el",  # default to Greek agent
                 metadata=f'{{"provider": "{provider_name}", "source": "phone"}}',
             )
             
@@ -482,7 +491,7 @@ class LiveKitSIPService:
             "errors": errors,
         }
 
-    async def sync_providers_from_db(self, force_resync: bool = False) -> Dict:
+    async def sync_providers_from_db(self, force_resync: bool = False, agent_name: Optional[str] = None) -> Dict:
         """
         Sync all SIP providers from database to LiveKit.
         Called on API startup to restore configuration after restarts.
@@ -492,6 +501,9 @@ class LiveKitSIPService:
                           before recreating them.  Use this after a config fix
                           (e.g. bad wildcard allowed_addresses) so stale trunks
                           are replaced rather than silently skipped.
+            agent_name: The LiveKit worker name to dispatch SIP calls to.
+                        MUST match the registered worker (e.g. 'meallion-agent-el').
+                        Defaults to 'meallion-agent-el' if not provided.
         """
         from src.services.database import get_database_service
         db = get_database_service()
@@ -545,7 +557,8 @@ class LiveKitSIPService:
                         password=provider["password"],
                         phone_numbers=provider["phone_numbers"],
                         allowed_ips=provider.get("allowed_ips", []),
-                        skip_validation=True,  # Skip validation since it was validated on creation
+                        skip_validation=True,
+                        agent_name=agent_name or "meallion-agent-el",
                     )
 
                     if result.get("success"):
