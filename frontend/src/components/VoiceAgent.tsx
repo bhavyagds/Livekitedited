@@ -201,6 +201,12 @@ export function VoiceAgent({ onDisconnect }: VoiceAgentProps) {
     const syncAudioMuteState = () => {
       document.querySelectorAll('audio').forEach(audioEl => {
         audioEl.muted = isSpeakerMuted;
+        // iOS Safari optimizations for low-latency playback
+        audioEl.setAttribute('playsinline', 'true');
+        audioEl.setAttribute('webkit-playsinline', 'true');
+        audioEl.setAttribute('preload', 'auto');
+        // Ensure background tab doesn't pause the audio processing
+        audioEl.disableRemotePlayback = true;
       });
     };
 

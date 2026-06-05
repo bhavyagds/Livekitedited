@@ -23,6 +23,28 @@ function App() {
     });
   }, []);
 
+  // Keep AudioContext active on iOS devices during interactions
+  useEffect(() => {
+    const resumeAudio = async () => {
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (AudioContextClass) {
+        // Find existing contexts or test state
+        const tempCtx = new AudioContextClass();
+        if (tempCtx.state === 'suspended') {
+          await tempCtx.resume().catch(() => {});
+        }
+        tempCtx.close().catch(() => {});
+      }
+    };
+
+    window.addEventListener('touchend', resumeAudio);
+    window.addEventListener('click', resumeAudio);
+    return () => {
+      window.removeEventListener('touchend', resumeAudio);
+      window.removeEventListener('click', resumeAudio);
+    };
+  }, []);
+
   const handleConnect = async () => {
     setIsConnecting(true);
     setError(null);
@@ -89,6 +111,22 @@ function App() {
     );
   }
 
+  // Optimized room configuration for low-latency audio streaming and quick reconnection on mobile networks
+  const roomOptions = {
+    publishDefaults: {
+      audioBitrate: 20000, // 20kbps is ideal for low-latency Opus voice streaming
+      dtx: true,          // Discontinuous transmission reduces mobile bandwidth usage
+    },
+    adaptiveStream: false, // Disables visual stream adjustments since this is voice-only
+    dynacast: false,
+    reconnectPolicy: {
+      nextRetryDelayInMs: (context: any) => {
+        // Quick reconnects for mobile network switches
+        return Math.min(1000 * Math.pow(1.5, context.retryCount), 6000);
+      }
+    }
+  };
+
   return (
     <LiveKitRoom
       token={connection.token}
@@ -98,6 +136,7 @@ function App() {
       video={false}
       onDisconnected={handleDisconnect}
       onError={handleError}
+      options={roomOptions}
       className="livekit-room"
     >
       <VoiceAgent onDisconnect={handleDisconnect} />
