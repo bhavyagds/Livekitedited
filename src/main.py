@@ -215,16 +215,6 @@ async def create_token(request: TokenRequest):
             "canPublish": True,
             "canSubscribe": True,
             "canPublishData": True,
-            # Backward-compatible dispatch property inside video grants
-            "agentDispatch": [{"agent_name": agent_name}],
-        },
-        # Standard LiveKit RoomConfiguration top-level claim in camelCase
-        "roomConfig": {
-            "agents": [
-                {
-                    "agentName": agent_name,
-                }
-            ]
         },
         "metadata": "",
         "name": request.name or request.identity,
