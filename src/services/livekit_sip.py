@@ -235,13 +235,30 @@ class LiveKitSIPService:
                 )
             )
             
-            request = api.CreateSIPDispatchRuleRequest(
+            # Specify which agent handles inbound calls via RoomConfiguration.
+            # agent_name must match @server.rtc_session(agent_name="...") in the agent.
+            room_config = None
+            if agent_name:
+                try:
+                    room_config = api.RoomConfiguration(
+                        agents=[api.RoomAgentDispatch(agent_name=agent_name)]
+                    )
+                    logger.info(f"Dispatch rule will target agent: {agent_name}")
+                except Exception as cfg_err:
+                    # Older SDK may not have RoomAgentDispatch — log and continue without it
+                    logger.warning(f"Could not set agent_name in RoomConfiguration: {cfg_err}")
+                    room_config = None
+
+            request_kwargs = dict(
                 rule=dispatch_rule,
                 trunk_ids=trunk_ids or [],
                 name=name,
                 metadata=metadata or '{"source": "phone", "type": "sip"}',
-                agent_name=agent_name or "",
             )
+            if room_config is not None:
+                request_kwargs["room_config"] = room_config
+
+            request = api.CreateSIPDispatchRuleRequest(**request_kwargs)
             result = await lk_api.sip.create_sip_dispatch_rule(request)
             
             logger.info(f"Created dispatch rule: {result.sip_dispatch_rule_id}")
