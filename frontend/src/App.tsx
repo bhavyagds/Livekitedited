@@ -28,6 +28,21 @@ function App() {
     setError(null);
 
     try {
+      // Pre-unlock audio context for iOS/Safari before async fetch
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (AudioContextClass) {
+        const audioCtx = new AudioContextClass();
+        if (audioCtx.state === 'suspended') {
+          audioCtx.resume().catch(() => {});
+        }
+      }
+      // Request mic permissions synchronously within the click gesture chain
+      await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      console.warn('Microphone pre-acquisition warning:', err);
+    }
+
+    try {
       const response = await fetch('/api/token', {
         method: 'POST',
         headers: {
