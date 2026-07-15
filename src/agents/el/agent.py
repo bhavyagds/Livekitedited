@@ -494,7 +494,7 @@ class DefaultAgent(Agent):
 
     def __init__(self, instructions: str) -> None:
         self.mcp_server = mcp.MCPServerHTTP(
-            url="https://gastromind.app.n8n.cloud/mcp/meallion-agent-phone",
+            url="https://vakmedia.app.n8n.cloud/mcp/meallion-agent-phone",
             client_session_timeout_seconds=3600,
         )
         mcp_toolset = mcp.MCPToolset(id="n8n-mcp", mcp_server=self.mcp_server)
